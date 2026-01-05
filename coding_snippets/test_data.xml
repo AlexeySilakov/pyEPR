@@ -1,0 +1,66 @@
+<?xml version="1.0" ?>
+<dictionary>
+  <item key="name">
+    <primitive type="str">John Doe</primitive>
+  </item>
+  <item key="age">
+    <primitive type="int">30</primitive>
+  </item>
+  <item key="height">
+    <primitive type="float">5.9</primitive>
+  </item>
+  <item key="is_student">
+    <primitive type="bool">False</primitive>
+  </item>
+  <item key="scores">
+    <numpy_array dtype="int32" shape="(4,)">
+      <data>VQAAAFwAAABOAAAAYAAAAA==</data>
+    </numpy_array>
+  </item>
+  <item key="grades">
+    <numpy_array dtype="float64" shape="(2, 2)">
+      <data>AAAAAABAVUAAAAAAAABXQAAAAAAAgFNAAAAAAAAAWEA=</data>
+    </numpy_array>
+  </item>
+  <item key="metadata">
+    <dict>
+      <item key="created">
+        <primitive type="str">2023-01-01</primitive>
+      </item>
+      <item key="version">
+        <primitive type="float">1.0</primitive>
+      </item>
+      <item key="active">
+        <primitive type="bool">True</primitive>
+      </item>
+      <item key="nested_array">
+        <numpy_array dtype="int64" shape="(5,)">
+          <data>AQAAAAAAAAACAAAAAAAAAAMAAAAAAAAABAAAAAAAAAAFAAAAAAAAAA==</data>
+        </numpy_array>
+      </item>
+    </dict>
+  </item>
+  <item key="tags">
+    <list type="list">
+      <item key="item">
+        <primitive type="str">python</primitive>
+      </item>
+      <item key="item">
+        <primitive type="str">numpy</primitive>
+      </item>
+      <item key="item">
+        <primitive type="str">xml</primitive>
+      </item>
+    </list>
+  </item>
+  <item key="coordinates">
+    <list type="tuple">
+      <item key="item">
+        <primitive type="float">10.5</primitive>
+      </item>
+      <item key="item">
+        <primitive type="float">20.3</primitive>
+      </item>
+    </list>
+  </item>
+</dictionary>
