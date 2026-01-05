@@ -258,10 +258,11 @@ class TabulatedPanel(wx.Panel):
         self.cmb_Scale = wx.ComboBox(self, choices=self.parent.ScaleChoices, style=wx.CB_DROPDOWN)
         idx = self.parent.ScaleChoices.index(self.parent.ScaleModeChoice)
         self.cmb_Scale.SetSelection(idx)  # Set default selection
-        
         sizer.Add(self.cmb_Scale, 0, wx.EXPAND)
         self.cmb_Scale.Bind(wx.EVT_COMBOBOX, self.on_Scale_change)
         
+        self.lbl_Status = wx.StaticText(self, label="> ")
+        sizer.Add(self.lbl_Status, 0, wx.EXPAND)
         self.add_datapanel()
         self.add_syspanel()
         self.add_optpanel()
@@ -292,6 +293,9 @@ class TabulatedPanel(wx.Panel):
     #     self.Bind(wx.EVT_MENU,
     #               lambda evt, pg=page: self.OnCloseTab(evt, pg),
     #               close_item)
+    def printStatus(self, message):
+        self.lbl_Status.SetLabel(f'> {message}')
+        
     def on_tabcontext(self, event):
         page = self.nb.GetSelection() #self.nb.GetCurrentPage()
         if self.nb.GetPageText(page) in ['Data', 'Exp', 'Opt']:
@@ -483,7 +487,16 @@ class TabulatedPanel(wx.Panel):
         self.parent.plot_panel.update_graph()
     def get_SysID(self, panel_handle):
         return self.Sys_panel.index(panel_handle)
-    
+    def set_tabColor(self, page, color):
+        bmp = wx.Bitmap(16, 16)
+        dc = wx.MemoryDC(bmp)
+        dc.SetBackground(wx.Brush(color))
+        dc.Clear()
+        dc.SelectObject(wx.NullBitmap)
+        self.imglst = wx.ImageList(16, 16, mask=True)
+        self.imglst.Add(bmp)
+        self.nb.SetImageList(self.imglst)
+        self.nb.SetPageImage(page, 0)
     def on_SysColor(self, event):
         
         apr = event.EventObject.GetParent()
@@ -517,10 +530,12 @@ class TabulatedPanel(wx.Panel):
             # Get the selected color
             selected_color = color_dialog.GetColourData().GetColour()
             self.btn_col[ID].SetBackgroundColour(selected_color)#SetBackgroundColour
-            self.Sys_panel[ID].SetPageColour(selected_color)
+            self.Sys_panel[ID].SetBackgroundColour(selected_color)
             #self.update_color_display(selected_color)
             #self.status_text.SetLabel(f"Basic picker: {selected_color.GetAsString(wx.C2S_HTML_SYNTAX)}")
-            
+            pan = event.EventObject.GetParent()
+            page = pan.GetParent().GetSelection()
+            self.set_tabColor(page, selected_color)
             if len(self.parent.Data[0]['simdata'])>=(ID-1):
                 self.parent.Data[0]['simcolor'][ID] = selected_color
                 self.parent.plot_panel.update_graph()
@@ -575,7 +590,7 @@ class MainFrame(wx.Frame):
         self.splitter_right.SetSashGravity(1)  # proportion of space for the top pane
         
         right_sizer.Add(self.splitter_right, 1, wx.EXPAND)
-
+        
         self.SetSizer(right_sizer)
 
         self.Centre()
@@ -688,7 +703,7 @@ class MainFrame(wx.Frame):
                 tData['show']=self.Data[0]['show']
                 self.Data[0] = tData
 
-        print(file_path)
+        # print(file_path)
         #
         #
 
@@ -769,7 +784,13 @@ class MainFrame(wx.Frame):
                 timest = time.time()
                 es.run()
                 timeed = time.time()-timest
-                print(f'time: {timeed}')
+                if timeed<0.1:
+                    sc = 1000
+                    un = 'ms'
+                else:
+                    sc = 1
+                    un = 's'
+                self.param_panel.printStatus(f'time: {timeed*sc:.3} {un}')
                 # plt.figure(2)
                 # plt.clf()
                 # plt.plot(es.rawX, es.rawY,'r')

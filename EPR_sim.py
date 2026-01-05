@@ -247,7 +247,7 @@ class EPRsim():
                         kk = int(np.round(id1*(2*self.Sys.S[0]+1)+id2))
                         transitions[kk][ii]=np.sqrt(prob[jj])
                         transitions[kk][ii+3]=fields
-                        print(f'{ii} # {kk}# {id1:2.3f},{id2:2.3f}: B={fields:05.2f}: {prob[jj]:.3f}')
+                        # print(f'{ii} # {kk}# {id1:2.3f},{id2:2.3f}: B={fields:05.2f}: {prob[jj]:.3f}')
         #print(f'{time.time()-timest}')
             # if eigvals[ii]>0 and eigvals[ii]<g1F:
             #     sexp = eigvecs[:,5]@sz.ravel()
