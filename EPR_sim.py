@@ -290,30 +290,54 @@ class EPRsim():
         # tf *=gg[:,None]
         # self.rawY = np.real(fftshift(fft( tf , axis=0), axes=(0,)))
         # self.Y = np.real(np.sum( fftshift(fft( np.delete(tf, np.s_[ra1:ra2], axis=0) ,axis=0),  axes=(0,)), axis=1) )
-                
     def generateSpectrum(self, ii, amp, fields):
-        gxyz2 = np.sort(self.Omega/fields)**2 # don't do fields.sort()... it is by pointer, so it will overwrite the source (stupid python crap)
+        h2 = np.sort(fields**2)[::-1]
+        h2x, h2y, h2z = h2[0], h2[1], h2[2]
+        # h2x > h2y > h2z
+        Xh2 = self.rawX**2
         
-        g2 = (self.Omega/self.rawX)**2 ### note that the index will run backwards (high g^2 first)! 
-        idx1 = np.argmin(np.abs(g2-gxyz2[0]))
-        # if g2[idx1]<gxyz2[0]: idx1-=1
+        idx1 = np.argmin(np.abs(Xh2-h2x))
+        idx2 = np.argmin(np.abs(Xh2-h2y))
+        idx3 = np.argmin(np.abs(Xh2-h2z))
         
-        idx2 = np.argmin(np.abs(g2-gxyz2[1]))
-        if g2[idx2]>gxyz2[1]: idx2+=1
-        idx21 = idx2  ### because stupid numpy does not include the last bit
-        idx3 = np.argmin(np.abs(g2-gxyz2[2]))
+        if Xh2[idx1]>h2x: idx1-=1
+        if Xh2[idx2]<h2y: idx2+=1
+        idx21 = idx2
+        if Xh2[idx3]<h2z: idx3+=1
         
-        if g2[idx3]>gxyz2[2]: idx3+=1
-        k2_1 = (gxyz2[2]-gxyz2[1])*(g2[idx2:idx1]-gxyz2[0])/(gxyz2[2]-g2[idx2:idx1])/(gxyz2[1]-gxyz2[0])
-        k2_2 = (gxyz2[2]-g2[idx3:idx21])*(gxyz2[1]-gxyz2[0])/(gxyz2[2]-gxyz2[1])/(g2[idx3:idx21]-gxyz2[0])
+        k2_1 = (h2y-h2z)*(h2x-Xh2[idx2:idx1])/(Xh2[idx2:idx1]-h2z)/(h2x-h2y)
+        pre1 =  np.sqrt(h2x*h2y*h2z)/Xh2[idx2:idx1]/np.sqrt((Xh2[idx2:idx1]-h2z)*(h2x-h2y))
         
-        pre1 = (gxyz2[2]-gxyz2[0])*(gxyz2[2]-gxyz2[1])/(gxyz2[2]-g2[idx2:idx1])/(gxyz2[1]-gxyz2[0])
-        pre2 = (gxyz2[2]-gxyz2[0])/(g2[idx3:idx21]-gxyz2[0])
+        k2_2 = (Xh2[idx3:idx21]-h2z)*(h2x-h2y)/(h2y-h2z)/(h2x-Xh2[idx3:idx21])
+        pre2 =  np.sqrt(h2x*h2y*h2z)/Xh2[idx3:idx21]/np.sqrt((h2y-h2z)*(h2x-Xh2[idx3:idx21]))
         
-        self.rawY[idx2:idx1,  ii] += amp*self.Omega**2*pre1*ellipk(k2_1)
-        self.rawY[idx3:idx21, ii] += amp*self.Omega**2*pre2*ellipk(k2_2)
+        self.rawY[idx2:idx1,  ii] += amp*pre1*ellipk(k2_1) #self.Omega**2
+        self.rawY[idx3:idx21, ii] += amp*pre2*ellipk(k2_2) #self.Omega**2
         
-        self.rawY[:, ii]*=self.rawX
+        #self.rawY[:, ii]*=self.rawX        
+    # def generateSpectrum(self, ii, amp, fields):
+    #     gxyz2 = np.sort(self.Omega/fields)**2 # don't do fields.sort()... it is by pointer, so it will overwrite the source (stupid python crap)
+        
+    #     g2 = (self.Omega/self.rawX)**2 ### note that the index will run backwards (high g^2 first)! 
+    #     idx1 = np.argmin(np.abs(g2-gxyz2[0]))
+    #     # if g2[idx1]<gxyz2[0]: idx1-=1
+        
+    #     idx2 = np.argmin(np.abs(g2-gxyz2[1]))
+    #     if g2[idx2]>gxyz2[1]: idx2+=1
+    #     idx21 = idx2  ### because stupid numpy does not include the last bit
+    #     idx3 = np.argmin(np.abs(g2-gxyz2[2]))
+        
+    #     if g2[idx3]>gxyz2[2]: idx3+=1
+    #     k2_1 = (gxyz2[2]-gxyz2[1])*(g2[idx2:idx1]-gxyz2[0])/(gxyz2[2]-g2[idx2:idx1])/(gxyz2[1]-gxyz2[0])
+    #     k2_2 = (gxyz2[2]-g2[idx3:idx21])*(gxyz2[1]-gxyz2[0])/(gxyz2[2]-gxyz2[1])/(g2[idx3:idx21]-gxyz2[0])
+        
+    #     pre1 = (gxyz2[2]-gxyz2[0])*(gxyz2[2]-gxyz2[1])/(gxyz2[2]-g2[idx2:idx1])/(gxyz2[1]-gxyz2[0])
+    #     pre2 = (gxyz2[2]-gxyz2[0])/(g2[idx3:idx21]-gxyz2[0])
+        
+    #     self.rawY[idx2:idx1,  ii] += amp*self.Omega**2*pre1*ellipk(k2_1)
+    #     self.rawY[idx3:idx21, ii] += amp*self.Omega**2*pre2*ellipk(k2_2)
+        
+    #     self.rawY[:, ii]*=self.rawX
         
     def findTransition(self, HAM, Sop, Iop):
         d, v = eigh(HAM, check_finite=False)

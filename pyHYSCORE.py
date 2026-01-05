@@ -411,8 +411,6 @@ class MatplotlibPanel(wx.Panel):
 
         self.canvas = FigureCanvasWxAgg(self, -1, self.figure)
         
-
-
         self.chk_FFT = wx.CheckBox(self, label="FFT(y)")
         self.chk_FFT.SetValue(self.showFFT)
         
@@ -506,7 +504,7 @@ class MatplotlibPanel(wx.Panel):
                 ma = np.max(np.max(data))*dd['zmax']
                 mi = ma*dd['zmin'] 
                 xmi,xma, ymi, yma = (dd['fmin'], dd['fmax'], dd['fmin'], dd['fmax'] )
-                axlabel='Time, $\mu$s'
+                axlabel='Time, $mu$s'
             else:
                 data = np.real(dd['data'][:,:,0])
                 axEx = [np.min(dd['ax']['x']), np.max(dd['ax']['x']), 
