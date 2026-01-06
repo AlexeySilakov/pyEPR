@@ -24,7 +24,7 @@ import time
 #git commit -m "message"  
 #git status
 
-VERSION=0.2
+VERSION=0.3
 
 class DictPopup(wx.Dialog):
     def __init__(self, parent, data_dict):
