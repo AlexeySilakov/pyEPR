@@ -19,6 +19,10 @@ import wx.lib.agw.flatnotebook as fnb
 
 import time
 
+# GIT commands :
+#git add *   # stage all files
+#git commit -m "message"  
+#git status
 
 VERSION=0.2
 
@@ -203,8 +207,11 @@ class MatplotlibPanel(wx.Panel):
                         if ii == 0:
                             tdata.append(ttdata[ii])
                             txdata.append(np.real(dd['simax'][ii]['x']))
-                            tcolor.append(self.parent.MPL_SUM_COLOR) 
-                            tlable.append('Sum simulation')
+                            if (len(dd['simdata'])>1):
+                                tcolor.append(self.parent.MPL_SUM_COLOR) 
+                            else:
+                                tcolor.append(ttcolor[0])
+                            tlable.append('Simulation')
                         else:
                             tdata[cnt] += ttdata[ii]
                         
@@ -266,12 +273,15 @@ class TabulatedPanel(wx.Panel):
         self.Color_FG_FILE_Title = wx.Colour(255, 255, 255)
         self.Color_BG_FILE_Main = wx.Colour(255, 255, 255)
         self.Color_FG_FILE_Main = wx.Colour(0, 0, 0)
+        self.PAGE_IMG_SIZE = 10
+        self.PageImgList = wx.ImageList(self.PAGE_IMG_SIZE, self.PAGE_IMG_SIZE, mask=False)
         
         # self.nb = wx.Notebook(self)
         self.nb = fnb.FlatNotebook(self, agwStyle=fnb.FNB_NO_X_BUTTON|fnb.FNB_NO_NAV_BUTTONS|
                                   fnb.FNB_SMART_TABS | fnb.FNB_NODRAG)
         self.nb.SetActiveTabTextColour(wx.Colour("black"))
         self.nb.SetBackgroundColour(wx.Colour("white"))
+        self.nb.SetImageList(self.PageImgList)
         #self.nb.Bind(wx.EVT_RIGHT_DOWN, self.OnTabRightClick)
         self.nbMenu = wx.Menu()
 
@@ -313,6 +323,8 @@ class TabulatedPanel(wx.Panel):
         self.add_syspanel()
         self.add_optpanel()
         self.SetSizer(sizer)
+        
+        
     # def OnTabRightClick(self, event):
     #     print('click')
     #     click_pos = event.GetPosition() event.GetSelection()
@@ -380,6 +392,8 @@ class TabulatedPanel(wx.Panel):
         
     def add_optpanel(self):
         # ------------- Opt
+        bmp = wx.Bitmap(self.PAGE_IMG_SIZE, self.PAGE_IMG_SIZE)
+        self.PageImgList.Add(bmp)
         
         self.Opt_panel = wx.Panel(self.nb)
         self.nb.AddPage(self.Opt_panel, "Opt") 
@@ -397,7 +411,9 @@ class TabulatedPanel(wx.Panel):
         if not hasattr(self, 'btn_nucdel'):
             self.btn_nucdel = []  
         if not hasattr(self, 'spn_sca'):
-            self.spn_sca = []             
+            self.spn_sca = []         
+
+        
         # ------------- Sys 
         self.parent.Sys.append(sysPar())
         self.Sys_panel.append(wx.Panel(self.nb))
@@ -452,12 +468,17 @@ class TabulatedPanel(wx.Panel):
         self.Sys_param.append(MypgPanel.PropGridPanel(self.Sys_panel[cnt], Prop_Dict = {}, onChangeFunc=self.on_Sys))
         self.Sys_param[cnt].SetFromParClean(self.parent.Sys[cnt].getDefaultDictEPR())
         
-        
         Syssizer.Add(self.Sys_param[cnt], 1, wx.EXPAND)
       
         self.Sys_panel[cnt].SetSizer(Syssizer)  
         
+        bmp = wx.Bitmap(self.PAGE_IMG_SIZE, self.PAGE_IMG_SIZE)
+        self.PageImgList.Add(bmp)
+        page = self.nb.GetPageCount()-1
+        self.set_tabColor(page, self.btn_col[cnt].GetBackgroundColour())
     def add_datapanel(self):
+        bmp = wx.Bitmap(self.PAGE_IMG_SIZE, self.PAGE_IMG_SIZE)
+        self.PageImgList.Add(bmp)
         # ----------Data panel
         self.data_panel = wx.Panel(self.nb)
         self.nb.AddPage(self.data_panel, "Data")
@@ -534,15 +555,16 @@ class TabulatedPanel(wx.Panel):
     def get_SysID(self, panel_handle):
         return self.Sys_panel.index(panel_handle)
     def set_tabColor(self, page, color):
-        bmp = wx.Bitmap(16, 16)
+        #bmp = wx.Bitmap(self.PAGE_IMG_SIZE, self.PAGE_IMG_SIZE)
+        bmp = self.PageImgList.GetBitmap(page)
         dc = wx.MemoryDC(bmp)
         dc.SetBackground(wx.Brush(color))
         dc.Clear()
         dc.SelectObject(wx.NullBitmap)
-        self.imglst = wx.ImageList(16, 16, mask=True)
-        self.imglst.Add(bmp)
-        self.nb.SetImageList(self.imglst)
-        self.nb.SetPageImage(page, 0)
+        
+        self.PageImgList.Replace(page, bmp)
+        #self.nb.SetImageList(self.PageImgList)
+        self.nb.SetPageImage(page, page)
     def on_SysColor(self, event):
         
         apr = event.EventObject.GetParent()
@@ -576,7 +598,7 @@ class TabulatedPanel(wx.Panel):
             # Get the selected color
             selected_color = color_dialog.GetColourData().GetColour()
             self.btn_col[ID].SetBackgroundColour(selected_color)#SetBackgroundColour
-            self.Sys_panel[ID].SetBackgroundColour(selected_color)
+            #self.Sys_panel[ID].SetBackgroundColour(selected_color)
             #self.update_color_display(selected_color)
             #self.status_text.SetLabel(f"Basic picker: {selected_color.GetAsString(wx.C2S_HTML_SYNTAX)}")
             pan = event.EventObject.GetParent()
@@ -622,7 +644,7 @@ class MainFrame(wx.Frame):
         self.MAIN_FOREGROUND_COLOR = wx.Colour(0, 0, 0)
         self.CTRL_BACK_COLOR = wx.Colour(255, 255, 255)
         self.MPL_SUM_COLOR = wx.Colour('red')
-        self.MPL_DIFF_COLOR = wx.Colour('red')
+        self.MPL_DIFF_COLOR = wx.Colour('green')
         
         right_sizer = wx.BoxSizer(wx.VERTICAL)
         
