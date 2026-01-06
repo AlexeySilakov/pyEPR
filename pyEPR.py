@@ -57,7 +57,7 @@ class MatplotlibPanel(wx.Panel):
         self.showSim = True
         self.showBG = False
         self.showDiff = False
-        self.showComp = False
+        self.showComp = True
 
         self.figure = Figure(figsize=(2, 2), dpi=100)
         self.axes = []
@@ -66,10 +66,15 @@ class MatplotlibPanel(wx.Panel):
         self.btn_LoaddFile = wx.Button(self, label="Load File")
         self.btn_LoaddFile.Bind(wx.EVT_BUTTON, self.parent.on_loadfile)
         
+        self.btn_LoadSession = wx.Button(self, label="Load Session")
+        self.btn_LoadSession.Bind(wx.EVT_BUTTON, self.parent.on_loadSession)
         
-        self.chk_BG = wx.CheckBox(self, label="Background")
-        self.chk_BG.SetValue(self.showBG)
-        self.chk_BG.Bind(wx.EVT_CHECKBOX, self.on_check)
+        self.btn_SaveSession = wx.Button(self, label="Save Session ")
+        self.btn_SaveSession.Bind(wx.EVT_BUTTON, self.parent.on_saveSession)
+        
+        # self.chk_BG = wx.CheckBox(self, label="Background")
+        # self.chk_BG.SetValue(self.showBG)
+        # self.chk_BG.Bind(wx.EVT_CHECKBOX, self.on_check)
         
         self.chk_SIM = wx.CheckBox(self, label="Simulation")
         self.chk_SIM.SetValue(self.showSim)
@@ -85,8 +90,10 @@ class MatplotlibPanel(wx.Panel):
 
         sizerH = wx.BoxSizer(wx.HORIZONTAL)
         sizerH.Add(self.btn_LoaddFile, 0, wx.EXPAND)
+        sizerH.Add(self.btn_LoadSession, 0, wx.EXPAND)
+        sizerH.Add(self.btn_SaveSession, 0, wx.EXPAND)
         sizerH.AddSpacer(20)
-        sizerH.Add(self.chk_BG, 0, wx.EXPAND)
+        # sizerH.Add(self.chk_BG, 0, wx.EXPAND)
         sizerH.Add(self.chk_SIM, 0, wx.EXPAND)
         sizerH.Add(self.chk_DIFF, 0, wx.EXPAND)
         sizerH.Add(self.chk_COMP, 0, wx.EXPAND)
@@ -103,9 +110,23 @@ class MatplotlibPanel(wx.Panel):
         self.toolbar.Realize()
         self.toolbar.update()
     def on_check(self, event): 
-        pass
+        #self.chk_BG.SetValue(self.showBG)
+        self.showSim = self.chk_SIM.GetValue()
+        self.showDiff = self.chk_DIFF.GetValue()
+        self.showComp = self.chk_COMP.GetValue()
+        
+        self.update_graph()
+        
     def update_graph(self):
+        ###### Thought about current algorithm: 
+        ###### So far this works quick, but I wonder if one can make it faster 
+        ###### if we don't redraw what has not changed
+        ###### - this may become an issue when we implement drag data with mouse
+        ###### - perhaps a separate function?
+        
         shw = []
+
+        
         if len(self.parent.Data)==0:
             return
 
@@ -125,6 +146,7 @@ class MatplotlibPanel(wx.Panel):
         axcnt= 0
         showLabels = True
         
+        #["Fit Peak-to-Peak", "Fit Max Signal", "Fit Min Signal", "Fit Double Integral", "none"]
         if self.parent.ScaleModeChoice == "Fit Peak-to-Peak":
             scalefnc = lambda data: np.real(np.max(data) - np.min(data))
         elif self.parent.ScaleModeChoice == "Fit Max Signal":
@@ -135,21 +157,21 @@ class MatplotlibPanel(wx.Panel):
             scalefnc = lambda data: np.abs(np.sum(np.cumsum(data)))
         else:
             scalefnc =  lambda data: 1.0
-        #["Fit Peak-to-Peak", "Fit Max Signal", "Fit Min Signal", "Fit Double Integral", "none"]
+        
         
         ### first row is always DATA
         for dd in self.parent.Data:
             if not dd['show']: continue
             fname =np.real(dd['fname'])
-            tdata = []
-            txdata = []
-            tydata = []
-            tcolor = []
-            tlable = []
+            tdata = [] # list of 1D data 
+            txdata = [] # list of X axes 
+            tydata = [] # list of Y axes
+            tcolor = [] # list of colors as wx.Colour 
+            tlable = [] # list of labels, acts as data identifiers, so those should be unique
             drawData = False
             drawSim = False
             drawDiff = False
-            datasc = 1.0
+            datasc = 1.0 # used as a standard scale to scale simulations to
             if dd is not None:
                 tdata.append(np.real(dd['data']))
                 txdata.append(np.real(dd['ax']['x']))
@@ -160,32 +182,56 @@ class MatplotlibPanel(wx.Panel):
                 datasc = scalefnc(np.real(dd['data']))
                 
             ### not sure if that is necessary, but just in case we have actual simualtion without data, I would separate these two
-            if dd['simactual'] and self.showSim:
+            if dd['simactual']:
+                cnt = len(tdata)
+                ttdata = []
+                ttxdata = []
+                ttydata = [] 
+                ttcolor = []
+                ttlable = []
+                
                 for ii in range(len(dd['simdata'])):
                     relsc = dd['simscale'][ii]
                     ssc = scalefnc(np.real(dd['simdata'][ii]))
-                    tdata.append(np.real(dd['simdata'][ii])*datasc/ssc*relsc)
-                    txdata.append(np.real(dd['simax'][ii]['x']))
+                    ttdata.append(np.real(dd['simdata'][ii])*datasc/ssc*relsc)
+                    ttxdata.append(np.real(dd['simax'][ii]['x']))
                     #tydata.append(np.real(dd['ax']['y']))
-                    tcolor.append(dd['simcolor'][ii]) ### need a way to define color
-                    tlable.append(f'Sim {ii}')
+                    ttcolor.append(dd['simcolor'][ii]) ### need a way to define color
+                    ttlable.append(f'Sim {ii}')
+                    
+                    if self.showSim:
+                        if ii == 0:
+                            tdata.append(ttdata[ii])
+                            txdata.append(np.real(dd['simax'][ii]['x']))
+                            tcolor.append(self.parent.MPL_SUM_COLOR) 
+                            tlable.append('Sum simulation')
+                        else:
+                            tdata[cnt] += ttdata[ii]
+                        
                     drawSim = True
-            #### add difference
-          
+                if self.showDiff and (dd is not None) and drawSim:
+                    if dd['data'].shape==tdata[-1].shape:
+                        tt = dd['data']-tdata[-1]
+                        tdata.append(tt)
+                        txdata.append(np.real(dd['simax'][0]['x']))
+                        tcolor.append(self.parent.MPL_DIFF_COLOR) 
+                        tlable.append('difference')
+                        
+                if self.showComp and drawSim and (len(dd['simdata'])>1):
+                    tdata+=ttdata ### not sure if this is the most pythonian way of adding lists together
+                    txdata+=ttxdata
+                    tcolor+=ttcolor
+                    tlable+=ttlable
+                    
             if makenew:                                             
                 self.axes[axcnt]=self.figure.add_subplot(nData, 1, axcnt+1)
                 
-            ## clean what is not necessary
+            ## clean what is not supposed to be there anymore
             for line in self.axes[axcnt].lines:
                 if line.get_label() not in tlable:
                     line.remove()
                     
             for ii in range(len(tdata)):
-                # drawData = True
-                # data = np.real(dd['data'])
-                # fname =np.real(dd['fname'])
-                # xax = np.real(dd['ax']['x'])
-                # wxc = dd['colour']
                 r, g, b, a = tcolor[ii].Red(), tcolor[ii].Green(), tcolor[ii].Blue(), tcolor[ii].Alpha()
                 color = (r / 255.0, g / 255.0, b / 255.0, a / 255.0)
                 hasData = False
@@ -196,7 +242,7 @@ class MatplotlibPanel(wx.Panel):
                         line.set_ydata(tdata[ii])
                         line.set_label(tlable[ii])
                         line.set_color(color)
-                        
+                ##  adding new data if it is not there
                 if not hasData:
                     data = self.axes[axcnt].plot(txdata[ii], tdata[ii],
                                      label=tlable[ii],
@@ -541,6 +587,7 @@ class TabulatedPanel(wx.Panel):
                 self.parent.plot_panel.update_graph()
                 
         color_dialog.Destroy()
+        
     def on_SysScale(self, event):
         apr = event.EventObject.GetParent()
         ID = self.get_SysID(apr)
@@ -570,9 +617,12 @@ class MainFrame(wx.Frame):
         self.currentPath = path
         self.ini_file = os.path.join(path, "pyEPR.ini")
 
-        self.BackgroundColor = wx.Colour(255, 255, 255)
-        self.ForegroundColor = wx.Colour(0, 0, 0)
-        self.ControlBackgroundColor = wx.Colour(255, 255, 255)
+        ###  "Set in stone" properties are in capital. Ideally pull them from ini
+        self.MAIN_BACK_COLOR = wx.Colour(255, 255, 255)
+        self.MAIN_FOREGROUND_COLOR = wx.Colour(0, 0, 0)
+        self.CTRL_BACK_COLOR = wx.Colour(255, 255, 255)
+        self.MPL_SUM_COLOR = wx.Colour('red')
+        self.MPL_DIFF_COLOR = wx.Colour('red')
         
         right_sizer = wx.BoxSizer(wx.VERTICAL)
         
@@ -689,7 +739,8 @@ class MainFrame(wx.Frame):
                      'mwFreq':freq, 'BMin': float(np.min(ax['x'])), 'BMax': float(np.max(ax['x'])),
                      'nPoints':max(ax['x'].shape), 'colour':wx.Colour(wx.BLUE),
                      'fullpath':path, 'show':True, 'scale':1.0, 'temp':-0.1,
-                     'simdata':None, 'simax':None, 'simmethod':None, 'simactual':False,
+                     'simdata':[], 'simax':[], 'simmethod':[], 'simactual':False,
+                     'simcolor':[], 'simscale': [],
                      }
             if len(self.Data)==0:
                 self.Data.append(tData)
@@ -700,6 +751,8 @@ class MainFrame(wx.Frame):
                 tData['simax']=self.Data[0]['simax']
                 tData['simmethod']=self.Data[0]['simmethod']
                 tData['simactual']=self.Data[0]['simactual']
+                tData['simcolor']=self.Data[0]['simcolor']
+                tData['simscale']=self.Data[0]['simscale']
                 tData['show']=self.Data[0]['show']
                 self.Data[0] = tData
 
@@ -818,6 +871,268 @@ class MainFrame(wx.Frame):
         except Exception:
             return
 
+            
+    def on_saveSession(self, event):
+        if hasattr(wx, 'OSX_FILEDIALOG_ALWAYS_SHOW_TYPES'):
+            wx.SystemOptions.SetOption(wx.OSX_FILEDIALOG_ALWAYS_SHOW_TYPES, 1)
+        with wx.FileDialog(self, "Save Session", wildcard="Session xml (*.xml)|*.xml|All files (*.*)|*.*",
+                           defaultDir=self.currentPath, 
+                           style=wx.FD_SAVE|wx.FD_OVERWRITE_PROMPT) as fileDialog:
+        
+            if fileDialog.ShowModal() == wx.ID_CANCEL:
+                return     # the user changed their mind
+        
+            # Proceed loading the file chosen by the user
+            pathname = fileDialog.GetPath()
+            self.dumpXMLSave(pathname)
+        
+    def dumpXMLSave(self, pathname):
+        # otherwise ask the user what new file to open
+            try:
+                    
+                data_dict = {'Data': self.Data,
+                             'Opt': self.param_panel.Opt_param.parameters, 
+                             'Sys':[],
+                             }
+                for ii in range(len(self.param_panel.Sys_param)):
+                    data_dict['Sys'].append(self.param_panel.Sys_param[ii].parameters.copy()) #### yes, this is a pointer if not copied .. how can you tell, you cannot ... freaking python... I hate it soo much. 
+                    col = self.param_panel.btn_col[ii].GetBackgroundColour()
+                    data_dict['Sys'][ii]['SysColor'] = col #.GetRGBA()
+                    data_dict['Sys'][ii]['SysScale'] = self.param_panel.spn_sca[ii].GetValue()
+                    
+                self.save_mixed_dict_xml(data_dict, pathname)
+            except IOError:
+                wx.LogError("Cannot open file '%s'." % newfile)
+                
+    def save_mixed_dict_xml(self, data_dict, filename):
+        import xml.etree.ElementTree as ET
+        from xml.dom import minidom
+        import base64
+        """
+        Save a dictionary with mixed data types to an XML file.
+        - NumPy arrays are encoded as base64 strings with metadata
+        - Other data types (str, int, float, bool) are saved as text
+        - Nested dictionaries are handled recursively
+        """
+        def create_element(parent, key, value):
+            """Create XML element for a value"""
+            element = ET.SubElement(parent, 'item')
+            element.set('key', str(key))
+    
+            if isinstance(value, np.ndarray):
+                # Handle numpy arrays
+                array_element = ET.SubElement(element, 'numpy_array')
+                array_element.set('dtype', str(value.dtype))
+                array_element.set('shape', str(value.shape))
+    
+                # Encode array data as base64
+                data_b64 = base64.b64encode(value.tobytes()).decode('utf-8')
+                data_element = ET.SubElement(array_element, 'data')
+                data_element.text = data_b64
+    
+            elif isinstance(value, dict):
+                # Handle nested dictionaries
+                dict_element = ET.SubElement(element, 'dict')
+                for k, v in value.items():
+                    create_element(dict_element, k, v)
+    
+            elif isinstance(value, (list, tuple)):
+                # Handle lists and tuples
+                list_element = ET.SubElement(element, 'list')
+                list_element.set('type', type(value).__name__)
+                for item in value:
+                    create_element(list_element, 'item', item)
+            elif isinstance(value, wx.Colour):
+                # Handle primitive types
+                primitive_element = ET.SubElement(element, 'wxcolour')
+                primitive_element.set('type', type(value).__name__)
+                primitive_element.text = str(value.GetRGBA())
+            else:
+                # Handle primitive types
+                primitive_element = ET.SubElement(element, 'primitive')
+                primitive_element.set('type', type(value).__name__)
+                primitive_element.text = str(value)
+    
+        # Create root element
+        root = ET.Element('dictionary')
+    
+        # Process each item in the dictionary
+        for key, value in data_dict.items():
+            create_element(root, key, value)
+    
+        # Create pretty-printed XML
+        rough_string = ET.tostring(root, encoding='unicode')
+        reparsed = minidom.parseString(rough_string)
+        pretty_xml = reparsed.toprettyxml(indent="  ")
+    
+        # Write to file
+        with open(filename, 'w') as f:
+            f.write(pretty_xml)
+            
+    def on_loadSession(self, event):
+        """
+        On Mac macOS in the open file dialog the filter choice box is not shown by default. 
+        Instead all given wildcards are applied at the same time: 
+            To enforce the display of the filter choice set the corresponding 
+            wx.SystemOptions before calling the file open dialog:
+        """
+        if hasattr(wx, 'OSX_FILEDIALOG_ALWAYS_SHOW_TYPES'):
+            wx.SystemOptions.SetOption(wx.OSX_FILEDIALOG_ALWAYS_SHOW_TYPES, 1)
+        with wx.FileDialog(self, "Load Session", wildcard="Session xml (*.xml)|*.xml|All files (*.*)|*.*",
+                           defaultDir=self.currentPath, 
+                           style=wx.FD_OPEN) as fileDialog:
+            if fileDialog.ShowModal() == wx.ID_CANCEL:
+                return  
+            pathname = fileDialog.GetPath()
+            print(pathname)
+            self.loadXML(pathname)            
+    def loadXML(self, filename):    
+        try:
+            result = self.load_mixed_dict_xml(filename)
+            if 'Data' in result.keys():
+                self.Data = result['Data'].copy()
+            else:
+                self.Data = []
+            #if len(self.Data)>0:
+                
+            self.update_datatree()
+                
+            if 'Sys' in result.keys():
+                if type(result['Sys'])==list:
+                    for ii in range(len(result['Sys'])):
+                        if ii>len(self.param_panel.Sys_param):
+                            self.param_panel.add_syspanel()
+                        self.param_panel.spn_sca[ii].SetValue(result['Sys'][ii]['SysScale'])
+                        col = result['Sys'][ii]['SysColor']
+                        #col.SetRGBA(result['Sys'][ii]['SysColor'])
+                        if type(result['Sys'][ii]['SysColor'])==wx.Colour:
+                            self.param_panel.btn_col[ii].SetBackgroundColour(col)
+                        del(result['Sys'][ii]['SysColor'])
+                        del(result['Sys'][ii]['SysScale'])
+                        self.param_panel.Sys_param[ii].SetFromParClean(result['Sys'][ii].copy())
+                        self.Sys[ii].setFromCtrl(self.param_panel.Sys_param[ii].parameters)
+
+                else:
+                    self.RaiseError('Wrong Sys in the loaded XML. I expect a list')
+                    
+            if 'Opt' in result.keys():
+                self.param_panel.Opt_param.SetFromParClean(result['Opt'].copy())
+                self.Opt.setFromCtrl(self.param_panel.Opt_param.parameters)  
+                
+            #self.param_panel.update_filelist()    
+            self.plot_panel.update_graph() 
+            
+            if type(self.Data[0]['simdata'])!=type(None):
+                dlg = wx.MessageDialog(self,
+                        "The loaded session contains a simulation resut. \t Would you like to refresh it by running simulaiton again?",
+                        "Actualize simulation", wx.YES_NO | wx.ICON_QUESTION)
+                result = dlg.ShowModal()
+                dlg.Destroy()
+                if result == wx.ID_YES:
+                    self.runSim()
+                
+        except Exception:
+            wx.MessageBox(f"Loading {filename} failed.", "Cannot load",
+                          wx.OK | wx.ICON_INFORMATION)
+    
+    def load_mixed_dict_xml(self, filename):
+        import xml.etree.ElementTree as ET
+        import base64
+        """
+        Load a dictionary from XML file, reconstructing original structure and types.
+        """
+    
+        def parse_element(element):
+            """Parse XML element and reconstruct value"""
+            # Get the key from the element
+            key = element.get('key')
+    
+            # Check what type of element this is
+            numpy_array = element.find('numpy_array')
+            dict_element = element.find('dict')
+            list_element = element.find('list')
+            wxcolour_element = element.find('wxcolour')
+            primitive_element = element.find('primitive')
+    
+            if numpy_array is not None:
+                # Reconstruct numpy array
+                dtype = numpy_array.get('dtype')
+                shape = eval(numpy_array.get('shape'))  # Safe for simple shapes
+                data_b64 = numpy_array.find('data').text
+                data = base64.b64decode(data_b64)
+                try:
+                    array = np.array(np.frombuffer(data, dtype=dtype)).reshape(shape)
+                except Exception:
+                    array = None
+                return key, array
+    
+            elif dict_element is not None:
+                # Reconstruct dictionary
+                result = {}
+                for item in dict_element.findall('item'):
+                    if item.get('key') == "orisel":
+                        pass 
+                    k, v = parse_element(item)
+                    if k is not None:
+                        result[k] = v
+                return key, result
+    
+            elif list_element is not None:
+                # Reconstruct list/tuple
+                items = []
+                for item in list_element.findall('item'):
+                    _, v = parse_element(item)
+                    items.append(v)
+                list_type = list_element.get('type')
+                if list_type == 'tuple':
+                    return key, tuple(items)
+                else:
+                    return key, items
+    
+            elif primitive_element is not None:
+                # Reconstruct primitive type
+                value_type = primitive_element.get('type')
+                value_text = primitive_element.text
+    
+                if value_type == 'int':
+                    return key, int(value_text)
+                elif value_type == 'float':
+                    return key, float(value_text)
+                elif value_type == 'NoneType':
+                    return key, None
+                elif value_type == 'float64':
+                    return key, float(value_text)
+                elif value_type == 'bool':
+                    return key, value_text.lower() == 'true'
+                else:
+                    return key, value_text
+                
+            elif wxcolour_element is not None:
+                # Reconstruct primitive type
+                value_type = wxcolour_element.get('type')
+                value_text = wxcolour_element.text
+    
+                if value_type == 'Colour':
+                    val = wx.Colour()
+                    val.SetRGBA(int(value_text))
+                    return key, val
+                else:
+                    return key, value_text                
+    
+            return key, None
+    
+        # Parse XML file
+        tree = ET.parse(filename)
+        root = tree.getroot()
+    
+        # Reconstruct dictionary
+        result = {}
+        for item in root.findall('item'):
+            key, value = parse_element(item)
+            if key is not None:
+                result[key] = value
+    
+        return result        
 if __name__ == "__main__":
     wx.SystemOptions.SetOption("msw.dpiAware", "1")
     app = wx.App(False)
