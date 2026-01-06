@@ -67,6 +67,17 @@ class MatplotlibPanel(wx.Panel):
         self.axes = []
         self.canvas = FigureCanvasWxAgg(self, -1, self.figure)
         
+        self.canvas.mpl_connect("pick_event", self.on_pick)
+        self.canvas.mpl_connect("motion_notify_event", self.on_motion)
+        self.canvas.mpl_connect("button_release_event", self.on_release)
+        # self.canvas.mpl_connect("axes_enter_event", self.on_axes)
+        self._dragging_line = None
+        self._press_ydata = None
+        self._orig_ydata = None
+        self._dy = 0.0
+        self._line_label = None
+        self.shifts = {}
+        
         self.btn_LoaddFile = wx.Button(self, label="Load File")
         self.btn_LoaddFile.Bind(wx.EVT_BUTTON, self.parent.on_loadfile)
         
@@ -108,11 +119,44 @@ class MatplotlibPanel(wx.Panel):
         self.toolbar = NavigationToolbar2WxAgg(self.canvas)
 
         sizer.Add(self.toolbar, 0, wx.LEFT|wx.EXPAND)
-
         
         self.SetSizer(sizer)
         self.toolbar.Realize()
         self.toolbar.update()
+    # def on_axes(self, event):
+    #     print('sss')
+    def on_pick(self, event):
+        """Called when a line is clicked."""
+        print('aaa')
+        if not isinstance(event.artist, type(self.axes[0].lines[0])):
+            return
+        
+        self._dragging_line = event.artist
+        self._press_ydata = event.mouseevent.ydata
+        self._orig_ydata = self._dragging_line.get_ydata().copy()
+        self._line_label =self._dragging_line.get_label()
+        
+    def on_motion(self, event):
+        """Called when mouse is moved."""
+        if self._dragging_line is None:
+            return
+        if event.ydata is None:
+            return
+
+        self._dy = event.ydata - self._press_ydata
+        new_y = self._orig_ydata + self._dy
+
+        self._dragging_line.set_ydata(new_y)
+        self.canvas.draw_idle()
+
+    def on_release(self, event):
+        """Called when mouse button is released."""
+        self._dragging_line = None
+        self._press_ydata = None
+        self._orig_ydata = None
+        self.shifts[self._line_label]+=self._dy
+        
+        
     def on_check(self, event): 
         #self.chk_BG.SetValue(self.showBG)
         self.showSim = self.chk_SIM.GetValue()
@@ -216,7 +260,7 @@ class MatplotlibPanel(wx.Panel):
                             tdata[cnt] += ttdata[ii]
                         
                     drawSim = True
-                if self.showDiff and (dd is not None) and drawSim:
+                if self.showDiff and (dd is not None) and (len(dd['simdata'])>0):
                     if dd['data'].shape==tdata[-1].shape:
                         tt = dd['data']-tdata[-1]
                         tdata.append(tt)
@@ -245,15 +289,21 @@ class MatplotlibPanel(wx.Panel):
                 for line in self.axes[axcnt].lines:
                     if tlable[ii] == line.get_label():
                         hasData = True
+                        dy = self.shifts[tlable[ii]]
                         line.set_xdata(txdata[ii])
-                        line.set_ydata(tdata[ii])
+                        line.set_ydata(tdata[ii]+dy)
                         line.set_label(tlable[ii])
                         line.set_color(color)
                 ##  adding new data if it is not there
                 if not hasData:
-                    data = self.axes[axcnt].plot(txdata[ii], tdata[ii],
+                    if not tlable[ii] in self.shifts:
+                        self.shifts[tlable[ii]] = 0.0
+                    dy = self.shifts[tlable[ii]]
+                    data = self.axes[axcnt].plot(txdata[ii], tdata[ii]+dy,
                                      label=tlable[ii],
-                                     color=color)
+                                     color=color,
+                                     picker=5)
+
                 
 
             axcnt+=1
