@@ -19,6 +19,11 @@ import wx.lib.agw.flatnotebook as fnb
 
 import time
 
+wx.Log.SetActiveTarget(wx.LogStderr())
+wx.Log.SetLogLevel(3)  # verbose
+import faulthandler
+faulthandler.enable()
+
 # GIT commands :
 #git add *   # stage all files
 #git commit -m "message"  
@@ -78,13 +83,26 @@ class MatplotlibPanel(wx.Panel):
         self._line_label = None
         self.shifts = {}
         
-        self.btn_LoaddFile = wx.Button(self, label="Load File")
+        loadEPR_bmp = wx.Image('./icons/load_spectrum_icon@2x-8.png', wx.BITMAP_TYPE_PNG).Scale(26, 30).ConvertToBitmap()
+        loadXML_bmp = wx.Image('./icons/load_xml_icon@2x-8.png', wx.BITMAP_TYPE_PNG).Scale(26, 30).ConvertToBitmap()
+        saveXML_bmp = wx.Image('./icons/save_xml_icon@2x-8.png', wx.BITMAP_TYPE_PNG).Scale(31, 30).ConvertToBitmap()
+        self.btn_LoaddFile = wx.BitmapButton(self, style= wx.BU_AUTODRAW| wx.NO_BORDER, size=(37, 37))
+        self.btn_LoaddFile.SetBitmapLabel(loadEPR_bmp) 
+        self.btn_LoaddFile.SetBackgroundColour(wx.NullColour) 
+        self.btn_LoaddFile.SetToolTip("Load Spectrum")
         self.btn_LoaddFile.Bind(wx.EVT_BUTTON, self.parent.on_loadfile)
         
-        self.btn_LoadSession = wx.Button(self, label="Load Session")
+        #self.btn_LoadSession = wx.Button(self, label="Load Session")
+        self.btn_LoadSession = wx.BitmapButton(self, style= wx.BU_AUTODRAW | wx.NO_BORDER, size=(37, 37))
+        self.btn_LoadSession.SetBitmapLabel(loadXML_bmp) 
+        self.btn_LoadSession.SetBackgroundColour(wx.NullColour)
+        self.btn_LoadSession.SetToolTip("Load Session (from .xml)")
         self.btn_LoadSession.Bind(wx.EVT_BUTTON, self.parent.on_loadSession)
         
-        self.btn_SaveSession = wx.Button(self, label="Save Session ")
+        self.btn_SaveSession = wx.BitmapButton(self, style=wx.BU_AUTODRAW| wx.NO_BORDER, size=(37, 37))
+        self.btn_SaveSession.SetBitmapLabel(saveXML_bmp) 
+        self.btn_SaveSession.SetBackgroundColour(wx.NullColour)
+        self.btn_SaveSession.SetToolTip("Save Session (as .xml)")
         self.btn_SaveSession.Bind(wx.EVT_BUTTON, self.parent.on_saveSession)
         
         # self.chk_BG = wx.CheckBox(self, label="Background")
@@ -118,7 +136,7 @@ class MatplotlibPanel(wx.Panel):
         sizer.Add(self.canvas, 1, wx.EXPAND)
         self.toolbar = NavigationToolbar2WxAgg(self.canvas)
 
-        sizer.Add(self.toolbar, 0, wx.LEFT|wx.EXPAND)
+        sizer.Add(self.toolbar, 0, wx.LEFT)
         
         self.SetSizer(sizer)
         self.toolbar.Realize()
@@ -126,8 +144,7 @@ class MatplotlibPanel(wx.Panel):
     # def on_axes(self, event):
     #     print('sss')
     def on_pick(self, event):
-        """Called when a line is clicked."""
-        print('aaa')
+        # Called when a line is clicked.
         if not isinstance(event.artist, type(self.axes[0].lines[0])):
             return
         
@@ -137,24 +154,27 @@ class MatplotlibPanel(wx.Panel):
         self._line_label =self._dragging_line.get_label()
         
     def on_motion(self, event):
-        """Called when mouse is moved."""
-        if self._dragging_line is None:
-            return
-        if event.ydata is None:
-            return
+        # Called when mouse is moved.
+        if self._dragging_line is not None:
+            if event.ydata is None:
+                return
 
-        self._dy = event.ydata - self._press_ydata
-        new_y = self._orig_ydata + self._dy
+            self._dy = event.ydata - self._press_ydata
+            new_y = self._orig_ydata + self._dy
 
-        self._dragging_line.set_ydata(new_y)
-        self.canvas.draw_idle()
+            self._dragging_line.set_ydata(new_y)
+            self.canvas.draw_idle()
 
     def on_release(self, event):
-        """Called when mouse button is released."""
-        self._dragging_line = None
-        self._press_ydata = None
-        self._orig_ydata = None
-        self.shifts[self._line_label]+=self._dy
+        # Called when mouse button is released. Also called on zoom, so be careful
+        if self._dragging_line is not None:
+            self.shifts[self._line_label]+=self._dy
+            self._dragging_line = None
+            self._press_ydata = None
+            self._orig_ydata = None
+            self._line_label = None
+            self._dy = 0.0
+        
         
         
     def on_check(self, event): 
@@ -238,37 +258,42 @@ class MatplotlibPanel(wx.Panel):
                 ttcolor = []
                 ttlable = []
                 
+                
                 for ii in range(len(dd['simdata'])):
                     relsc = dd['simscale'][ii]
                     ssc = scalefnc(np.real(dd['simdata'][ii]))
                     ttdata.append(np.real(dd['simdata'][ii])*datasc/ssc*relsc)
                     ttxdata.append(np.real(dd['simax'][ii]['x']))
                     #tydata.append(np.real(dd['ax']['y']))
-                    ttcolor.append(dd['simcolor'][ii]) ### need a way to define color
+                    ttcolor.append(dd['simcolor'][ii]) 
                     ttlable.append(f'Sim {ii}')
-                    
-                    if self.showSim:
+
+                    if self.showSim or self.showDiff: 
                         if ii == 0:
-                            tdata.append(ttdata[ii])
-                            txdata.append(np.real(dd['simax'][ii]['x']))
-                            if (len(dd['simdata'])>1):
-                                tcolor.append(self.parent.MPL_SUM_COLOR) 
-                            else:
-                                tcolor.append(ttcolor[0])
-                            tlable.append('Simulation')
+                            tsum = ttdata[ii].copy()
                         else:
-                            tdata[cnt] += ttdata[ii]
-                        
-                    drawSim = True
+                            tsum += ttdata[ii]
+
+                if self.showSim:
+                    tdata.append(tsum)
+                    txdata.append(np.real(dd['simax'][0]['x']))
+                    if (len(ttdata)>1):
+                        tcolor.append(self.parent.MPL_SUM_COLOR) 
+                        tlable.append('Simulation')
+                    else:
+                        tcolor.append(ttcolor[0])
+                        tlable.append(ttlable[0])
+                    
+
                 if self.showDiff and (dd is not None) and (len(dd['simdata'])>0):
-                    if dd['data'].shape==tdata[-1].shape:
-                        tt = dd['data']-tdata[-1]
+                    if dd['data'].shape==tsum.shape:
+                        tt = dd['data']-tsum
                         tdata.append(tt)
                         txdata.append(np.real(dd['simax'][0]['x']))
                         tcolor.append(self.parent.MPL_DIFF_COLOR) 
                         tlable.append('difference')
                         
-                if self.showComp and drawSim and (len(dd['simdata'])>1):
+                if self.showComp and (len(dd['simdata'])>1):
                     tdata+=ttdata ### not sure if this is the most pythonian way of adding lists together
                     txdata+=ttxdata
                     tcolor+=ttcolor
@@ -277,13 +302,12 @@ class MatplotlibPanel(wx.Panel):
             if makenew:                                             
                 self.axes[axcnt]=self.figure.add_subplot(nData, 1, axcnt+1)
                 
-            ## clean what is not supposed to be there anymore
-            for line in self.axes[axcnt].lines:
-                if line.get_label() not in tlable:
-                    line.remove()
-                    
             for ii in range(len(tdata)):
-                r, g, b, a = tcolor[ii].Red(), tcolor[ii].Green(), tcolor[ii].Blue(), tcolor[ii].Alpha()
+                try:
+                    r, g, b, a = tcolor[ii].Red(), tcolor[ii].Green(), tcolor[ii].Blue(), tcolor[ii].Alpha()
+                except:
+                    print(tcolor)
+                    r, g, b, a = 0, 0, 0, 255
                 color = (r / 255.0, g / 255.0, b / 255.0, a / 255.0)
                 hasData = False
                 for line in self.axes[axcnt].lines:
@@ -304,7 +328,10 @@ class MatplotlibPanel(wx.Panel):
                                      color=color,
                                      picker=5)
 
-                
+            ## clean what is not supposed to be there anymore
+            for line in self.axes[axcnt].lines:
+                if line.get_label() not in tlable:
+                    line.remove()  
 
             axcnt+=1
         self.figure.tight_layout()
@@ -338,9 +365,11 @@ class TabulatedPanel(wx.Panel):
         rename_id = wx.ID_ANY
         close_id  = wx.ID_ANY
         self.TAB_ADD_NAME = "Add a system"
+        self.TAB_DUP_NAME = "Duplicate system"
         self.TAB_REN_NAME = "Rename system"
         self.TAB_DEL_NAME = "Delete system"
         add_item = self.nbMenu.Append(rename_id, self.TAB_ADD_NAME)
+        add_item = self.nbMenu.Append(rename_id, self.TAB_DUP_NAME)
         #rename_item = self.nbMenu.Append(rename_id, self.TAB_REN_NAME)
         del_item  = self.nbMenu.Append(close_id,  self.TAB_DEL_NAME)
         self.nbMenu.Bind(wx.EVT_MENU, self.on_tabcontext)
@@ -373,34 +402,6 @@ class TabulatedPanel(wx.Panel):
         self.add_syspanel()
         self.add_optpanel()
         self.SetSizer(sizer)
-        
-        
-    # def OnTabRightClick(self, event):
-    #     print('click')
-    #     click_pos = event.GetPosition() event.GetSelection()
-    #     page, flags = self.nb.HitTest(click_pos)
-    #     if page == wx.NOT_FOUND:
-    #         # Click was on the empty area of the notebook (e.g. on the
-    #         # background between tabs).  We simply ignore it.
-    #         print(flags)
-    #         event.Skip()
-    #         return
-    #     menu = wx.Menu()
-
-    #     rename_id = wx.ID_ANY
-    #     close_id  = wx.ID_ANY
-
-    #     rename_item = menu.Append(rename_id, "Rename Tab")
-    #     close_item  = menu.Append(close_id,  "Close Tab")
-
-    #     # Bind the menu commands – we capture the *page* value with a lambda
-    #     # so the handler knows which tab the user clicked on.
-    #     self.Bind(wx.EVT_MENU,
-    #               lambda evt, pg=page: self.OnRenameTab(evt, pg),
-    #               rename_item)
-    #     self.Bind(wx.EVT_MENU,
-    #               lambda evt, pg=page: self.OnCloseTab(evt, pg),
-    #               close_item)
     def printStatus(self, message):
         self.lbl_Status.SetLabel(f'> {message}')
         
@@ -409,15 +410,14 @@ class TabulatedPanel(wx.Panel):
         if self.nb.GetPageText(page) in ['Data', 'Exp', 'Opt']:
             print('cannot change Data or Opt tabs')
             return
-        mm = wx.GetMousePosition()
-        print(mm)
+        #mm = wx.GetMousePosition()
+        #print(mm)
         idx = event.GetId()
         menu = self.nbMenu.FindItemById(idx).GetItemLabel()
         """Prompt for a new name and set it on the selected tab."""
 
         
         if menu == self.TAB_REN_NAME:
-            
             #idx = getattr(self.nb, "_rightClickedTab", None)
             dlg = wx.TextEntryDialog(self,
                                      "Enter a new title for the tab:",
@@ -428,6 +428,9 @@ class TabulatedPanel(wx.Panel):
             dlg.Destroy()
         elif menu == self.TAB_ADD_NAME:
             self.add_syspanel()
+        elif menu == self.TAB_DUP_NAME:
+            #page ## TBD
+            pass
         elif menu == self.TAB_DEL_NAME:
             print('TBD')
             ### figure out how to find the index corresponence
@@ -646,8 +649,14 @@ class TabulatedPanel(wx.Panel):
         # Show dialog
         if color_dialog.ShowModal() == wx.ID_OK:
             # Get the selected color
+            ### the dumb thing about python is that color we get is just a pointer (no one tells you that, of cause). 
+            ### when we delete dialog and try do a couple updates with deleting objects, we also delete 
+            ### the memory cell with color ... so we get "Windows fatal exception: access violation" 
+            ### when we try access it again ... Idiots. I freaking hate python 
+            ### ow, and you cannot do selected_color.copy(), like you do with arrays;   
+
             selected_color = color_dialog.GetColourData().GetColour()
-            self.btn_col[ID].SetBackgroundColour(selected_color)#SetBackgroundColour
+            self.btn_col[ID].SetBackgroundColour(wx.Colour(selected_color.GetRGBA()) )#SetBackgroundColour
             #self.Sys_panel[ID].SetBackgroundColour(selected_color)
             #self.update_color_display(selected_color)
             #self.status_text.SetLabel(f"Basic picker: {selected_color.GetAsString(wx.C2S_HTML_SYNTAX)}")
@@ -655,7 +664,7 @@ class TabulatedPanel(wx.Panel):
             page = pan.GetParent().GetSelection()
             self.set_tabColor(page, selected_color)
             if len(self.parent.Data[0]['simdata'])>=(ID-1):
-                self.parent.Data[0]['simcolor'][ID] = selected_color
+                self.parent.Data[0]['simcolor'][ID] = wx.Colour(selected_color.GetRGBA())
                 self.parent.plot_panel.update_graph()
                 
         color_dialog.Destroy()
@@ -1072,7 +1081,7 @@ class MainFrame(wx.Frame):
             if 'Sys' in result.keys():
                 if type(result['Sys'])==list:
                     for ii in range(len(result['Sys'])):
-                        if ii>len(self.param_panel.Sys_param):
+                        if ii>=len(self.param_panel.Sys_param):
                             self.param_panel.add_syspanel()
                         self.param_panel.spn_sca[ii].SetValue(result['Sys'][ii]['SysScale'])
                         col = result['Sys'][ii]['SysColor']
