@@ -12,6 +12,7 @@ from matplotlib.backends.backend_wxagg import NavigationToolbar2WxAgg
 
 import brukerread as Mybr
 import classPropGridPanel as MypgPanel
+
 from SysPar import sysPar, expPar
 from EPR_sim import optEPR, EPRsim
 
@@ -19,17 +20,18 @@ import wx.lib.agw.flatnotebook as fnb
 
 import time
 
-wx.Log.SetActiveTarget(wx.LogStderr())
-wx.Log.SetLogLevel(3)  # verbose
-import faulthandler
-faulthandler.enable()
+# ############### for debugging purposes
+# wx.Log.SetActiveTarget(wx.LogStderr())
+# wx.Log.SetLogLevel(3)  # verbose
+# import faulthandler
+# faulthandler.enable()
 
 # GIT commands :
 #git add *   # stage all files
 #git commit -m "message"  
 #git status
 
-VERSION=0.3
+VERSION=0.4
 
 class DictPopup(wx.Dialog):
     def __init__(self, parent, data_dict):
@@ -56,9 +58,7 @@ class DictPopup(wx.Dialog):
 
         panel.SetSizer(vbox)
         
-# --------------------------------------------------------------------------- #
 # Matplotlib Canvas Panel
-# --------------------------------------------------------------------------- #
 class MatplotlibPanel(wx.Panel):
     def __init__(self, parent, mainWindow, *args, **kw):
         super().__init__(parent, *args, **kw)
@@ -141,8 +141,7 @@ class MatplotlibPanel(wx.Panel):
         self.SetSizer(sizer)
         self.toolbar.Realize()
         self.toolbar.update()
-    # def on_axes(self, event):
-    #     print('sss')
+    
     def on_pick(self, event):
         # Called when a line is clicked.
         if not isinstance(event.artist, type(self.axes[0].lines[0])):
@@ -175,8 +174,6 @@ class MatplotlibPanel(wx.Panel):
             self._line_label = None
             self._dy = 0.0
         
-        
-        
     def on_check(self, event): 
         #self.chk_BG.SetValue(self.showBG)
         self.showSim = self.chk_SIM.GetValue()
@@ -186,14 +183,11 @@ class MatplotlibPanel(wx.Panel):
         self.update_graph()
         
     def update_graph(self):
-        ###### Thought about current algorithm: 
-        ###### So far this works quick, but I wonder if one can make it faster 
+        ###### Tought about current algorithm: 
+        ###### So far code below works quick, but I wonder if one can make it faster 
         ###### if we don't redraw what has not changed
-        ###### - this may become an issue when we implement drag data with mouse
-        ###### - perhaps a separate function?
         
         shw = []
-
         
         if len(self.parent.Data)==0:
             return
@@ -225,7 +219,6 @@ class MatplotlibPanel(wx.Panel):
             scalefnc = lambda data: np.abs(np.sum(np.cumsum(data)))
         else:
             scalefnc =  lambda data: 1.0
-        
         
         ### first row is always DATA
         for dd in self.parent.Data:
@@ -336,12 +329,11 @@ class MatplotlibPanel(wx.Panel):
             axcnt+=1
         self.figure.tight_layout()
         self.canvas.draw()
-# --------------------------------------------------------------------------- #
+ 
 # Tabulated Options Panel
-# --------------------------------------------------------------------------- #   
 class TabulatedPanel(wx.Panel):
     def __init__(self, parent, mainWindow, *args, **kwargs):
-        super().__init__(parent,size=(200, 400), *args, **kwargs)
+        super().__init__(parent,size=(300, 400), *args, **kwargs)
         self.parent = mainWindow
         self.Sys_panel = []
         self.Sys_param = []
@@ -444,7 +436,6 @@ class TabulatedPanel(wx.Panel):
             del(self.Sys_param[idx])
         
     def add_optpanel(self):
-        # ------------- Opt
         bmp = wx.Bitmap(self.PAGE_IMG_SIZE, self.PAGE_IMG_SIZE)
         self.PageImgList.Add(bmp)
         
@@ -456,6 +447,7 @@ class TabulatedPanel(wx.Panel):
         self.Opt_param.SetFromParClean(self.parent.Opt.getDefaultDict())
         Optsizer.Add(self.Opt_param, 1, wx.EXPAND)
         self.Opt_panel.SetSizer(Optsizer) 
+        
     def add_syspanel(self):
         if not hasattr(self, 'btn_col'):
             self.btn_col = []
@@ -465,7 +457,6 @@ class TabulatedPanel(wx.Panel):
             self.btn_nucdel = []  
         if not hasattr(self, 'spn_sca'):
             self.spn_sca = []         
-
         
         # ------------- Sys 
         self.parent.Sys.append(sysPar())
@@ -518,7 +509,9 @@ class TabulatedPanel(wx.Panel):
        
         Syssizer.Add(btnszr, 0, wx.EXPAND)
         
-        self.Sys_param.append(MypgPanel.PropGridPanel(self.Sys_panel[cnt], Prop_Dict = {}, onChangeFunc=self.on_Sys))
+        self.Sys_param.append(MypgPanel.PropGridPanel(self.Sys_panel[cnt], Prop_Dict = {}, 
+                                                      onChangeFunc=self.on_Sys, 
+                                                      showModFunc = True))
         self.Sys_param[cnt].SetFromParClean(self.parent.Sys[cnt].getDefaultDictEPR())
         
         Syssizer.Add(self.Sys_param[cnt], 1, wx.EXPAND)
@@ -556,29 +549,7 @@ class TabulatedPanel(wx.Panel):
 
         self.data_tree = MypgPanel.PropGridPanel(self.data_panel, Prop_Dict={}, onChangeFunc=self.on_Data)
         self.data_tree.SetFromParClean(self.parent.currentExp)
-        # self.filetree = wxpg.PropertyGrid(
-        #     self.data_panel,
-        #     style=wxpg.PG_DEFAULT_STYLE | 
-        #           wxpg.PG_SPLITTER_AUTO_CENTER |
-        #           wxpg.PG_HIDE_MARGIN |
-        #           wxpg.PG_TOOLTIPS |
-        #           wxpg.PG_NO_INTERNAL_BORDER
-        # )
-        
-        # self.filetree.SetCellBackgroundColour(self.Color_BG_FILE_Main)
-        # self.filetree.SetCellTextColour(self.Color_FG_FILE_Main)
-        # self.filetree.SetMarginColour(self.Color_BG_FILE_Main)
-        # #self.filetree.SetSelectionBackgroundColour(wx.Colour(200, 255, 255))
-        
-        # self.filetree.SetCaptionBackgroundColour(self.Color_BG_FILE_Inact)
-        # self.filetree.SetCaptionTextColour(self.Color_FG_FILE_Title)
-        # cat1 = self.filetree.Append(wxpg.PropertyCategory("Nothing loaded yet"))
 
-
-        # self.filetree.AppendIn(cat1, wxpg.FloatProperty("MW Freq", value=9.43))
-        # self.filetree.AppendIn(cat1, wxpg.FloatProperty("B0", value=350.0))
-        # self.filetree.AppendIn(cat1, wxpg.FloatProperty("tau", value=120.0))
-        
         sizer.Add(self.data_tree, 1, wx.EXPAND | wx.ALL, 0)
         
         self.data_panel.SetSizer(sizer)        
@@ -837,10 +808,6 @@ class MainFrame(wx.Frame):
                 tData['show']=self.Data[0]['show']
                 self.Data[0] = tData
 
-        # print(file_path)
-        #
-        #
-
         self.update_datatree()
         self.plot_panel.update_graph()
     def update_datatree(self):
@@ -898,7 +865,6 @@ class MainFrame(wx.Frame):
         self.Data[0]['simscale'] = []
         self.Data[0]['simactual']=False
         try:
-            #### TBD: do multiple simulations 
             es = EPRsim()
             
             for ii in range(len(self.Sys)):
@@ -925,11 +891,6 @@ class MainFrame(wx.Frame):
                     sc = 1
                     un = 's'
                 self.param_panel.printStatus(f'time: {timeed*sc:.3} {un}')
-                # plt.figure(2)
-                # plt.clf()
-                # plt.plot(es.rawX, es.rawY,'r')
-                # plt.plot(es.X, es.Y,'b')
-                # plt.show()
                 if 'ax' in self.Data[0].keys():
                     self.Data[0]['simax'].append(self.Data[0]['ax'].copy())
                 else:
@@ -970,7 +931,6 @@ class MainFrame(wx.Frame):
     def dumpXMLSave(self, pathname):
         # otherwise ask the user what new file to open
             try:
-                    
                 data_dict = {'Data': self.Data,
                              'Opt': self.param_panel.Opt_param.parameters, 
                              'Sys':[],
@@ -1100,7 +1060,6 @@ class MainFrame(wx.Frame):
                 self.param_panel.Opt_param.SetFromParClean(result['Opt'].copy())
                 self.Opt.setFromCtrl(self.param_panel.Opt_param.parameters)  
                 
-            #self.param_panel.update_filelist()    
             self.plot_panel.update_graph() 
             
             if type(self.Data[0]['simdata'])!=type(None):

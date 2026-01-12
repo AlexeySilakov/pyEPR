@@ -1,6 +1,7 @@
 import wx
 import wx.propgrid as wxpg
 import numpy as np
+import classFunctionModPG as MypgMod
 # ----------------------------------------------------------------------
 # Custom SpinCtrlDouble Editor for Float Properties in a wxPropertyGrid. 
 # Largely based on answers from qwen3-coder:30b, with earier versions 
@@ -209,7 +210,8 @@ class SpinCtrlDoubleEditor(wxpg.PGEditor):
 #     # Accept a LABEL string and update the underlying integer value
 #     # -----------------------------------------------------------
 #     def SetValue(self, value):
-#         if isinstance(value, str):
+#       
+#  if isinstance(value, str):
 #             labels = self.GetChoiceStrings()
 #             if value in labels:
 #                 idx = labels.index(value)  # label → index
@@ -225,7 +227,7 @@ class SpinCtrlDoubleEditor(wxpg.PGEditor):
 #   We put everything on a panel. Kind of safer that way, allowing for more versatility of deployment
 # -------------------------------------------------------
 class PropGridPanel(wx.Panel):
-    def __init__(self, parent, Prop_Dict={}, onChangeFunc=None, onUpdate=None, *args, **kwargs):
+    def __init__(self, parent, Prop_Dict={}, onChangeFunc=None, onUpdate=None, showModFunc = False, *args, **kwargs):
         super().__init__(parent, *args, **kwargs)
         sizer = wx.BoxSizer(wx.VERTICAL)
         
@@ -235,12 +237,47 @@ class PropGridPanel(wx.Panel):
         self.onUpdate = onUpdate
         self.increment = {}
         self.debug = False
+        self.current_sash = 200
+        if showModFunc:
+            self.splitter = wx.SplitterWindow(self, style=wx.SP_3D)
+            self.parentpanel = wx.Panel(self.splitter)
+            self.func_panel=MypgMod.FunctionModPanel(self.splitter, 
+                                                     PropertyGridPanel = self, 
+                                                     style = wx.SUNKEN_BORDER)
+            sizer.Add(self.splitter, 1, wx.EXPAND)
+            
+        else:
+            self.splitter = None
+            self.func_panel = None
+            self.parentpanel = self
+            
+            
         self.pg = wxpg.PropertyGrid(
-            self,
+            self.parentpanel,
             style=wxpg.PG_SPLITTER_AUTO_CENTER | wxpg.PG_AUTO_SORT | wx.TAB_TRAVERSAL | wxpg.PG_NO_INTERNAL_BORDER,
 
         ) #wxpg.PG_HIDE_MARGIN |
         
+        if showModFunc:
+            insizer = wx.BoxSizer(wx.VERTICAL)
+            insizer.Add(self.pg, 1, wx.EXPAND)
+            self.btn_sash = wx.Button(self.parentpanel, label="▼", size=(-1, 15))
+            self.btn_sash.Bind(wx.EVT_BUTTON, self.adjustSash)
+            insizer.Add(self.btn_sash, 0, wx.EXPAND, 0)
+            self.parentpanel.SetSizer(insizer)
+            
+            self.splitter.SplitHorizontally(
+                self.parentpanel, self.func_panel,
+                sashPosition=self.current_sash   # initial height of the top pane
+            )
+            self.splitter.SetSashGravity(0)
+            
+            
+        else:
+            sizer.Add(self.pg, 1, wx.EXPAND)
+        
+        self.SetSizer(sizer)
+        self.Layout()        
         # self.pg.SetExtraStyle(pg.PG_EX_)
         ## this is important to suppress native menue and allow spinctrl to get its own goind
         self.pg.Bind(wx.EVT_CONTEXT_MENU, lambda evt: None) #
@@ -252,9 +289,22 @@ class PropGridPanel(wx.Panel):
         if type(Prop_Dict)!=type(None):
             if len(Prop_Dict)>0:
                 self.SetPropsClean(Prop_Dict)
-        sizer.Add(self.pg, 1, wx.EXPAND)
-        self.SetSizer(sizer)
+        
 
+        
+    def adjustSash(self, event):
+        if self.btn_sash.GetLabel()=="▼": 
+            self.current_sash = self.splitter.GetSashPosition()
+            self.splitter.Unsplit(self.func_panel)
+            self.btn_sash.SetLabel("▲")
+            
+            # self.splitter.SetSashPosition(self.GetSize()[1])
+            # self.splitter.SetSashGravity(1)
+        else:
+            self.splitter.SplitHorizontally(self.parentpanel, self.func_panel, self.current_sash)
+            # self.splitter.SetSashPosition(self.current_sash)
+            self.btn_sash.SetLabel("▼")
+            # self.splitter.SetSashGravity(0)
     
     def OnValueChanged(self, event, prop=None):
         if type(event)==wx._core.SpinDoubleEvent:
@@ -482,14 +532,22 @@ class PropGridPanel(wx.Panel):
                 else:
                     raise AttributeError(f"😭 {key} is of higher dimention than we can handle") 
             elif type(par[key])==dict:
-                depDict = self.to_PropDict(par[key])
-                outDict.append(
-                        {'name': key,
+                if key=='functions':
+                    outDict.append({'name': key,
                          'label': key,
-                         'type': 'dict',
-                         'value': depDict,
+                         'type': 'func',
+                         'value': par[key],
                          'choices': []}
-                    )
+                                   )
+                else:
+                    depDict = self.to_PropDict(par[key])
+                    outDict.append(
+                            {'name': key,
+                             'label': key,
+                             'type': 'dict',
+                             'value': depDict,
+                             'choices': []}
+                        )
             elif type(par[key])==wx._core.Colour:
                 outDict.append(
                     {'name': key,
@@ -498,7 +556,7 @@ class PropGridPanel(wx.Panel):
                    'value': par[key],
                    'choices': []}
                 )
-            ### PROBLEM: we only have a list in here. how do I get the default value?
+            ### PROBLEM: we only have a list in here. how do I get the default value? expect first value to be the current one 
             elif type(par[key])==list:
                 hasChoices = False
                 if len(par[key])==2:
@@ -527,8 +585,8 @@ class PropGridPanel(wx.Panel):
 # -------------------------------------------------------
 if __name__ == "__main__":
     app = wx.App(False)
-    frame = wx.Frame(None)
-    pg = PropGridPanel(frame)
+    frame = wx.Frame(None, size=(800, 800))
+    pg = PropGridPanel(frame, showModFunc=True)
     pg.debug = True
     prop=pg.GetDefaultDictionary()
     pg.SetFromParClean(prop)
