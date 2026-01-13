@@ -245,7 +245,7 @@ class PropGridPanel(wx.Panel):
                                                      PropertyGridPanel = self, 
                                                      style = wx.SUNKEN_BORDER)
             sizer.Add(self.splitter, 1, wx.EXPAND)
-            
+            self.parameters['functions'] = {}
         else:
             self.splitter = None
             self.func_panel = None
@@ -353,7 +353,7 @@ class PropGridPanel(wx.Panel):
                     self.parameters[prop.GetLabel()] = value
                 else:
                     self.parameters[parent.GetLabel()][prop.GetLabel()] = value
-
+        
         if type(self.onChangeFunc)!=type(None):
             self.onChangeFunc(self, parent.GetLabel(), prop.GetLabel(), value)
         if self.debug: print(self.parameters)
@@ -446,6 +446,9 @@ class PropGridPanel(wx.Panel):
                         pro = self.pg.Append(wxpg.EnumProperty(name=name1, label=label1, labels=choic1, value=value1))
                         pro.SetHelpString(ttips)
                 ncat+=1
+            elif typ=='functions':
+                if self.func_panel is not None:
+                    self.func_panel.set_dict(value, clean=True)
             else:
                 pass
     def Clear(self):
@@ -535,7 +538,7 @@ class PropGridPanel(wx.Panel):
                 if key=='functions':
                     outDict.append({'name': key,
                          'label': key,
-                         'type': 'func',
+                         'type': 'functions',
                          'value': par[key],
                          'choices': []}
                                    )

@@ -28,6 +28,10 @@ class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
         self.F_BDEL_ID = 4
         self.F_BDEF_ID = 5
         
+        self.V_SIZE_ID = 0
+        self.V_TEXT_ID = 1
+        self.V_SPIN_ID = 2
+        
         self.vbox = wx.BoxSizer(wx.VERTICAL)
         
         self.btn_addf = wx.Button(self, label="add function", size=(-1, -1))
@@ -95,25 +99,39 @@ class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
         count= 0
         for ctlist in self.function_ctrls:
             if event.GetEventObject() in ctlist:
-                sizer = ctlist[self.F_SIZE_ID]
-                self.func_container.Detach(sizer)
-                ctlist[self.F_FUNC_ID].Destroy()
-                ctlist[self.F_COMP_ID].Destroy()
-                ctlist[self.F_TEXT_ID].Destroy()
-                ctlist[self.F_BDEL_ID].Destroy()
-                ctlist[self.F_BDEF_ID].Destroy()
-                sizer.Clear()
-                del sizer
-                del self.function_ctrls[count]
+                self.del_function(count)
                 break
             count+=1  
-            
         self.Layout()
         self.SetupScrolling()
         self.recompute()
-    def set_functions(self, func_list):
+        
+    def del_function(self, idx):
+        ctlist = self.function_ctrls[idx]
+        sizer = ctlist[self.F_SIZE_ID]
+        self.func_container.Detach(sizer)
+        ctlist[self.F_FUNC_ID].Destroy()
+        ctlist[self.F_COMP_ID].Destroy()
+        ctlist[self.F_TEXT_ID].Destroy()
+        ctlist[self.F_BDEL_ID].Destroy()
+        ctlist[self.F_BDEF_ID].Destroy()
+        sizer.Clear()
+        del sizer
+        del self.function_ctrls[count]
+    def clear_all(self):
+        for idx in range(len(self.function_ctrls,0,-1)): ### need to go backwards so that idx is always valid
+            self.del_function(idx)
+        self.Layout()
+        self.recompute()
+        self.SetupScrolling()
+        
+    def set_functions(self, func_list, clean=False):
+        if clean:
+            self.clear_all() 
+                
         for var, func in func_list:
             self.on_addfunc()
+
             cnt = len(self.function_ctrls)-1
             choices = self.function_ctrls[cnt][self.F_COMP_ID]
             if var in choices:
@@ -121,6 +139,33 @@ class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
             else:
                 print(f'{var} is not in choices={choices}')
             self.function_ctrls[cnt][self.F_FUNC_ID].SetValue(func)
+        self.recompute()
+        self.SetupScrolling()
+    def get_dict(self):
+        dct = {}
+        dct['func'] = []
+        for ctrls in self.function_ctrls:
+            var = ctrls[self.F_COMP_ID].GetStringSelection()
+            fun = ctrls[self.F_FUNC_ID].GetValue()
+            dct['func'].append([var, fun])
+        dct['var'] = {}
+        for name, info in self.variables.items():
+            dct['var'][name]=info[self.V_SPIN_ID].GetValue()
+        return dct
+    def set_dict(self, dct, clean=True):
+        if 'func' not in dct.keys():
+            print('set_dict: no func in dct. Add some funk')
+            return
+        if clean:
+            self.clear_all()
+        self.set_functions(dct['func'])
+        if 'var' in dct.keys():
+            for name, num in self.dct['var'].items(): 
+                self.add_variable(name)
+                self.variables[name][V_SPIN_ID].SetValue(float(num))
+        self.Layout()
+        self.recompute()
+        self.SetupScrolling()
     def on_define(self, event):
         varnames=[]
         for ctlist in self.function_ctrls:
@@ -156,9 +201,9 @@ class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
                         self.remove_variable(nn)
     
                 self.Layout()
-                self.SetupScrolling()
+                
                 self.recompute()
-    
+                self.SetupScrolling()
             except Exception:
                 pass
     def get_pgNames(self):
@@ -208,12 +253,12 @@ class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
 
         self.vars_container.Add(row, 0, wx.EXPAND)
 
-        self.variables[name] = {
-            "sizer": row,
-            "label": label,
-            "spin": spin
-        }
-
+        ctrls = [None]*3
+        ctrls[self.V_SIZE_ID] = row
+        ctrls[self.V_TEXT_ID] = label
+        ctrls[self.V_SPIN_ID] = spin
+        self.variables[name]=ctrls
+        self.Layout()
 
     def ShowStepMenu(self, evt):
         menu = wx.Menu()
@@ -245,9 +290,9 @@ class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
     def remove_variable(self, name):
         info = self.variables.pop(name)
 
-        sizer = info["sizer"]
-        label = info["label"]
-        spin = info["spin"]
+        sizer = info[self.V_SIZE_ID]
+        label = info[self.V_TEXT_ID]
+        spin = info[self.V_SPIN_ID]
 
         self.vars_container.Detach(sizer)
 
@@ -289,7 +334,7 @@ class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
                 
                 for name, info in self.variables.items():
                     corname = re.sub(r'\((.*?)\)', r'_\1_', name)
-                    env[corname] = info["spin"].GetValue()
+                    env[corname] = info[self.V_SPIN_ID].GetValue()
                 for nn in varnames:
                     if nn in pg_labels:
                         idx= pg_labels.index(nn)
@@ -311,11 +356,10 @@ class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
                 evt.SetProperty(prop)
 
                 self.pgpanel.pg.GetEventHandler().ProcessEvent(evt)
-    
+                
             except Exception:
                 pass
-    def SetFromDict(self, indict):
-        pass
+        self.pgpane.parameters['functions'] = self.get_dict()
 if __name__ == "__main__":
     import classPropGridPanel as MypgPanel
     import numpy as np
