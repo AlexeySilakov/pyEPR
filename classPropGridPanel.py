@@ -47,19 +47,27 @@ class SpinCtrlDoubleEditor(wxpg.PGEditor):
     def CanContainCustomText(self):
         return True
 
-    def CreateControls(self, propGrid, property, pos, size):
+    def CreateControls(self, propGrid, prop, pos, size):
         self.propGrid = propGrid
-        self.parent = propGrid.GetParent()
-        self.property = property
+        # the propgrid can be in a panel or in a splitwindow that has a parent that is PropGridPanel
+        if propGrid.GetParent().__class__.__name__=='PropGridPanel':
+            self.parent = propGrid.GetParent() 
+        elif propGrid.GetParent().GetParent().GetParent().__class__.__name__=='PropGridPanel':
+            self.parent = propGrid.GetParent().GetParent().GetParent()
+            print('there')
+        else:
+            print('cannot find my biological parent')
+            return False
+        self.property = prop
 
         self.spin = wx.SpinCtrlDouble(propGrid,
                                       style=wx.TE_PROCESS_ENTER|wx.TE_CENTER|wx.SP_ARROW_KEYS)
        
         self.spin.SetRange(-1e12, 1e12)
-        inc = property.GetAttribute(wxpg.PG_ATTR_SPINCTRL_STEP)
+        inc = prop.GetAttribute(wxpg.PG_ATTR_SPINCTRL_STEP)
         self.spin.SetIncrement(inc)
         self.spin.SetDigits(6)
-        self.spin.SetValue(str(property.GetValue()))
+        self.spin.SetValue(str(prop.GetValue()))
         self.spin.SetPosition(pos)
         self.spin.SetSize(size)
 
