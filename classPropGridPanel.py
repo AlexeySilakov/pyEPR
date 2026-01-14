@@ -49,12 +49,13 @@ class SpinCtrlDoubleEditor(wxpg.PGEditor):
 
     def CreateControls(self, propGrid, prop, pos, size):
         self.propGrid = propGrid
-        # the propgrid can be in a panel or in a splitwindow that has a parent that is PropGridPanel
+        
         if propGrid.GetParent().__class__.__name__=='PropGridPanel':
             self.parent = propGrid.GetParent() 
         elif propGrid.GetParent().GetParent().GetParent().__class__.__name__=='PropGridPanel':
+            # the propgrid can be in a panel or in a splitwindow that has a parent that is PropGridPanel
             self.parent = propGrid.GetParent().GetParent().GetParent()
-            print('there')
+            #print('there')
         else:
             print('cannot find my biological parent')
             return False
@@ -85,9 +86,20 @@ class SpinCtrlDoubleEditor(wxpg.PGEditor):
         self.spin.Bind(wx.EVT_TEXT, self.OnText)
         self.spin.Bind(wx.EVT_SPINCTRLDOUBLE, self.OnSpin)
         self.spin.Bind(wx.EVT_TEXT_ENTER, self.OnTextEnter)
+        self.spin.Bind(wx.EVT_KILL_FOCUS, self.OnLostFocus)
 
         return wxpg.PGWindowList(self.spin)
+    def OnLostFocus(self, event):
+        
+        ctrl = event.GetEventObject()
+        pg_ctrl = ctrl.GetParent().GetParent()  # PropertyGrid
 
+        if isinstance(pg_ctrl, wxpg.PropertyGrid):
+            pg_ctrl.CommitChangesFromEditor()
+            pg_ctrl.ClearSelection()
+            print('kill me')
+        event.Skip()
+        
     def OnKeyDown(self, event):
         key_code = event.GetKeyCode()
         current_value = self.spin.GetValue()
