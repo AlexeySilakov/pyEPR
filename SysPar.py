@@ -194,7 +194,12 @@ class sysPar():
         nOthers = len(othDic)
         
         for key in inDict.keys():
-            if type(inDict[key])!=dict: raise AttributeError("😭 primary input dic key is expected to be a dictionary")
+            if key=='functions':
+                continue
+            
+            if type(inDict[key])!=dict: 
+                
+                raise AttributeError("😭 primary input dic key is expected to be a dictionary")
             try:            
                 inval = int(key.split('(')[1].split(')')[0])-1
             except Exception:

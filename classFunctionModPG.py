@@ -119,7 +119,7 @@ class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
         del sizer
         del self.function_ctrls[count]
     def clear_all(self):
-        for idx in range(len(self.function_ctrls,0,-1)): ### need to go backwards so that idx is always valid
+        for idx in range(len(self.function_ctrls),0,-1): ### need to go backwards so that idx is always valid
             self.del_function(idx)
         self.Layout()
         self.recompute()
@@ -133,7 +133,7 @@ class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
             self.on_addfunc()
 
             cnt = len(self.function_ctrls)-1
-            choices = self.function_ctrls[cnt][self.F_COMP_ID]
+            choices = self.function_ctrls[cnt][self.F_COMP_ID].GetItems()
             if var in choices:
                 self.function_ctrls[cnt][self.F_COMP_ID].SetStringSelection(var)
             else:
@@ -160,9 +160,9 @@ class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
             self.clear_all()
         self.set_functions(dct['func'])
         if 'var' in dct.keys():
-            for name, num in self.dct['var'].items(): 
+            for name, num in dct['var'].items(): 
                 self.add_variable(name)
-                self.variables[name][V_SPIN_ID].SetValue(float(num))
+                self.variables[name][self.V_SPIN_ID].SetValue(float(num))
         self.Layout()
         self.recompute()
         self.SetupScrolling()
@@ -359,7 +359,7 @@ class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
                 
             except Exception:
                 pass
-        self.pgpane.parameters['functions'] = self.get_dict()
+        self.pgpanel.parameters['functions'] = self.get_dict()
 if __name__ == "__main__":
     import classPropGridPanel as MypgPanel
     import numpy as np
