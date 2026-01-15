@@ -306,6 +306,7 @@ class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
     # Recompute expression
     # --------------------------------
     def recompute(self, event=None):
+        prop = None
         for ctlist in self.function_ctrls:
             expr = ctlist[self.F_FUNC_ID].GetValue()
             try:
@@ -345,21 +346,26 @@ class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
                 self.pgpanel.pg.SetPropertyValue(
                     pg_names[target_index],
                     float(result)
-                )
+                    )
                 
                 prop = self.pgpanel.pg.GetPropertyByName(pg_names[target_index])
-                evt = wx.propgrid.PropertyGridEvent(
-                    wx.propgrid.wxEVT_PG_CHANGED,
-                    self.pgpanel.pg.GetId()
-                )
-                evt.SetEventObject(self.pgpanel.pg)
-                evt.SetProperty(prop)
+                self.pgpanel.OnValueChanged(None, prop=prop, trigger_run=False)
+                # evt = wx.propgrid.PropertyGridEvent(
+                #     wx.propgrid.wxEVT_PG_CHANGED,
+                #     self.pgpanel.pg.GetId()
+                # )
+                # evt.SetEventObject(self.pgpanel.pg)
+                # evt.SetProperty(prop)
 
-                self.pgpanel.pg.GetEventHandler().ProcessEvent(evt)
+                # self.pgpanel.pg.GetEventHandler().ProcessEvent(evt)
                 
             except Exception:
                 pass
+        
         self.pgpanel.parameters['functions'] = self.get_dict()
+        if prop is not None:
+            self.pgpanel.OnValueChanged(None, prop=prop, trigger_run=True)
+            
 if __name__ == "__main__":
     import classPropGridPanel as MypgPanel
     import numpy as np

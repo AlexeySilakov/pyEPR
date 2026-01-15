@@ -326,14 +326,13 @@ class PropGridPanel(wx.Panel):
             self.btn_sash.SetLabel("▼")
             # self.splitter.SetSashGravity(0)
     
-    def OnValueChanged(self, event, prop=None):
+    def OnValueChanged(self, event, prop=None, trigger_run=True):
         if type(event)==wx._core.SpinDoubleEvent:
             if type(prop)==type(None):
                 raise AttributeError("😭 Somehow SpinDoubleEvent did not provide property handle. No idea what to do ... figure it out") 
         if type(event)==wx._core.CommandEvent:
             pg = event.EventObject.GetParent()
             prop = pg.GetSelection()
-            
         else:
             if type(prop)==type(None):
                 prop = event.GetProperty()
@@ -374,7 +373,7 @@ class PropGridPanel(wx.Panel):
                 else:
                     self.parameters[parent.GetLabel()][prop.GetLabel()] = value
         
-        if type(self.onChangeFunc)!=type(None):
+        if type(self.onChangeFunc)!=type(None) and trigger_run:
             self.onChangeFunc(self, parent.GetLabel(), prop.GetLabel(), value)
         if self.debug: print(self.parameters)
 

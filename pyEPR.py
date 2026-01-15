@@ -17,6 +17,7 @@ from SysPar import sysPar, expPar
 from EPR_sim import optEPR, EPRsim
 
 import wx.lib.agw.flatnotebook as fnb
+import wx.lib.agw.aui as aui
 
 import time
 
@@ -347,7 +348,15 @@ class TabulatedPanel(wx.Panel):
         
         # self.nb = wx.Notebook(self)
         self.nb = fnb.FlatNotebook(self, agwStyle=fnb.FNB_NO_X_BUTTON|fnb.FNB_NO_NAV_BUTTONS|
-                                  fnb.FNB_SMART_TABS | fnb.FNB_NODRAG)
+                                  fnb.FNB_SMART_TABS) #  | fnb.FNB_NODRAG
+        # self.nb = aui.AuiNotebook(
+        #     self,
+        #     style=(
+        #         aui.AUI_NB_DEFAULT_STYLE |
+        #         aui.AUI_NB_TAB_MOVE |      # <-- enable drag reordering
+        #         aui.AUI_NB_SCROLL_BUTTONS
+        #     )
+        # )
         self.nb.SetActiveTabTextColour(wx.Colour("black"))
         self.nb.SetBackgroundColour(wx.Colour("white"))
         self.nb.SetImageList(self.PageImgList)
@@ -391,8 +400,9 @@ class TabulatedPanel(wx.Panel):
         self.lbl_Status = wx.StaticText(self, label="> ")
         sizer.Add(self.lbl_Status, 0, wx.EXPAND)
         self.add_datapanel()
-        self.add_syspanel()
         self.add_optpanel()
+        self.add_syspanel()
+        
         self.SetSizer(sizer)
     def printStatus(self, message):
         self.lbl_Status.SetLabel(f'> {message}')
@@ -421,20 +431,34 @@ class TabulatedPanel(wx.Panel):
         elif menu == self.TAB_ADD_NAME:
             self.add_syspanel()
         elif menu == self.TAB_DUP_NAME:
-            #page ## TBD
+            # self.parameters
+            sysidx = self.Sys_panel.index(self.nb.GetPage(page))
+            params = self.Sys_param[sysidx].parameters.copy()
+            cnt = len(self.Sys_param)
+            
+            self.add_syspanel()
+            self.Sys_param[cnt].SetFromParClean(params)
             pass
         elif menu == self.TAB_DEL_NAME:
-            print('TBD')
+            self.del_syspanel(page)
+            # for ii in range(self.nb.GetPageCount()):
+            #     self.nb.GetPageText(ii)
+            # print('TBD')
             ### figure out how to find the index corresponence
             #self.nb.GetPageText(page)
             # use del_syspanel
             
-    def del_syspanel(self, idx):
-        if idx in range(len(self.Sys[idx])):
-            del(self.Sys[idx])
-            del(self.Sys_panel[idx])
-            del(self.Sys_param[idx])
-        
+    def del_syspanel(self, page):
+        sysidx = self.Sys_panel.index(self.nb.GetPage(page))
+        if sysidx in range(len(self.parent.Sys)):
+            del(self.parent.Sys[sysidx])
+            del(self.Sys_panel[sysidx])
+            del(self.Sys_param[sysidx])
+            del(self.btn_col[sysidx])
+            del(self.btn_add[sysidx])
+            del(self.btn_nucdel[sysidx]) 
+            del(self.spn_sca[sysidx])
+        self.nb.DeletePage(page)
     def add_optpanel(self):
         bmp = wx.Bitmap(self.PAGE_IMG_SIZE, self.PAGE_IMG_SIZE)
         self.PageImgList.Add(bmp)
@@ -1048,10 +1072,17 @@ class MainFrame(wx.Frame):
                         #col.SetRGBA(result['Sys'][ii]['SysColor'])
                         if type(result['Sys'][ii]['SysColor'])==wx.Colour:
                             self.param_panel.btn_col[ii].SetBackgroundColour(col)
+                            page_count = self.param_panel.nb.GetPageCount()
+                            for zz in range(page_count):
+                                if self.param_panel.nb.GetPage(zz) is self.param_panel.Sys_panel[ii]:
+                                    self.param_panel.set_tabColor(zz, col)
+                                    break
+                            
                         del(result['Sys'][ii]['SysColor'])
                         del(result['Sys'][ii]['SysScale'])
                         self.param_panel.Sys_param[ii].SetFromParClean(result['Sys'][ii].copy())
                         self.Sys[ii].setFromCtrl(self.param_panel.Sys_param[ii].parameters)
+                        
 
                 else:
                     self.RaiseError('Wrong Sys in the loaded XML. I expect a list')
