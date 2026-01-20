@@ -1,0 +1,150 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!-- Created with Inkscape (http://www.inkscape.org/) -->
+
+<svg
+   width="24"
+   height="24"
+   viewBox="0 0 24 24"
+   version="1.1"
+   id="svg1"
+   sodipodi:docname="load_data24.svg"
+   inkscape:export-filename="load_data24.png"
+   inkscape:export-xdpi="96"
+   inkscape:export-ydpi="96"
+   inkscape:version="1.3 (0e150ed6c4, 2023-07-21)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns:xlink="http://www.w3.org/1999/xlink"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg"
+   xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+   xmlns:cc="http://creativecommons.org/ns#"
+   xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <defs
+     id="defs1">
+    <color-profile
+       name="Adobe-RGB-1998"
+       xlink:href="file:///C:/WINDOWS/system32/spool/drivers/color/AdobeRGB1998.icc"
+       id="color-profile1" />
+  </defs>
+  <sodipodi:namedview
+     id="base"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.3"
+     inkscape:pageopacity="0.0"
+     inkscape:pageshadow="2"
+     inkscape:zoom="22.627417"
+     inkscape:cx="14.473592"
+     inkscape:cy="16.970563"
+     inkscape:document-units="px"
+     inkscape:showpageshadow="0"
+     inkscape:pagecheckerboard="1"
+     inkscape:deskcolor="#d1d1d1"
+     shape-rendering="crispEdges"
+     inkscape:clip-to-page="true"
+     showgrid="true"
+     inkscape:window-width="1350"
+     inkscape:window-height="1000"
+     inkscape:window-x="2308"
+     inkscape:window-y="0"
+     inkscape:window-maximized="0"
+     inkscape:current-layer="svg1">
+    <inkscape:grid
+       id="grid2"
+       units="px"
+       originx="0"
+       originy="0"
+       spacingx="0.26458333"
+       spacingy="0.26458333"
+       empcolor="#0099e5"
+       empopacity="0.30196078"
+       color="#0099e5"
+       opacity="0.14901961"
+       empspacing="5"
+       dotted="true"
+       gridanglex="30"
+       gridanglez="30"
+       visible="true"
+       snapvisiblegridlinesonly="false" />
+  </sodipodi:namedview>
+  <metadata
+     id="metadata1">
+    <rdf:RDF>
+      <cc:Work
+         rdf:about="">
+        <dc:format>image/svg+xml</dc:format>
+        <dc:type
+           rdf:resource="http://purl.org/dc/dcmitype/StillImage" />
+      </cc:Work>
+    </rdf:RDF>
+  </metadata>
+  <path
+     id="rect4"
+     style="fill:#ffffff;stroke:#000000;stroke-width:1;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none"
+     d="m 15.611483,1.0070506 5.388655,5.331622 h -5.388655 z"
+     sodipodi:nodetypes="cccc" />
+  <path
+     id="rect3"
+     style="fill:#f9f9f9;stroke:#000000;stroke-width:1;stroke-linejoin:round;fill-opacity:1;stroke-dasharray:none"
+     d="m 5.6450016,1.000005 h 9.7523854 l 0.07993,3.2214275 c 0.03023,1.2184375 0.998629,2.1702811 2.238253,2.199999 l 3.277448,0.078571 V 20.799996 c 0,1.218799 -0.998261,2.199999 -2.238254,2.199999 H 5.6450016 c -1.2399914,0 -2.238252,-0.9812 -2.238252,-2.199999 V 3.200004 c 0,-1.2187994 0.9982606,-2.199999 2.238252,-2.199999 z"
+     sodipodi:nodetypes="scsscssssss" />
+  <rect
+     style="fill:#e6e6e6;fill-opacity:1;stroke:#ffffff;stroke-width:0;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-opacity:1;paint-order:normal"
+     id="rect8"
+     width="11.467067"
+     height="12.483533"
+     x="8.3526983"
+     y="8.9272232" />
+  <path
+     style="fill:#e6e6e6;fill-opacity:1;stroke:#00266a;stroke-width:0.999998;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:none;stroke-opacity:1;paint-order:normal"
+     d="m 10.069094,15.356668 1.695811,-0.04853 2.473058,-5.677666 0.600599,10.918589 2.119765,-5.14387 2.29641,-0.630851"
+     id="path8"
+     sodipodi:nodetypes="cccccc" />
+  <g
+     id="g5"
+     style="fill:#008000;stroke:#ffffff;stroke-width:5.04722;stroke-dasharray:none;stroke-opacity:1"
+     transform="matrix(0.79937583,0,0,0.78571393,-4.2365766,-0.5714229)">
+    <path
+       style="fill:none;fill-rule:evenodd;stroke:#ffffff;stroke-width:5.04722;stroke-linecap:round;stroke-linejoin:miter;stroke-dasharray:none;stroke-opacity:1"
+       d="m 2,16 16,0.03847"
+       id="path4"
+       inkscape:connector-type="polyline"
+       inkscape:connector-curvature="0" />
+    <path
+       style="fill:none;fill-rule:evenodd;stroke:#ffffff;stroke-width:5.04722;stroke-linecap:round;stroke-linejoin:miter;stroke-dasharray:none;stroke-opacity:1"
+       d="m 13,11 5,5"
+       id="path4-1"
+       inkscape:connector-type="polyline"
+       inkscape:connector-curvature="0" />
+    <path
+       style="fill:none;fill-rule:evenodd;stroke:#ffffff;stroke-width:5.04722;stroke-linecap:round;stroke-linejoin:miter;stroke-dasharray:none;stroke-opacity:1"
+       d="m 13,21 5,-5"
+       id="path4-1-9"
+       inkscape:connector-type="polyline"
+       inkscape:connector-curvature="0" />
+  </g>
+  <g
+     id="g5-0"
+     style="fill:#008000;stroke:#a20000;stroke-width:1.89271;stroke-dasharray:none;stroke-opacity:1"
+     transform="matrix(0.79937583,0,0,0.78571393,-4.2365766,-0.54928894)">
+    <path
+       style="fill:none;fill-rule:evenodd;stroke:#a20000;stroke-width:1.89271;stroke-linecap:round;stroke-linejoin:miter;stroke-dasharray:none;stroke-opacity:1"
+       d="m 2,16 16,0.03847"
+       id="path4-2"
+       inkscape:connector-type="polyline"
+       inkscape:connector-curvature="0" />
+    <path
+       style="fill:none;fill-rule:evenodd;stroke:#a20000;stroke-width:1.89271;stroke-linecap:round;stroke-linejoin:miter;stroke-dasharray:none;stroke-opacity:1"
+       d="m 13,11 5,5"
+       id="path4-1-3"
+       inkscape:connector-type="polyline"
+       inkscape:connector-curvature="0" />
+    <path
+       style="fill:none;fill-rule:evenodd;stroke:#a20000;stroke-width:1.89271;stroke-linecap:round;stroke-linejoin:miter;stroke-dasharray:none;stroke-opacity:1"
+       d="m 13,21 5,-5"
+       id="path4-1-9-1"
+       inkscape:connector-type="polyline"
+       inkscape:connector-curvature="0" />
+  </g>
+</svg>

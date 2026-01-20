@@ -83,66 +83,238 @@ class MatplotlibPanel(wx.Panel):
         self._dy = 0.0
         self._line_label = None
         self.shifts = {}
+        menu_btnsize = 32
+        #loadEPR_bmp = wx.Image('./icons/load_spectrum_icon@2x-8.png', wx.BITMAP_TYPE_PNG).Scale(26, 30).ConvertToBitmap()
+        loadEPR_bmp = wx.Image('./icons/load_data24.png', wx.BITMAP_TYPE_PNG).ConvertToBitmap()
+        loadXML_bmp = wx.Image('./icons/load_xml24_1.png', wx.BITMAP_TYPE_PNG).ConvertToBitmap()
+        saveXML_bmp = wx.Image('./icons/save_xml24.png', wx.BITMAP_TYPE_PNG).ConvertToBitmap()
+        zoom_bmp = wx.Image('./icons/zoom.png', wx.BITMAP_TYPE_PNG).ConvertToBitmap()
+        home_bmp = wx.Image('./icons/home.png', wx.BITMAP_TYPE_PNG).ConvertToBitmap()
         
-        loadEPR_bmp = wx.Image('./icons/load_spectrum_icon@2x-8.png', wx.BITMAP_TYPE_PNG).Scale(26, 30).ConvertToBitmap()
-        loadXML_bmp = wx.Image('./icons/load_xml_icon@2x-8.png', wx.BITMAP_TYPE_PNG).Scale(26, 30).ConvertToBitmap()
-        saveXML_bmp = wx.Image('./icons/save_xml_icon@2x-8.png', wx.BITMAP_TYPE_PNG).Scale(31, 30).ConvertToBitmap()
-        self.btn_LoaddFile = wx.BitmapButton(self, style= wx.BU_AUTODRAW| wx.NO_BORDER, size=(37, 37))
-        self.btn_LoaddFile.SetBitmapLabel(loadEPR_bmp) 
-        self.btn_LoaddFile.SetBackgroundColour(wx.NullColour) 
-        self.btn_LoaddFile.SetToolTip("Load Spectrum")
-        self.btn_LoaddFile.Bind(wx.EVT_BUTTON, self.parent.on_loadfile)
+        self.bmp_off = wx.ArtProvider.GetBitmap(wx.ART_CROSS_MARK, wx.ART_TOOLBAR)
+        self.bmp_on  = wx.ArtProvider.GetBitmap(wx.ART_TICK_MARK, wx.ART_TOOLBAR)
+        
+        self.toolbar = wx.ToolBar(self, style=wx.TB_HORIZONTAL | wx.TB_TEXT | wx.TB_DEFAULT_STYLE)
+        self.btn_LoaddFile = self.toolbar.AddTool(wx.ID_ANY, "Data", loadEPR_bmp, shortHelp ="Load Data")
+        self.Bind(wx.EVT_TOOL, self.parent.on_loadfile, self.btn_LoaddFile)
+        
+        self.btn_LoaddFile = self.toolbar.AddTool(wx.ID_ANY, "Session", loadXML_bmp, shortHelp ="Load Session from xml")
+        self.Bind(wx.EVT_TOOL, self.parent.on_loadSession, self.btn_LoaddFile)
+        
+        self.btn_LoaddFile = self.toolbar.AddTool(wx.ID_ANY, "Session", saveXML_bmp, shortHelp ="Save Session as xml")
+        self.Bind(wx.EVT_TOOL, self.parent.on_saveSession, self.btn_LoaddFile)
+        
+        self.sep1 = self.toolbar.AddSeparator()
+        
+        self.btn_Zoom = self.toolbar.AddTool(wx.ID_ANY, "Zoom", zoom_bmp, shortHelp ="Zoom on data")
+        self.Bind(wx.EVT_TOOL, self.on_zoom, self.btn_Zoom)
+        
+        self.btn_Reset = self.toolbar.AddTool(wx.ID_ANY, "Reset", home_bmp, shortHelp ="Reset plot scale")
+        self.Bind(wx.EVT_TOOL, self.on_reset, self.btn_Reset)
+        
+        self.sep2 = self.toolbar.AddSeparator()
+        
+        self.chk_SIM = self.toolbar.AddCheckTool(wx.ID_ANY, "Sim.", self.bmp_off, shortHelp ="Show complete simulation")
+        self.toolbar.ToggleTool(self.chk_SIM.GetId(), self.showSim)
+        self.update_check(self.chk_SIM, self.showSim)
+        self.Bind(wx.EVT_TOOL, self.on_check, self.chk_SIM)
+
+
+        self.chk_DIFF = self.toolbar.AddCheckTool(wx.ID_ANY, "Diff.", self.bmp_off, shortHelp ="Show Data-Sim")
+        self.toolbar.ToggleTool(self.chk_DIFF.GetId(), self.showDiff)
+        self.update_check(self.chk_DIFF, self.showDiff)
+        self.Bind(wx.EVT_TOOL, self.on_check, self.chk_DIFF)
+
+
+        self.chk_COMP = self.toolbar.AddCheckTool(wx.ID_ANY, "Comp.", self.bmp_off, shortHelp ="Show all individual sim. components")
+        self.toolbar.ToggleTool(self.chk_COMP.GetId(), self.showComp)
+        self.update_check(self.chk_COMP, self.showComp)
+        self.Bind(wx.EVT_TOOL, self.on_check, self.chk_COMP)
+        
+        self.toolbar.Realize()
+        
+        self.Bind(wx.EVT_CHAR_HOOK, self.on_key)
+        
+        # self.tool_zoom = tb.AddCheckTool(
+        #     wx.ID_ANY, "Zoom",
+        #     wx.ArtProvider.GetBitmap(wx.ART_FIND, wx.ART_TOOLBAR)
+            
+        # self.btn_LoaddFile = wx.BitmapButton(self, style= wx.BU_AUTODRAW| wx.NO_BORDER, size=(menu_btnsize, menu_btnsize))
+        # self.btn_LoaddFile.SetBitmapLabel(loadEPR_bmp)
+        # self.btn_LoaddFile.SetBackgroundColour(wx.NullColour) 
+        # self.btn_LoaddFile.SetToolTip("Load Spectrum")
+        # self.btn_LoaddFile.Bind(wx.EVT_BUTTON, self.parent.on_loadfile)
         
         #self.btn_LoadSession = wx.Button(self, label="Load Session")
-        self.btn_LoadSession = wx.BitmapButton(self, style= wx.BU_AUTODRAW | wx.NO_BORDER, size=(37, 37))
-        self.btn_LoadSession.SetBitmapLabel(loadXML_bmp) 
-        self.btn_LoadSession.SetBackgroundColour(wx.NullColour)
-        self.btn_LoadSession.SetToolTip("Load Session (from .xml)")
-        self.btn_LoadSession.Bind(wx.EVT_BUTTON, self.parent.on_loadSession)
+        # self.btn_LoadSession = wx.BitmapButton(self, style= wx.BU_AUTODRAW | wx.NO_BORDER, size=(menu_btnsize, menu_btnsize))
+        # self.btn_LoadSession.SetBitmapLabel(loadXML_bmp) 
+        # self.btn_LoadSession.SetBackgroundColour(wx.NullColour)
+        # self.btn_LoadSession.SetToolTip("Load Session (from .xml)")
+        # self.btn_LoadSession.Bind(wx.EVT_BUTTON, self.parent.on_loadSession)
         
-        self.btn_SaveSession = wx.BitmapButton(self, style=wx.BU_AUTODRAW| wx.NO_BORDER, size=(37, 37))
-        self.btn_SaveSession.SetBitmapLabel(saveXML_bmp) 
-        self.btn_SaveSession.SetBackgroundColour(wx.NullColour)
-        self.btn_SaveSession.SetToolTip("Save Session (as .xml)")
-        self.btn_SaveSession.Bind(wx.EVT_BUTTON, self.parent.on_saveSession)
-        
+        # self.btn_SaveSession = wx.BitmapButton(self, style=wx.BU_AUTODRAW| wx.NO_BORDER, size=(menu_btnsize, menu_btnsize))
+        # self.btn_SaveSession.SetBitmapLabel(saveXML_bmp) 
+        # self.btn_SaveSession.SetBackgroundColour(wx.NullColour)
+        # self.btn_SaveSession.SetToolTip("Save Session (as .xml)")
+        # self.btn_SaveSession.Bind(wx.EVT_BUTTON, self.parent.on_saveSession)
+
+        # self.btn_Zoom = wx.BitmapButton(self, style=wx.BU_AUTODRAW| wx.NO_BORDER, size=(menu_btnsize, menu_btnsize))
+        # self.btn_Zoom.SetBitmapLabel(zoom_bmp)
+        # self.btn_Zoom.SetBackgroundColour(wx.NullColour)
+        # self.btn_Zoom.SetToolTip("Zoom")
+        # #self.btn_Zoom.Bind(wx.EVT_BUTTON, self.parent.on_Zoom)
+
+        # self.btn_Home = wx.BitmapButton(self, style=wx.BU_AUTODRAW| wx.NO_BORDER, size=(menu_btnsize, menu_btnsize))
+        # self.btn_Home.SetBitmapLabel(home_bmp)
+        # self.btn_Home.SetBackgroundColour(wx.NullColour)
+        # self.btn_Home.SetToolTip("Reset Scale")
+        #self.btn_Zoom.Bind(wx.EVT_BUTTON, self.parent.on_Home)
+
+
         # self.chk_BG = wx.CheckBox(self, label="Background")
         # self.chk_BG.SetValue(self.showBG)
         # self.chk_BG.Bind(wx.EVT_CHECKBOX, self.on_check)
         
-        self.chk_SIM = wx.CheckBox(self, label="Simulation")
-        self.chk_SIM.SetValue(self.showSim)
-        self.chk_SIM.Bind(wx.EVT_CHECKBOX, self.on_check)
+        # self.chk_SIM = wx.CheckBox(self, label="Simulation")
+        # self.chk_SIM.SetValue(self.showSim)
+        # self.chk_SIM.Bind(wx.EVT_CHECKBOX, self.on_check)
 
-        self.chk_DIFF = wx.CheckBox(self, label="Difference")
-        self.chk_DIFF.SetValue(self.showDiff)
-        self.chk_DIFF.Bind(wx.EVT_CHECKBOX, self.on_check)
+        # self.chk_DIFF = wx.CheckBox(self, label="Difference")
+        # self.chk_DIFF.SetValue(self.showDiff)
+        # self.chk_DIFF.Bind(wx.EVT_CHECKBOX, self.on_check)
 
-        self.chk_COMP = wx.CheckBox(self, label="Components")
-        self.chk_COMP.SetValue(self.showComp)
-        self.chk_COMP.Bind(wx.EVT_CHECKBOX, self.on_check)
+        # self.chk_COMP = wx.CheckBox(self, label="Components")
+        # self.chk_COMP.SetValue(self.showComp)
+        # self.chk_COMP.Bind(wx.EVT_CHECKBOX, self.on_check)
 
-        sizerH = wx.BoxSizer(wx.HORIZONTAL)
-        sizerH.Add(self.btn_LoaddFile, 0, wx.EXPAND)
-        sizerH.Add(self.btn_LoadSession, 0, wx.EXPAND)
-        sizerH.Add(self.btn_SaveSession, 0, wx.EXPAND)
-        sizerH.AddSpacer(20)
+        # sizerH = wx.BoxSizer(wx.HORIZONTAL)
+        # sizerH.Add(self.btn_LoaddFile, 0, wx.EXPAND)
+        # sizerH.Add(self.btn_LoadSession, 0, wx.EXPAND)
+        # sizerH.Add(self.btn_SaveSession, 0, wx.EXPAND)
+        # sizerH.Add(self.btn_Zoom, 0, wx.EXPAND)
+        # sizerH.Add(self.btn_Home, 0, wx.EXPAND)
+        # sizerH.AddSpacer(20)
         # sizerH.Add(self.chk_BG, 0, wx.EXPAND)
-        sizerH.Add(self.chk_SIM, 0, wx.EXPAND)
-        sizerH.Add(self.chk_DIFF, 0, wx.EXPAND)
-        sizerH.Add(self.chk_COMP, 0, wx.EXPAND)
+        # sizerH.Add(self.chk_SIM, 0, wx.EXPAND)
+        # sizerH.Add(self.chk_DIFF, 0, wx.EXPAND)
+        # sizerH.Add(self.chk_COMP, 0, wx.EXPAND)
 
         sizer = wx.BoxSizer(wx.VERTICAL)
-        sizer.Add(sizerH, 0, wx.EXPAND)
+        sizer.Add(self.toolbar, 0, wx.EXPAND)
+        # sizer.Add(sizerH, 0, wx.EXPAND)
         sizer.Add(self.canvas, 1, wx.EXPAND)
-        self.toolbar = NavigationToolbar2WxAgg(self.canvas)
-
-        sizer.Add(self.toolbar, 0, wx.LEFT)
+        self.MLtool = NavigationToolbar2WxAgg(self.canvas)
+        self.MLtool.Hide() 
         
+        #self.canvas.mpl_connect("motion_notify_event", self.on_mouse_move)
+        #self.canvas.mpl_connect("button_press_event", self.on_mouse_click)
+
         self.SetSizer(sizer)
-        self.toolbar.Realize()
-        self.toolbar.update()
-    
+        #self.toolbar.Realize()
+        #self.toolbar.update()
+    def update_check(self, ctrl, value):
+        if value:
+            self.toolbar.SetToolNormalBitmap(ctrl.GetId(), self.bmp_on)
+        else:
+            self.toolbar.SetToolNormalBitmap(ctrl.GetId(), self.bmp_off)
+    # ------------------------------------------------------------------
+    # Toolbar actions
+    # ------------------------------------------------------------------
+    def on_zoom(self, event):
+        #self._disable_measure()
+        self.MLtool.zoom()
+
+    def on_pan(self, event):
+        #self._disable_measure()
+        self.MLtool.pan()
+
+    def on_reset(self, event):
+        self.MLtool.home()
+
+    def on_measure_toggle(self, event):
+        self._cancel_navigation_modes()
+        self.measure_mode = not self.measure_mode
+        self.clear_measurement()
+        self.SetStatusText("Measure mode ON" if self.measure_mode else "")
+
+    # ------------------------------------------------------------------
+    # Keyboard
+    # ------------------------------------------------------------------
+    def on_key(self, event):
+        if event.GetKeyCode() == wx.WXK_ESCAPE:
+            self._cancel_navigation_modes()
+            #self._disable_measure()
+        else:
+            event.Skip()
+
+    def _cancel_navigation_modes(self):
+        if self.MLtool.mode:
+            if "zoom" in self.MLtool.mode.lower():
+                self.MLtool.zoom()
+            elif "pan" in self.MLtool.mode.lower():
+                self.MLtool.pan()
+
+    def _disable_measure(self):
+        self.measure_mode = False
+        self.clear_measurement()
+
+    # ------------------------------------------------------------------
+    # Mouse
+    # ------------------------------------------------------------------
+    def on_mouse_move(self, event):
+        if event.inaxes:
+            self.coord_text.SetLabel(
+                f"x: {event.xdata:.3f}, y: {event.ydata:.3f}"
+            )
+        else:
+            self.coord_text.SetLabel("x: ---, y: ---")
+
+    def on_mouse_click(self, event):
+        if not self.measure_mode or not event.inaxes or event.button != 1:
+            return
+
+        self.measure_points.append((event.xdata, event.ydata))
+
+        if len(self.measure_points) == 2:
+            self._draw_measurement()
+            self.measure_points.clear()
+
+    # ------------------------------------------------------------------
+    # Measurement logic
+    # ------------------------------------------------------------------
+    def _draw_measurement(self):
+        (x1, y1), (x2, y2) = self.measure_points
+
+        dx = x2 - x1
+        dy = y2 - y1
+        dist = np.hypot(dx, dy)
+
+        # Draw line
+        line, = self.ax.plot([x1, x2], [y1, y2], "r--", lw=2)
+
+        # Annotation
+        label = (
+            f"ΔX = {dx:.3f}\n"
+            f"ΔY = {dy:.3f}\n"
+            f"D = {dist:.3f}"
+        )
+
+        text = self.ax.text(
+            (x1 + x2) / 2,
+            (y1 + y2) / 2,
+            label,
+            color="red",
+            bbox=dict(facecolor="white", alpha=0.7)
+        )
+
+        self.measure_artists.extend([line, text])
+        self.canvas.draw()
+
+    def clear_measurement(self):
+        for artist in self.measure_artists:
+            artist.remove()
+        self.measure_artists.clear()
+        self.canvas.draw_idle()            
     def on_pick(self, event):
         # Called when a line is clicked.
         if not isinstance(event.artist, type(self.axes[0].lines[0])):
@@ -177,9 +349,18 @@ class MatplotlibPanel(wx.Panel):
         
     def on_check(self, event): 
         #self.chk_BG.SetValue(self.showBG)
-        self.showSim = self.chk_SIM.GetValue()
-        self.showDiff = self.chk_DIFF.GetValue()
-        self.showComp = self.chk_COMP.GetValue()
+        self.showSim = self.toolbar.GetToolState(self.chk_SIM.GetId())
+        self.update_check(self.chk_SIM, self.showSim)
+        
+        self.showDiff = self.toolbar.GetToolState(self.chk_DIFF.GetId())
+        self.update_check(self.chk_DIFF, self.showDiff)
+        
+        self.showComp = self.toolbar.GetToolState(self.chk_COMP.GetId())
+        self.update_check(self.chk_COMP, self.showComp)
+        
+        #self.showSim = self.chk_SIM.GetValue()
+        # self.showDiff = self.chk_DIFF.GetValue()
+        # self.showComp = self.chk_COMP.GetValue()
         
         self.update_graph()
         
