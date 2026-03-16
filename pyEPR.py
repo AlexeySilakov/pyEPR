@@ -32,7 +32,7 @@ import time
 #git commit -m "message"  
 #git status
 
-VERSION=0.4
+VERSION=0.6
 
 class DictPopup(wx.Dialog):
     def __init__(self, parent, data_dict):
@@ -68,7 +68,8 @@ class MatplotlibPanel(wx.Panel):
         self.showBG = False
         self.showDiff = False
         self.showComp = True
-
+        self.measure_mode = False
+        self.stored_xy = None
         self.figure = Figure(figsize=(2, 2), dpi=100)
         self.axes = []
         self.canvas = FigureCanvasWxAgg(self, -1, self.figure)
@@ -76,6 +77,9 @@ class MatplotlibPanel(wx.Panel):
         self.canvas.mpl_connect("pick_event", self.on_pick)
         self.canvas.mpl_connect("motion_notify_event", self.on_motion)
         self.canvas.mpl_connect("button_release_event", self.on_release)
+        #self.canvas.mpl_connect("motion_notify_event", self.on_mouse_move)
+        self.canvas.mpl_connect("button_press_event", self.on_mouse_click)
+        
         # self.canvas.mpl_connect("axes_enter_event", self.on_axes)
         self._dragging_line = None
         self._press_ydata = None
@@ -83,33 +87,28 @@ class MatplotlibPanel(wx.Panel):
         self._dy = 0.0
         self._line_label = None
         self.shifts = {}
+        
         menu_btnsize = 32
-        #loadEPR_bmp = wx.Image('./icons/load_spectrum_icon@2x-8.png', wx.BITMAP_TYPE_PNG).Scale(26, 30).ConvertToBitmap()
-        loadEPR_bmp = wx.Image('./icons/load_data24.png', wx.BITMAP_TYPE_PNG).ConvertToBitmap()
-        loadXML_bmp = wx.Image('./icons/load_xml24_1.png', wx.BITMAP_TYPE_PNG).ConvertToBitmap()
-        saveXML_bmp = wx.Image('./icons/save_xml24.png', wx.BITMAP_TYPE_PNG).ConvertToBitmap()
-        zoom_bmp = wx.Image('./icons/zoom.png', wx.BITMAP_TYPE_PNG).ConvertToBitmap()
-        home_bmp = wx.Image('./icons/home.png', wx.BITMAP_TYPE_PNG).ConvertToBitmap()
         
-        self.bmp_off = wx.ArtProvider.GetBitmap(wx.ART_CROSS_MARK, wx.ART_TOOLBAR)
-        self.bmp_on  = wx.ArtProvider.GetBitmap(wx.ART_TICK_MARK, wx.ART_TOOLBAR)
+        self.bmp_off = self.parent.BMP_OFF
+        self.bmp_on  = self.parent.BMP_ON
         
-        self.toolbar = wx.ToolBar(self, style=wx.TB_HORIZONTAL | wx.TB_TEXT | wx.TB_DEFAULT_STYLE)
-        self.btn_LoaddFile = self.toolbar.AddTool(wx.ID_ANY, "Data", loadEPR_bmp, shortHelp ="Load Data")
+        self.toolbar = wx.ToolBar(self, style=wx.TB_HORIZONTAL | wx.TB_TEXT | wx.TB_DEFAULT_STYLE | wx.TB_FLAT)
+        self.btn_LoaddFile = self.toolbar.AddTool(wx.ID_ANY, "Data", self.parent.BMP_LOADEPR, shortHelp ="Load Data")
         self.Bind(wx.EVT_TOOL, self.parent.on_loadfile, self.btn_LoaddFile)
         
-        self.btn_LoaddFile = self.toolbar.AddTool(wx.ID_ANY, "Session", loadXML_bmp, shortHelp ="Load Session from xml")
+        self.btn_LoaddFile = self.toolbar.AddTool(wx.ID_ANY, "Session", self.parent.BMP_LOADXML, shortHelp ="Load Session from xml")
         self.Bind(wx.EVT_TOOL, self.parent.on_loadSession, self.btn_LoaddFile)
         
-        self.btn_LoaddFile = self.toolbar.AddTool(wx.ID_ANY, "Session", saveXML_bmp, shortHelp ="Save Session as xml")
+        self.btn_LoaddFile = self.toolbar.AddTool(wx.ID_ANY, "Session", self.parent.BMP_SAVEXML, shortHelp ="Save Session as xml")
         self.Bind(wx.EVT_TOOL, self.parent.on_saveSession, self.btn_LoaddFile)
         
         self.sep1 = self.toolbar.AddSeparator()
         
-        self.btn_Zoom = self.toolbar.AddTool(wx.ID_ANY, "Zoom", zoom_bmp, shortHelp ="Zoom on data")
+        self.btn_Zoom = self.toolbar.AddTool(wx.ID_ANY, "Zoom", self.parent.BMP_ZOOM, shortHelp ="Zoom on data")
         self.Bind(wx.EVT_TOOL, self.on_zoom, self.btn_Zoom)
         
-        self.btn_Reset = self.toolbar.AddTool(wx.ID_ANY, "Reset", home_bmp, shortHelp ="Reset plot scale")
+        self.btn_Reset = self.toolbar.AddTool(wx.ID_ANY, "Reset", self.parent.BMP_HOME, shortHelp ="Reset plot scale")
         self.Bind(wx.EVT_TOOL, self.on_reset, self.btn_Reset)
         
         self.sep2 = self.toolbar.AddSeparator()
@@ -125,89 +124,33 @@ class MatplotlibPanel(wx.Panel):
         self.update_check(self.chk_DIFF, self.showDiff)
         self.Bind(wx.EVT_TOOL, self.on_check, self.chk_DIFF)
 
-
         self.chk_COMP = self.toolbar.AddCheckTool(wx.ID_ANY, "Comp.", self.bmp_off, shortHelp ="Show all individual sim. components")
         self.toolbar.ToggleTool(self.chk_COMP.GetId(), self.showComp)
         self.update_check(self.chk_COMP, self.showComp)
         self.Bind(wx.EVT_TOOL, self.on_check, self.chk_COMP)
-        
+
         self.toolbar.Realize()
         
         self.Bind(wx.EVT_CHAR_HOOK, self.on_key)
         
-        # self.tool_zoom = tb.AddCheckTool(
-        #     wx.ID_ANY, "Zoom",
-        #     wx.ArtProvider.GetBitmap(wx.ART_FIND, wx.ART_TOOLBAR)
-            
-        # self.btn_LoaddFile = wx.BitmapButton(self, style= wx.BU_AUTODRAW| wx.NO_BORDER, size=(menu_btnsize, menu_btnsize))
-        # self.btn_LoaddFile.SetBitmapLabel(loadEPR_bmp)
-        # self.btn_LoaddFile.SetBackgroundColour(wx.NullColour) 
-        # self.btn_LoaddFile.SetToolTip("Load Spectrum")
-        # self.btn_LoaddFile.Bind(wx.EVT_BUTTON, self.parent.on_loadfile)
+        txtsizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.txt_1 = wx.StaticText(self, wx.ID_ANY, '', style = wx.BORDER_NONE) #BORDER_SUNKEN
+        self.txt_2 = wx.StaticText(self, wx.ID_ANY, '', style = wx.BORDER_NONE)
+        self.txt_3 = wx.StaticText(self, wx.ID_ANY, '', style = wx.BORDER_NONE)
+        txtsizer.Add(self.txt_1, 1, wx.EXPAND)
+        txtsizer.Add(self.txt_2, 1, wx.EXPAND)
+        txtsizer.Add(self.txt_3, 1, wx.EXPAND)
         
-        #self.btn_LoadSession = wx.Button(self, label="Load Session")
-        # self.btn_LoadSession = wx.BitmapButton(self, style= wx.BU_AUTODRAW | wx.NO_BORDER, size=(menu_btnsize, menu_btnsize))
-        # self.btn_LoadSession.SetBitmapLabel(loadXML_bmp) 
-        # self.btn_LoadSession.SetBackgroundColour(wx.NullColour)
-        # self.btn_LoadSession.SetToolTip("Load Session (from .xml)")
-        # self.btn_LoadSession.Bind(wx.EVT_BUTTON, self.parent.on_loadSession)
-        
-        # self.btn_SaveSession = wx.BitmapButton(self, style=wx.BU_AUTODRAW| wx.NO_BORDER, size=(menu_btnsize, menu_btnsize))
-        # self.btn_SaveSession.SetBitmapLabel(saveXML_bmp) 
-        # self.btn_SaveSession.SetBackgroundColour(wx.NullColour)
-        # self.btn_SaveSession.SetToolTip("Save Session (as .xml)")
-        # self.btn_SaveSession.Bind(wx.EVT_BUTTON, self.parent.on_saveSession)
-
-        # self.btn_Zoom = wx.BitmapButton(self, style=wx.BU_AUTODRAW| wx.NO_BORDER, size=(menu_btnsize, menu_btnsize))
-        # self.btn_Zoom.SetBitmapLabel(zoom_bmp)
-        # self.btn_Zoom.SetBackgroundColour(wx.NullColour)
-        # self.btn_Zoom.SetToolTip("Zoom")
-        # #self.btn_Zoom.Bind(wx.EVT_BUTTON, self.parent.on_Zoom)
-
-        # self.btn_Home = wx.BitmapButton(self, style=wx.BU_AUTODRAW| wx.NO_BORDER, size=(menu_btnsize, menu_btnsize))
-        # self.btn_Home.SetBitmapLabel(home_bmp)
-        # self.btn_Home.SetBackgroundColour(wx.NullColour)
-        # self.btn_Home.SetToolTip("Reset Scale")
-        #self.btn_Zoom.Bind(wx.EVT_BUTTON, self.parent.on_Home)
-
-
-        # self.chk_BG = wx.CheckBox(self, label="Background")
-        # self.chk_BG.SetValue(self.showBG)
-        # self.chk_BG.Bind(wx.EVT_CHECKBOX, self.on_check)
-        
-        # self.chk_SIM = wx.CheckBox(self, label="Simulation")
-        # self.chk_SIM.SetValue(self.showSim)
-        # self.chk_SIM.Bind(wx.EVT_CHECKBOX, self.on_check)
-
-        # self.chk_DIFF = wx.CheckBox(self, label="Difference")
-        # self.chk_DIFF.SetValue(self.showDiff)
-        # self.chk_DIFF.Bind(wx.EVT_CHECKBOX, self.on_check)
-
-        # self.chk_COMP = wx.CheckBox(self, label="Components")
-        # self.chk_COMP.SetValue(self.showComp)
-        # self.chk_COMP.Bind(wx.EVT_CHECKBOX, self.on_check)
-
-        # sizerH = wx.BoxSizer(wx.HORIZONTAL)
-        # sizerH.Add(self.btn_LoaddFile, 0, wx.EXPAND)
-        # sizerH.Add(self.btn_LoadSession, 0, wx.EXPAND)
-        # sizerH.Add(self.btn_SaveSession, 0, wx.EXPAND)
-        # sizerH.Add(self.btn_Zoom, 0, wx.EXPAND)
-        # sizerH.Add(self.btn_Home, 0, wx.EXPAND)
-        # sizerH.AddSpacer(20)
-        # sizerH.Add(self.chk_BG, 0, wx.EXPAND)
-        # sizerH.Add(self.chk_SIM, 0, wx.EXPAND)
-        # sizerH.Add(self.chk_DIFF, 0, wx.EXPAND)
-        # sizerH.Add(self.chk_COMP, 0, wx.EXPAND)
-
         sizer = wx.BoxSizer(wx.VERTICAL)
         sizer.Add(self.toolbar, 0, wx.EXPAND)
         # sizer.Add(sizerH, 0, wx.EXPAND)
         sizer.Add(self.canvas, 1, wx.EXPAND)
-        self.MLtool = NavigationToolbar2WxAgg(self.canvas)
-        self.MLtool.Hide() 
+        sizer.Add(txtsizer, 0, wx.EXPAND)
         
-        #self.canvas.mpl_connect("motion_notify_event", self.on_mouse_move)
-        #self.canvas.mpl_connect("button_press_event", self.on_mouse_click)
+        self.MLtool = NavigationToolbar2WxAgg(self.canvas)
+        self.MLtool.Hide()
+        
+
 
         self.SetSizer(sizer)
         #self.toolbar.Realize()
@@ -261,15 +204,21 @@ class MatplotlibPanel(wx.Panel):
     # ------------------------------------------------------------------
     # Mouse
     # ------------------------------------------------------------------
-    def on_mouse_move(self, event):
-        if event.inaxes:
-            self.coord_text.SetLabel(
-                f"x: {event.xdata:.3f}, y: {event.ydata:.3f}"
-            )
-        else:
-            self.coord_text.SetLabel("x: ---, y: ---")
+#    def on_mouse_move(self, event):
+
 
     def on_mouse_click(self, event):
+        if event.button==2:
+            if event.inaxes:
+                self.txt_3.SetLabel(f"stored: x={event.xdata:.3f}, y={event.ydata:.3f}")
+                self.stored_xy = [event.xdata, event.ydata]
+        if event.dblclick:
+            if event.button>1:
+                self.stored_xy = None
+                self.txt_3.SetLabel(" ")
+            else:
+                self.MLtool.home()
+            
         if not self.measure_mode or not event.inaxes or event.button != 1:
             return
 
@@ -319,13 +268,14 @@ class MatplotlibPanel(wx.Panel):
         # Called when a line is clicked.
         if not isinstance(event.artist, type(self.axes[0].lines[0])):
             return
-        
-        self._dragging_line = event.artist
-        self._press_ydata = event.mouseevent.ydata
-        self._orig_ydata = self._dragging_line.get_ydata().copy()
-        self._line_label =self._dragging_line.get_label()
+        if event.mouseevent.button==1:
+            self._dragging_line = event.artist
+            self._press_ydata = event.mouseevent.ydata
+            self._orig_ydata = self._dragging_line.get_ydata().copy()
+            self._line_label =self._dragging_line.get_label()
         
     def on_motion(self, event):
+
         # Called when mouse is moved.
         if self._dragging_line is not None:
             if event.ydata is None:
@@ -336,6 +286,17 @@ class MatplotlibPanel(wx.Panel):
 
             self._dragging_line.set_ydata(new_y)
             self.canvas.draw_idle()
+        else:
+            if event.inaxes:
+                if self.stored_xy is not None:
+                    self.txt_1.SetLabel(f"  x: {event.xdata:.3f}, y: {event.ydata:.3f}")
+                    self.txt_2.SetLabel(f"Δx: {event.xdata-self.stored_xy[0]:.3f}, Δy: {event.ydata-self.stored_xy[1]:.3f}")
+                else:
+                    self.txt_1.SetLabel(f"x: {event.xdata:.3f}, y: {event.ydata:.3f}")
+                    self.txt_2.SetLabel("")
+            else:
+                self.txt_1.SetLabel("x: ---, y: ---")
+                self.txt_2.SetLabel("")
 
     def on_release(self, event):
         # Called when mouse button is released. Also called on zoom, so be careful
@@ -632,14 +593,17 @@ class TabulatedPanel(wx.Panel):
     def del_syspanel(self, page):
         sysidx = self.Sys_panel.index(self.nb.GetPage(page))
         if sysidx in range(len(self.parent.Sys)):
+            ### need a more standartized ways to delete all children
             del(self.parent.Sys[sysidx])
             del(self.Sys_panel[sysidx])
             del(self.Sys_param[sysidx])
             del(self.btn_col[sysidx])
             del(self.btn_add[sysidx])
+            del(self.btn_addPar[sysidx])
             del(self.btn_nucdel[sysidx]) 
             del(self.spn_sca[sysidx])
         self.nb.DeletePage(page)
+
     def add_optpanel(self):
         bmp = wx.Bitmap(self.PAGE_IMG_SIZE, self.PAGE_IMG_SIZE)
         self.PageImgList.Add(bmp)
@@ -656,6 +620,8 @@ class TabulatedPanel(wx.Panel):
     def add_syspanel(self):
         if not hasattr(self, 'btn_col'):
             self.btn_col = []
+        if not hasattr(self, 'btn_addPar'):
+            self.btn_addPar = []            
         if not hasattr(self, 'btn_add'):
             self.btn_add = []
         if not hasattr(self, 'btn_nucdel'):
@@ -705,20 +671,29 @@ class TabulatedPanel(wx.Panel):
         Syssizer.AddSpacer(10)
         
         btnszr = wx.BoxSizer(wx.HORIZONTAL)
-        self.btn_add.append(wx.Button(self.Sys_panel[cnt], label="+ Nuc"))
-        #self.btn_add.Bind(wx.EVT_BUTTON, self.on_add_Nuc)
-        btnszr.Add(self.btn_add[cnt], 1, wx.EXPAND)
-        self.btn_nucdel.append(wx.Button(self.Sys_panel[cnt], label="- Nuc"))
-        #self.btn_nucdel.Bind(wx.EVT_BUTTON, self.on_delete_nuc)
-        btnszr.Add(self.btn_nucdel[cnt], 1, wx.EXPAND)
+        self.btn_addPar.append(wx.Button(self.Sys_panel[cnt], label="Par", size=(45, -1)))
+        self.btn_addPar[cnt].SetBitmap(self.parent.BMP_PLUS)
+        self.btn_addPar[cnt].Bind(wx.EVT_BUTTON, self.on_addPar)
+        btnszr.Add(self.btn_addPar[cnt], 0, wx.ALL)
+        
+        btnszr.AddSpacer(10)
+        self.btn_add.append(wx.Button(self.Sys_panel[cnt], label="Nuc", size=(45, -1)))
+        self.btn_add[cnt].Bind(wx.EVT_BUTTON, self.on_add_Nuc)
+        self.btn_add[cnt].SetBitmap(self.parent.BMP_PLUS)
+        btnszr.Add(self.btn_add[cnt], 0, wx.ALL)
+        self.btn_nucdel.append(wx.Button(self.Sys_panel[cnt], label="Nuc", size=(45, -1)))
+        self.btn_nucdel[cnt].SetBitmap(self.parent.BMP_MINUS)
+        self.btn_nucdel[cnt].Bind(wx.EVT_BUTTON, self.on_delete_nuc)
+        btnszr.Add(self.btn_nucdel[cnt], 0, wx.ALL)
        
         Syssizer.Add(btnszr, 0, wx.EXPAND)
         
-        self.Sys_param.append(MypgPanel.PropGridPanel(self.Sys_panel[cnt], Prop_Dict = {}, 
+        self.Sys_param.append(MypgPanel.PropGridPanel(self.Sys_panel[cnt], Prop_Dict = {},
                                                       onChangeFunc=self.on_Sys, 
                                                       showModFunc = True))
         self.Sys_param[cnt].SetFromParClean(self.parent.Sys[cnt].getDefaultDictEPR())
-        
+
+        self.Sys_param[cnt].pg.Bind(wx.EVT_RIGHT_UP, self.on_sys_rightup)
         Syssizer.Add(self.Sys_param[cnt], 1, wx.EXPAND)
       
         self.Sys_panel[cnt].SetSizer(Syssizer)  
@@ -774,6 +749,48 @@ class TabulatedPanel(wx.Panel):
             self.parent.plot_panel.update_graph()
         # pass
         #self.parent.Exp.setFromCtrl(self.Exp_param.parameters)
+    def on_sys_rightup(self, event):
+        pt = event.GetPosition()
+        ### event object is property grid. We have that on a panel,
+        # that panel is on anotehr panel,
+        # which is on a splitwindow
+        # which then is on a panel that is the palen this thing knows about
+        apr = event.EventObject.GetParent().GetParent().GetParent().GetParent()
+        ID = self.get_SysID(apr)
+        HitTest = self.Sys_param[ID].pg.HitTest(pt)
+        prop = HitTest.GetProperty()
+        propname = prop.GetName()
+        root_propname = prop.GetParent().GetName()
+        if root_propname=='<Root>':
+            return
+        self.Sys_param[ID].pg.SelectProperty(propname)
+        print(propname)
+        splt = propname.split('(')
+        tmpMenu = wx.Menu()
+        tmpMenu.Append(wx.ID_ANY, f'Delete {root_propname}:{splt[0]}')
+        tmpMenu.Append(wx.ID_ANY, 'Add Property')
+        tmpMenu.Bind(wx.EVT_MENU, lambda e: self.on_sys_mod(e, ID, root_propname, propname))
+        pos = wx.GetMousePosition() #apr.GetPosition()
+        apr.PopupMenu(tmpMenu, apr.ScreenToClient(pos))
+    def on_sys_mod(self, event, ID, root_propname, propname):
+        aa = event.GetEventObject()
+        ii = event.GetId()
+        it = aa.FindItemById(ii)
+        if 'del' in it.ItemLabel.lower():
+            splt = propname.split('(')
+            dlg = wx.MessageDialog(
+                self,
+                f"Are you sure about deleting {root_propname}:{splt[0]}? Data will be lost",
+                "Sure about that?",
+                style=wx.OK|wx.CANCEL|wx.DEFAULT_DIALOG_STYLE)
+            if dlg.ShowModal() == wx.ID_OK:
+                Params = self.Sys_param[ID].parameters
+                del(Params[root_propname][splt[0]])
+                self.parent.Sys[ID].setFromCtrl(Params)
+                self.Sys_param[ID].SetFromParClean(Params)
+
+        elif 'add' in it.ItemLabe.lower():
+            self.on_addPar(None, ID=ID)
 
     def on_Opt(self, panel, mainname, name, val):
         self.parent.Opt.setFromCtrl(self.Opt_param.parameters)    
@@ -781,6 +798,173 @@ class TabulatedPanel(wx.Panel):
     def on_Scale_change(self, event):
         self.parent.ScaleModeChoice = self.cmb_Scale.GetValue()
         self.parent.plot_panel.update_graph()
+    def on_delete_nuc(self, event):
+        apr = event.EventObject.GetParent()
+        ID = self.get_SysID(apr)
+        Params = self.Sys_param[ID].parameters
+        keys = list(Params.keys())
+        nNucs = 0
+        items = []
+        for key in keys:
+            if 'nuc' in key:
+                nNucs+=1
+        if nNucs == 0:
+            return
+
+        if nNucs>1:
+            for ii in range(nNucs):
+                items.append(f'nuc({ii+1})')
+
+            dlg = wx.SingleChoiceDialog(
+                self,
+                "Select nucleus to delete \n All data will be lost",
+                "Choose Nucleus",
+                items,
+                style=wx.OK|wx.CANCEL|wx.DEFAULT_DIALOG_STYLE,
+            )
+        else:
+            dlg = wx.MessageDialog(
+                self,
+                "Are you sure about deleting the nucleus? \n All data will be lost",
+                "Sure about that?",
+                style=wx.OK|wx.CANCEL|wx.DEFAULT_DIALOG_STYLE)
+
+        del_key = ''
+        if dlg.ShowModal() == wx.ID_OK:
+            if nNucs ==1:
+                del_key = 'nuc(1)'
+                selected_idx = 1
+            else:
+                selected_idx = dlg.GetSelection()
+                del_key = items[selected_idx]
+
+        dlg.Destroy()
+
+        if del_key!='':
+            del(Params[del_key])
+            if nNucs>0:
+                cnt = 0
+                ###  let's resort nuc numbers
+                keys = list(Params.keys())
+                for kk in keys:
+                    if 'nuc' in kk:
+                        Params[f'nuc({cnt+1})'] = Params.pop(kk)
+                        cnt+=1
+            self.parent.Sys[ID].setFromCtrl(Params)
+            self.Sys_param[ID].SetFromParClean(Params)
+    def on_add_Nuc(self, event):
+        apr = event.EventObject.GetParent()
+        ID = self.get_SysID(apr)
+
+        items_to_show = []
+        isotopes = self.parent.Sys[ID].isotopes()
+        isotopes_list = list(self.parent.Sys[ID].isotopes().keys())
+        for dd in isotopes_list:
+            items_to_show.append(f'{dd:>8}\tI={isotopes[dd]["I"]:>4}')
+        
+        dlg = wx.SingleChoiceDialog(
+            self,
+            "Select isotope to include:",
+            "Choose Nucleus",
+            items_to_show,
+            style=wx.OK|wx.CANCEL|wx.DEFAULT_DIALOG_STYLE,
+        )
+    
+        # Show the dialog modally â it will block until the user presses OK/Cancel
+        if dlg.ShowModal() == wx.ID_OK:
+            # dlg.GetSelections() returns indices of the checked items
+            selected_idx = dlg.GetSelection()
+        else:
+            selected_idx = -1
+
+        dlg.Destroy()
+        if selected_idx>=0:
+            
+            Params = self.Sys_param[ID].parameters
+            nNucs = 0
+            keys = list(Params.keys())
+            for key in keys:
+                if 'nuc' in key:
+                    nNucs+=1
+            Params[f'nuc({nNucs+1})']=self.getNuc(isotopes_list[selected_idx])
+            
+            self.parent.Sys[ID].setFromCtrl(Params)
+            self.Sys_param[ID].SetFromParClean(Params)
+    def getNuc(self, nucname):
+        isotopes = list(self.parent.Sys[0].isotopes().keys())
+        selected_idx = isotopes.index(nucname)
+        nucdict = {'Nucs':[isotopes[selected_idx], isotopes],
+                                 'nNucs':1,
+                                 'A':np.array([0, 0, 0]),
+                                 'Apa':np.array([0, 0, 0])}
+        _,I,_=self.parent.Sys[0].isotopes(isotopes[selected_idx])
+        if I[0]>0.5:
+           nucdict['Q']=np.array([0, 0, 0])
+           nucdict['Qpa']=np.array([0, 0, 0])
+        #nucdict['useFor'] = ['sim.only', ['sim.only', 'ori.sel.only', 'all']]
+        return nucdict
+    def on_addPar(self, event, ID=None):
+        if ID is None:
+            apr = event.EventObject.GetParent()
+            ID = self.get_SysID(apr)
+
+        Params = self.Sys_param[ID].parameters
+        keys = list(Params.keys())
+        nNucs = 0
+        nSpins = 0
+        for key in keys:
+            if 'nuc' in key:
+                nNucs+=1
+            if 'spin' in key:
+                nSpins+=1
+
+        list_params = self.parent.Sys[ID].getAll()
+
+        items_to_show = []
+
+        # order spins first , then nuclei
+        for ll in list_params.keys():
+            if list_params[ll][0]=='S':
+                for ii in range(nSpins):
+                    items_to_show.append(f'spin({ii+1}):'+ll)
+        for ll in list_params.keys():
+            if list_params[ll][0]=='N':
+                for ii in range(nNucs):
+                    items_to_show.append(f'nuc({ii+1}):'+ll)
+
+        dlg = wx.SingleChoiceDialog(
+            self,
+            "Select the parameters you want to show:",
+            "Choose parameters",
+            items_to_show,
+            style=wx.OK|wx.CANCEL|wx.DEFAULT_DIALOG_STYLE,
+        )
+        if dlg.ShowModal() == wx.ID_OK:
+            # dlg.GetSelections() returns indices of the checked items
+            selected_idx = dlg.GetSelection()
+        else:
+            selected_idx = -1
+        dlg.Destroy()
+
+        if selected_idx>=0:
+            splt1 = items_to_show[selected_idx].split(':')
+            key_root = splt1[0]
+            key_item = splt1[1]
+            splt2 =list_params[key_item].split('_')
+            if splt2[1]=='float':
+                value = float(0.0)
+            elif splt2[1]=='int':
+                value = int(0)
+            elif splt2[1]=='string':
+                value = ''
+            elif splt2[1]=='array3':
+                value = np.zeros(3)
+
+            Params[key_root][key_item] = value
+
+            self.parent.Sys[ID].setFromCtrl(Params)
+            self.Sys_param[ID].SetFromParClean(Params)
+
     def get_SysID(self, panel_handle):
         return self.Sys_panel.index(panel_handle)
     def set_tabColor(self, page, color):
@@ -873,7 +1057,19 @@ class MainFrame(wx.Frame):
         path, fname = os.path.split(os.path.abspath(__file__))
         self.currentPath = path
         self.ini_file = os.path.join(path, "pyEPR.ini")
-
+        
+        self.BMP_LOADEPR = wx.Image('./icons/load_data24_1.png', wx.BITMAP_TYPE_PNG).ConvertToBitmap()
+        self.BMP_LOADXML = wx.Image('./icons/load_xml24_2.png', wx.BITMAP_TYPE_PNG).ConvertToBitmap()
+        self.BMP_SAVEXML = wx.Image('./icons/save_xml24_1.png', wx.BITMAP_TYPE_PNG).ConvertToBitmap()
+        self.BMP_ZOOM = wx.Image('./icons/zoom.png', wx.BITMAP_TYPE_PNG).ConvertToBitmap()
+        self.BMP_HOME = wx.Image('./icons/home.png', wx.BITMAP_TYPE_PNG).ConvertToBitmap()
+        
+        self.BMP_OFF = wx.Image('./icons/off.png', wx.BITMAP_TYPE_PNG).ConvertToBitmap()# wx.ArtProvider.GetBitmap(wx.ART_CROSS_MARK, wx.ART_TOOLBAR)
+        self.BMP_ON  = wx.Image('./icons/on.png', wx.BITMAP_TYPE_PNG).ConvertToBitmap()#wx.ArtProvider.GetBitmap(wx.ART_TICK_MARK, wx.ART_TOOLBAR)
+        
+        self.BMP_ADDPAR = wx.Image('./icons/plus_param_21_14.png', wx.BITMAP_TYPE_PNG).ConvertToBitmap()
+        self.BMP_PLUS = wx.Image('./icons/plus_14_2.png', wx.BITMAP_TYPE_PNG).ConvertToBitmap()
+        self.BMP_MINUS = wx.Image('./icons/minus_14_2.png', wx.BITMAP_TYPE_PNG).ConvertToBitmap()
         ###  "Set in stone" properties are in capital. Ideally pull them from ini
         self.MAIN_BACK_COLOR = wx.Colour(255, 255, 255)
         self.MAIN_FOREGROUND_COLOR = wx.Colour(0, 0, 0)

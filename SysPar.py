@@ -48,6 +48,8 @@ class sysPar():
        self.sigma = None
        self.sigmaFrame = None
        # Broadening / strain parameters
+       self.lw_G = None
+       self.lw_L = None
        self.lw = None
        self.lwEndor = None
        self.gStrain = None
@@ -162,18 +164,8 @@ class sysPar():
                 'spin(1)':{
                 'S':1/2, 'g':np.array([2, 2, 2],dtype=float),
                 'lw':0.1,
-                'RelativeScale': 1,
                 },
-                'nuc(1)':{
-                'Nucs':['1H', list(self.isotopes().keys())],
-                'A': np.array([1, 1, -2],dtype=float),
-                'Apa':np.array([0, 0, 0],dtype=float),
-                'Q_K':0.0,
-                'Q_eta':0.0,
-                'Qpa':np.array([0, 0, 0],dtype=float),
-                'useFor':['all', ['sim.only', 'ori.sel.only', 'all']]
-                },
-                }    
+                }
     def setFromCtrl(self, inDict):
         self.set_All_None()
         nSpins = 0
@@ -230,26 +222,29 @@ class sysPar():
         
                 
     def getAll(self):
-        return {'S': 'S_float', 'lw': 'S_float', 
-         'D': 'S_array3', 'D_': 'S_array3', 'DFrame': 'S_array3',
-         'Bk': 'S_array', 'BkFrame': 'S_array3', 
-         'J': 'SS_array3', 'dip': 'SS_float', 
-         'dvec': 'SS_array3', 
-         'ee': 'SS_array3', 'eeFrame': 'SS_array3', 
-         'ee2': 'SS_array3',
-         'Nucs': 'Nucs_string',
-         'nNucs': 'Nucs_int', 'gn': 'Nucs_float', 
-         'I': 'Nucs_float', 'NatAbund': 'Nucs_float', 
-         'gamma': 'Nucs_float', 'g': 'Nucs_array3',
-         'gFrame': 'Nucs_array3', 'A': 'Nucs_array3', 
-         'AFrame': 'Nucs_array3', 'Apa': 'Nucs_array3',
-         'Q': 'Nucs_array3', 'QFrame': 'Nucs_array3', 
-         'Qpa': 'Nucs_array3', 
-         'Q_K':'Nucs_float', 'Q_eta': 'Nucs_float',
-         'lwEndor': 'Nucs_float', 
-         'gStrain': 'S_array3', 'AStrain': 'Nucs_array3', 
-         'DStrain': 'S_array3', 'HStrain': 'S_array3'}
-         
+        return {'S': 'S_float', 'lw':'S_float', 'g': 'S_array3',
+                'HStrain': 'S_array3',
+                'gStrain': 'S_array3',
+                'gFrame': 'S_array3',
+                'lw_G': 'S_float',
+                'lw_L': 'S_float',
+                 'D': 'S_array3', 'DFrame': 'S_array3',
+                 'J': 'SS_array3', 'dip': 'SS_float',
+                 'dvec': 'SS_array3', 
+                 'ee': 'SS_array3', 'eeFrame': 'SS_array3', 
+                 'ee2': 'SS_array3',
+                 'Nucs': 'Nucs_string',
+                 'nNucs': 'Nucs_int', 'gn': 'Nucs_float', 
+                 'I': 'Nucs_float', 'NatAbund': 'Nucs_float',
+                 'gamma': 'Nucs_float', 'A': 'Nucs_array3',
+                 'AFrame': 'Nucs_array3', 'Apa': 'Nucs_array3',
+                 'Q': 'Nucs_array3', 'QFrame': 'Nucs_array3', 
+                 'Qpa': 'Nucs_array3', 
+                 'Q_K':'Nucs_float', 'Q_eta': 'Nucs_float',
+                 'lwEndor': 'Nucs_float', 
+                 'AStrain': 'Nucs_array3',
+             }
+         # Bk': 'S_array', 'BkFrame': 'S_array3','DStrain': 'S_array3',
          # 'L': None, 'gL': None, 'soc': None, 'CF': {}, 'sigma': None, 'sigmaFrame': None, 'nn': None, 'nnFrame': None, 'Ham': {}, 
          # , 'initState': None}
     def set_All_None(self):  

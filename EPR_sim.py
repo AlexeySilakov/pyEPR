@@ -108,6 +108,7 @@ class optEPR():
         self.Treshold = 1e-3
         self.Verbosity = False
         self.nKnots = 20
+        
         for key, value in kwargs.items():
             if hasattr(self, key):
                 setattr(self, key, value)
@@ -257,17 +258,38 @@ class EPRsim():
         nSample = 10
         self.rawY = np.zeros((self.Exp.nPoints*nSample, transitions.shape[0]))
         self.rawX = np.linspace(self.Exp.BMin, self.Exp.BMax, self.Exp.nPoints*10)
-        gw = self.Sys.lw[0]/2.355
-        # gg =  np.fft.ifft(np.fft.fftshift(np.exp(-(self.rawX-np.mean(self.rawX) )**2/gw**2/2.0).astype(complex)))
         
-        if self.Exp.Harmonic==1:
-            ga=-(self.rawX-np.mean(self.rawX))/gw**2
+        if self.Sys.lw_G is not None: ## Gaussian lineshape
+            gw = self.Sys.lw_G/2.355  
+        elif self.Sys.lw is not None:
+            gw = self.Sys.lw[0]/2.355
+            # gg =  np.fft.ifft(np.fft.fftshift(np.exp(-(self.rawX-np.mean(self.rawX) )**2/gw**2/2.0).astype(complex)))
         else:
-            ga=1.0
-            
+            gw = 0
         
-        gg =  ifft(fftshift(ga*np.exp(-(self.rawX-np.mean(self.rawX) )**2/gw**2/2.0).astype(complex)))
-
+        ifftline = None
+        if gw>0:
+            if self.Exp.Harmonic==1:
+                ga=-(self.rawX-np.mean(self.rawX))/gw**2
+                ifftline =  ifft(fftshift(ga*np.exp(-(self.rawX-np.mean(self.rawX) )**2/gw**2/2.0).astype(complex)))
+            else:
+                ifftline =  ifft(fftshift(np.exp(-(self.rawX-np.mean(self.rawX) )**2/gw**2/2.0).astype(complex)))
+            
+        if self.Sys.lw_L is not None: ## Lorentzian lineshape
+            llw = self.Sys.lw_L
+            
+            if self.Exp.Harmonic==1:
+                ll = ifft(fftshift((-(self.rawX-np.mean(self.rawX))/( (self.rawX-np.mean(self.rawX))**2 
+                                        + llw**2/4.0      )**2).astype(complex)))
+            else:
+                ll = ifft(fftshift(1.0/( (self.rawX-np.mean(self.rawX))**2 
+                                        + llw**2/4.0      ).astype(complex)))
+            if ifftline is not None:
+                ifftline+=ll
+            else:
+                ifftline = ll
+                
+        if ifftline is None: ifftline= 1.0
         
         self.X = np.linspace(self.Exp.BMin, self.Exp.BMax, self.Exp.nPoints) # in mT
         self.Y = np.zeros_like(self.X) 
@@ -280,12 +302,12 @@ class EPRsim():
                 amp = np.mean(transitions[ii][:3])
                 fields = transitions[ii][3:]
                 self.generateSpectrum(ii, amp, fields)
-
-                tf = ifft(fftshift(self.rawY[:, ii]))*gg
+                
+                tf = ifft(fftshift(self.rawY[:, ii]))*ifftline
                 self.rawY[:, ii] = np.real(fftshift(fft( tf )))
                 self.Y += np.real(fftshift(fft( np.delete(tf, np.s_[ra1:ra2]) )))
                 
-
+                
         # tf = ifft(fftshift(self.rawY, axes=(0,)), axis=0)
         # tf *=gg[:,None]
         # self.rawY = np.real(fftshift(fft( tf , axis=0), axes=(0,)))
@@ -465,9 +487,9 @@ if __name__ == "__main__":
             g = [np.array([1.981, 1.979, 1.944])], 
             Nucs = ['51V'],
             A = [np.array([519, 185, 192])],
-            lw = [1],
+            lw = [10],
             )
-    es.Exp.set(mwFreq=9.5, BMin=200, BMax=500, nPoints=1000, Harmonic=0)
+    es.Exp.set(mwFreq=9.5, BMin=200, BMax=500, nPoints=1000, Harmonic=1)
     timest = time.time()
     es.run()
     timeed = time.time()-timest

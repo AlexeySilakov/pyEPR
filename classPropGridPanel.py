@@ -97,7 +97,7 @@ class SpinCtrlDoubleEditor(wxpg.PGEditor):
         if isinstance(pg_ctrl, wxpg.PropertyGrid):
             pg_ctrl.CommitChangesFromEditor()
             pg_ctrl.ClearSelection()
-            print('kill me')
+            #print('kill me')
         event.Skip()
         
     def OnKeyDown(self, event):
@@ -374,7 +374,7 @@ class PropGridPanel(wx.Panel):
                     self.parameters[parent.GetLabel()][prop.GetLabel()] = value
         
         if type(self.onChangeFunc)!=type(None) and trigger_run:
-            self.onChangeFunc(self, parent.GetLabel(), prop.GetLabel(), value)
+            self.onChangeFunc(parent.GetLabel(), prop.GetLabel(), value)
         if self.debug: print(self.parameters)
 
     def SetProps(self, Props):

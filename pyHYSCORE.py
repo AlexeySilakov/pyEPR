@@ -502,7 +502,7 @@ class MatplotlibPanel(wx.Panel):
                         np.min(dd['fftax']['y']), np.max(dd['fftax']['y'])]
                 
                 ma = np.max(np.max(data))*dd['zmax']
-                mi = ma*dd['zmin'] 
+                mi = np.max(np.max(data))*dd['zmin'] 
                 xmi,xma, ymi, yma = (dd['fmin'], dd['fmax'], dd['fmin'], dd['fmax'] )
                 axlabel='Time, $mu$s'
             else:
@@ -517,7 +517,7 @@ class MatplotlibPanel(wx.Panel):
                     yma = np.max(dd['ax']['y'])  
                 else:
                     ma = np.max(np.max(data))*dd['zmax']
-                    mi = ma*dd['zmin'] 
+                    mi = np.max(np.max(data))*dd['zmin'] 
                     xmi,xma, ymi, yma = (dd['fmin'], dd['fmax'], dd['fmin'], dd['fmax'] )
                 axlabel='Frequency, MHz'
             if makenew:                                             
@@ -552,7 +552,7 @@ class MatplotlibPanel(wx.Panel):
                 if type(dd['simdata'])!=type(None):
                     simdata = dd['simdata']
                     sima = np.max(np.max(simdata))
-                    simi = ma*dd['zmin']/dd['zmax']
+                    simi = sima*dd['zmin']/dd['zmax']
                     simaxEx = [np.min(dd['simax']['x']), np.max(dd['simax']['x']), 
                             np.min(dd['simax']['y']), np.max(dd['simax']['y'])]
                     
@@ -591,8 +591,6 @@ class MatplotlibPanel(wx.Panel):
                     if type(ch)== matplotlib.collections.PathCollection:
                         ch.remove()
                 if self.OverlaySim:
-
-
                     co = self.axes[axcnt].contour(dd['simax']['x'], dd['simax']['y'],
                                                    simdata, np.linspace(simi, sima, nlev),
                                                    colors=['white'])
@@ -966,8 +964,8 @@ class TabulatedPanel(wx.Panel):
         
         dlg = wx.SingleChoiceDialog(
             self,
-            "Select the parameters you want to show:",
-            "Choose parameters",
+            "Select isotope to include:",
+            "Choose Nucleus",
             items_to_show,
             style=wx.OK|wx.CANCEL|wx.DEFAULT_DIALOG_STYLE,
         )
@@ -1559,14 +1557,18 @@ class MainFrame(wx.Frame):
                 if fftmethod['apodization'][0]=='Hamming':
                     app = (27/50+23/50*np.cos(np.pi*tX/ax) )*(27/50+23/50*np.cos(np.pi*tY/ay) )
                 elif fftmethod['apodization'][0]=='Gaussian':
-                    sig = (ax+ay)/2/2.354820045 # 2.354820045 = 2sqrt(2ln2)
-                    app = np.exp(-0.5/sig**2* ( tX**2 + tY**2) )
+                    # sig = ax/2.0/2.354820045 # 2.354820045 = 2sqrt(2ln2)
+                    sig2 = (ax/2.354820045)**2
+                    app = np.exp(-( tX**2 + tY**2)/sig2 )
                 elif fftmethod['apodization'][0]=='Lor-Gau':
                     alpha = fftmethod['aalpha']
                     shift = fftmethod['ashift']
-                    sig = (ax+ay)/2/2.354820045 # 2.354820045 = 2sqrt(2ln2)
-                    app = ( np.exp(-0.5/sig**2* ( (tX-shift)**2 + (tY-shift)**2) )*
-                            np.exp(tX/ax/alpha + tY/ay/alpha) 
+                    sig2 = (ax/2.354820045)**2 # 2.354820045 = 2sqrt(2ln2)
+                    # app = ( np.exp(-0.5/sig**2* ( (tX-shift)**2 + (tY-shift)**2) )*
+                    #         np.exp(tX/ax/alpha + tY/ay/alpha) 
+                    #        )
+                    app = ( np.exp(-( (tX-shift)**2 + (tY-shift)**2)/sig2 
+                                   + tX/ax/alpha + tY/ay/alpha)
                            )
                 Data*=app
                 
@@ -1654,8 +1656,8 @@ class MainFrame(wx.Frame):
                 self.Data[ii]['simdata']=None
                 self.Data[ii]['simax']={'x':hs.X, 'y':hs.Y, 'xlabel':'Frequency, MHz', 'ylabel':'Frequency, MHz', 
                                         'orisel': np.array([[0], [0], [0]])}
-                self.Data[ii]['simactual']=False
-                self.RaiseError('Something went wrong with the simulation run. Good luck figuring out 🫩')
+                self.Data[ii]['simactual']=True
+                #self.RaiseError('Something went wrong with the simulation run. Good luck figuring out 🫩')
 
         self.matplotlib_panel.update_graph()
             
