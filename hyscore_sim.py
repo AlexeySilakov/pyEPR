@@ -188,7 +188,7 @@ class HYSCOREsim():
             sig = self.Sys.lw[0]/2.354820045 # 2.354820045 = 2sqrt(2ln2)
 
 
-            GA = np.exp(-0.5*X**2/sig**2)**2*np.exp(-0.5*Y**2/sig**2)
+            GA = np.exp(-0.5*X**2/sig**2)*np.exp(-0.5*Y**2/sig**2)
             fGA = np.fft.ifft2(np.fft.ifftshift(GA))
             
             if self.Opt.KillNeg:
@@ -576,7 +576,7 @@ class HYSCOREsim():
                 DA, VA = np.linalg.eigh(Ham_A)       # eigenvalues + eigenvectors
                 DB, VB = np.linalg.eigh(Ham_B)       # eigenvalues + eigenvectors
                 
-                M = VA.T@VB  # check if needed a transpose !
+                M = VA.conj().T@VB  # check if needed a transpose !
                 cM=np.linalg.inv(M)
                 
                 wa = np.real(DA[:, None] - DA[None, :])   # shape (n, n)
@@ -603,23 +603,22 @@ class HYSCOREsim():
                           np.exp(+2j * np.pi * (wa[kk, jj] + wb[nn, mm]) * self.Exp.tau*1e-3))*self.ak[n_ang]
                 if self.Exp.tDead:
                     phasedr = np.exp(-2j * np.pi * (wa[ii, kk] + wb[ll, nn]) * self.Exp.tDead)
+                    tAmp[:, 0] = ampar*exppar*phasedr
+                    tAmp[:, 1] = np.conj(ampar)*exppar*phasedr                    
                 else:
-                    phasedr = np.ones_like(ampar)
-        
-                # 5d.  Forward / reverse paths
-                tAmp[:, 0] = ampar*exppar*phasedr
-                tAmp[:, 1] = np.conj(ampar)*exppar*phasedr
+                    tAmp[:, 0] = ampar*exppar
+                    tAmp[:, 1] = np.conj(ampar)*exppar
         
                 tW[:, 0]=wa[ii, kk]
                 tW[:, 1]=wb[ll, nn]
                 
                 if not Amp:
-                    Amp = np.array(tAmp)
+                    Amp = np.array(tAmp, dtype=complex)
                 else:
                     Amp = np.concatenate((Amp, tAmp), axis=0)
                     
                 if not W:
-                    W = np.array(tW)
+                    W = np.array(tW, dtype=float)
                 else:
                     W = np.concatenate((W, tW), axis=0)
                     
@@ -629,6 +628,42 @@ class HYSCOREsim():
             self.bin_hyscore(W[:, 0], W[:, 1], Amp[:, 0], self.Exp.MaxFreq)
             self.bin_hyscore(W[:, 1], W[:, 0], Amp[:, 1], self.Exp.MaxFreq)
             
+  # def bin_hyscore(self, omega_a, omega_b, amp, max_freq):
+  #
+  #     # ---------- sanity checks ----------
+  #     n_points = self.Exp.nPoints
+  #     
+  #     # Ensure all inputs are NumPy arrays of the right dtype
+  #     #omega_a = np.asarray(omega_a, dtype=np.float64)
+  #     #omega_b = np.asarray(omega_b, dtype=np.float64)
+  #     # ---------- compute mapping ----------
+  #     n_points_d = float(n_points)
+  #     dx = (n_points_d - 1.0) / (2.0 * max_freq)
+  # 
+  #     # Convert frequencies to integer indices
+  #     idx1 = np.floor((omega_a + max_freq) * dx).astype(np.int64)
+  #     idx2 = np.floor((omega_b + max_freq) * dx).astype(np.int64)
+  # 
+  #     # Keep only peaks that fall inside the array bounds
+  #     valid = (idx1 >= 0) & (idx1 < n_points) & (idx2 >= 0) & (idx2 < n_points) & ( ((omega_a==0.0)|(omega_b==0.0))==False)
+  #     if not np.any(valid):
+  #         return  # nothing to add
+  # 
+  #     idx1 = idx1[valid]
+  #     idx2 = idx2[valid]
+  #     amp_valid = amp[valid]
+  #     
+  #     #self.rawSpec[idx1, idx2]=amp_valid
+  #     #self.rawSpec[idx2, idx1]=amp_valid
+  #     
+  #     # Linear index in column‑major order (as MATLAB does)
+  #     linear_idx = idx1 + idx2 * n_points
+  #     # Symmetric counterpart
+  #     sym_linear_idx = idx2 + idx1 * n_points
+  # 
+  #     # ---------- add contributions ----------
+  #     np.add.at(self.rawSpec.ravel(), linear_idx, amp_valid)
+  #     np.add.at(self.rawSpec.ravel(), sym_linear_idx, amp_valid)
     def bin_hyscore(self, omega_a, omega_b, amp, max_freq):
 
         # ---------- sanity checks ----------
@@ -646,7 +681,7 @@ class HYSCOREsim():
         idx2 = np.floor((omega_b + max_freq) * dx).astype(np.int64)
     
         # Keep only peaks that fall inside the array bounds
-        valid = (idx1 >= 0) & (idx1 < n_points) & (idx2 >= 0) & (idx2 < n_points) & ( ((omega_a==0.0)|(omega_b==0.0))==False)
+        valid = (idx1 >= 0) & ((idx1+1) < n_points) & (idx2 >= 0) & ((idx2+1) < n_points) & ( ((omega_a==0.0)|(omega_b==0.0))==False)
         if not np.any(valid):
             return  # nothing to add
     
@@ -664,8 +699,7 @@ class HYSCOREsim():
     
         # ---------- add contributions ----------
         np.add.at(self.rawSpec.ravel(), linear_idx, amp_valid)
-        np.add.at(self.rawSpec.ravel(), sym_linear_idx, amp_valid)
-        
+        np.add.at(self.rawSpec.ravel(), sym_linear_idx, amp_valid)        
     def computeOrisel_eig(self, grid='fibonacci', nKnots=20, epsilon=0.33, returnMatrix=False, setActive=False):
         # Brut force calculation of orientation selection using diagonalization of a complete spin Hamiltonian. For complex cases
         self.preCompute()
