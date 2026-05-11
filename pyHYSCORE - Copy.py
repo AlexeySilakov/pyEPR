@@ -533,11 +533,6 @@ class MatplotlibPanel(wx.Panel):
         #self.axes.plot([0, 1, 2], [0, 1, 4], marker='o')
 
         self.canvas = FigureCanvasWxAgg(self, -1, self.figure)
-
-        # Track mouse motion over the figure so we can show data coordinates
-        # in the main frame's status bar whenever the cursor is over an axis.
-        self.canvas.mpl_connect('motion_notify_event', self.on_mouse_move)
-        self.canvas.mpl_connect('figure_leave_event', self.on_figure_leave)
         
         self.chk_FFT = wx.CheckBox(self, label="FFT(y)")
         self.chk_FFT.SetValue(self.showFFT)
@@ -594,33 +589,7 @@ class MatplotlibPanel(wx.Panel):
         self.toolbar.update()
         
         self.SetSizer(sizer)
-
-    # ----- Status-bar coordinate readout -------------------------------------
-    def on_mouse_move(self, event):
-        """Show data-space x, y in the main frame's status bar while the
-        cursor is hovering over a matplotlib axis."""
-        sb = getattr(self.parent, 'statusbar', None)
-        if sb is None:
-            return
-        ax = event.inaxes
-        if ax is None or event.xdata is None or event.ydata is None:
-            sb.SetStatusText("", 1)
-            return
-        # Use each axis's own formatter so units/precision match the ticks.
-        try:
-            xs = ax.format_xdata(event.xdata)
-            ys = ax.format_ydata(event.ydata)
-        except Exception:
-            xs = f"{event.xdata:.4g}"
-            ys = f"{event.ydata:.4g}"
-        sb.SetStatusText(f"x = {xs},  y = {ys}", 1)
-
-    def on_figure_leave(self, event):
-        """Clear the coordinate readout when the cursor leaves the figure."""
-        sb = getattr(self.parent, 'statusbar', None)
-        if sb is not None:
-            sb.SetStatusText("", 1)
-
+        
     def on_quadrant(self, event):
         sel = self.rbox_quadrant.GetSelection()
         self.quadrant = ('all', 'horizontal', 'vertical')[sel]
@@ -1580,13 +1549,6 @@ class MainFrame(wx.Frame):
         self.SetMenuBar(menubar)
         self.Bind(wx.EVT_MENU, self.on_edit_colormap, item_edit_cmap)
 
-        # ---- Status bar ----------------------------------------------------
-        # Field 0: general status messages
-        # Field 1: x, y coordinates when hovering over a matplotlib axis
-        self.statusbar = self.CreateStatusBar(2)
-        self.statusbar.SetStatusWidths([-1, 260])
-        self.statusbar.SetStatusText("Ready", 0)
-        self.statusbar.SetStatusText("", 1)
 
         # Root splitter:  left | right
         self.splitter_main = wx.SplitterWindow(self, style=wx.SP_3D)

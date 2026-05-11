@@ -20,6 +20,7 @@ import wx.lib.agw.flatnotebook as fnb
 import wx.lib.agw.aui as aui
 
 import time
+import brukerread as Mybr
 
 # ############### for debugging purposes
 # wx.Log.SetActiveTarget(wx.LogStderr())
@@ -1152,7 +1153,7 @@ class MainFrame(wx.Frame):
 
         with wx.FileDialog(self,
             message="Select a file to load",
-            wildcard="Text files (*.csv)|*.csv|All files (*.*)|*.*",
+            wildcard="All supported files (*.csv;*.dsc;*.dta)|*.csv;*.dsc;*.dta|Bruker DSC/DTA (*.dsc;*.dta)|*.dsc;*.dta|CSV files (*.csv)|*.csv|All files (*.*)|*.*",
             defaultDir=self.currentPath,
             style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
     
@@ -1181,7 +1182,7 @@ class MainFrame(wx.Frame):
             freq = ax['freq1']
         ###########################################################################
         elif ext in ('.dsc', '.dta'):
-            import brukerread as Mybr
+            
             ax, data, dsc = Mybr.brukerread(file_path, return_ax=True, return_dsc=True)
             freq = ax['freq1']*1e-9
         ###########################################################################
@@ -1588,4 +1589,4 @@ if __name__ == "__main__":
     frame = MainFrame(None)
     frame.Show(True)
 
-    app.MainLoop()        
+    app.MainLoop()

@@ -2,7 +2,7 @@ import os
 #import sys
 import wx
 import wx.lib.mixins.listctrl as listmix
-# import wx.grid as gridlib
+import wx.grid as gridlib
 import wx.propgrid as wxpg
 
 import numpy as np
@@ -16,7 +16,7 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_wxagg import FigureCanvasWxAgg
 from matplotlib.backends.backend_wxagg import NavigationToolbar2WxAgg 
 import matplotlib.tri as mtri
-# from matplotlib import cm
+from matplotlib import cm
 import matplotlib.pyplot as plt
 # from mpl_toolkits.mplot3d import Axes3D
 
@@ -24,12 +24,9 @@ import brukerread as Mybr
 import classPropGridPanel as MypgPanel
 from SysPar import sysPar, expPar
 from hyscore_sim import optHYSCORE, HYSCOREsim
-from colormap_editor import (ColormapEditorDialog, stops_to_cmap,
-                              colormap_to_stops)
 # import wx.lib.agw.customtreectrl as CT
-VERSION=0.6
+VERSION=0.3
 
-# pip install wxPython numpy matplotlib scipy
 """
 TO DO:
     Recognize FFT File
@@ -101,13 +98,10 @@ class FileBrowserPanel(wx.Panel, listmix.ListCtrlAutoWidthMixin,
         
         vbox = wx.BoxSizer(wx.VERTICAL)
         
-        # 1️⃣ Current path (editable; Enter or focus-loss navigates to the typed path)
+        # 1️⃣ Current path label
         hbox_path = wx.BoxSizer(wx.HORIZONTAL)
-
-        self.lbl_path = wx.TextCtrl(self, value="",
-                                    style=wx.TE_PROCESS_ENTER | wx.TE_RIGHT)
-        self.lbl_path.Bind(wx.EVT_TEXT_ENTER, self.on_path_entered)
-        self.lbl_path.Bind(wx.EVT_KILL_FOCUS, self.on_path_entered)
+        
+        self.lbl_path = wx.StaticText(self, label="")
 
         hbox_path.Add(self.lbl_path, 1,
                       wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 0)
@@ -160,17 +154,7 @@ class FileBrowserPanel(wx.Panel, listmix.ListCtrlAutoWidthMixin,
         self.loaded_img_id = img_list.Add(loaded_bitmap)
         self.loadedBG_img_id = img_list.Add(loadedBG_bitmap)
         self.dsc_img_id = img_list.Add(dsc_bitmap)
-
-        # Sort indicator arrows for the column headers. ColumnSorterMixin
-        # will call SetImage(...) on the sorted column's header with one of
-        # these IDs; if GetSortImages() returned (None, None) as it did
-        # originally, newer wx raises TypeError. Providing real image IDs
-        # both fixes that crash and gives the user a visible sort indicator.
-        up_arrow   = wx.ArtProvider.GetBitmap(wx.ART_GO_UP,   wx.ART_OTHER, (16, 16))
-        down_arrow = wx.ArtProvider.GetBitmap(wx.ART_GO_DOWN, wx.ART_OTHER, (16, 16))
-        self.sort_up_img_id   = img_list.Add(up_arrow)
-        self.sort_down_img_id = img_list.Add(down_arrow)
-
+        
         self.list.AssignImageList(img_list, wx.IMAGE_LIST_SMALL)
 
         # 5️⃣ Load button
@@ -201,10 +185,7 @@ class FileBrowserPanel(wx.Panel, listmix.ListCtrlAutoWidthMixin,
         # ------------------------------------------------------------------
         # 3️⃣ Sorting helpers / data storage
         # ------------------------------------------------------------------
-        # The wx.ListCtrl has two columns (Name, Title), so pass 2 here.
-        # Passing 1 caused IndexError in ColumnSorterMixin.__OnColClick when
-        # the user clicked the "Title" header (col index 1 out of range).
-        listmix.ColumnSorterMixin.__init__(self, 2)
+        listmix.ColumnSorterMixin.__init__(self, 1)
         self.items = []          # (name, full_path, is_dir)
 
         # ------------------------------------------------------------------
@@ -223,8 +204,7 @@ class FileBrowserPanel(wx.Panel, listmix.ListCtrlAutoWidthMixin,
         # ------------------------------------------------------------------
         # 6️⃣ Show the (possibly overwritten) current path
         # ------------------------------------------------------------------
-        self.lbl_path.SetValue(self.path)
-        self.lbl_path.SetInsertionPointEnd()
+        self.lbl_path.SetLabel(self.path)
         self.refresh_file_list()
         
     def on_save_session(self, event):
@@ -236,11 +216,7 @@ class FileBrowserPanel(wx.Panel, listmix.ListCtrlAutoWidthMixin,
             wx.MessageBox("Please select a file to load.", "No file selected",
                           wx.OK | wx.ICON_WARNING)
             return
-        # After a header-click sort the visual row index no longer matches
-        # self.items's insertion order; use the stable data ID attached to
-        # the row instead.
-        data_id = self.list.GetItemData(idx)
-        name, full, is_dir = self.items[data_id]
+        name, full, is_dir = self.items[idx]
         if is_dir:
             wx.MessageBox(f"{name} is a directory.", "Cannot load",
                           wx.OK | wx.ICON_INFORMATION)
@@ -251,9 +227,7 @@ class FileBrowserPanel(wx.Panel, listmix.ListCtrlAutoWidthMixin,
         else:
             wx.MessageBox(f"The file {name} does not appear to be to have the right extension.", "Cannot load",
                           wx.OK | wx.ICON_INFORMATION)  
-        # Keep the user on the same row after the list is rebuilt, so
-        # successive loads don't jump the cursor back to the top.
-        self.refresh_file_list(select_name=name)
+        self.refresh_file_list()
             
     # ----------------------------------------------------------------------
     # Persistence helpers (plain‑text .ini file)
@@ -307,32 +281,9 @@ class FileBrowserPanel(wx.Panel, listmix.ListCtrlAutoWidthMixin,
         files.sort(key=lambda x: x[0].lower())
         return dirs + files
 
-    def refresh_file_list(self, select_name=None):
-        """
-        Rebuild the file list. If `select_name` is given and that filename is
-        still present after refresh, re-select it and scroll it into view; this
-        lets callers preserve the user's position across a refresh.
-
-        Falls back gracefully: if the name is gone (filter changed, file
-        deleted, etc.) the list just renders unselected at the top.
-
-        Also populates the itemDataMap used by ColumnSorterMixin so that
-        clicking the "Name" or "Title" column headers actually sorts the
-        list. Each row gets a stable data ID (its index in self.items)
-        attached via SetItemData, which survives sort reordering so our
-        lookup sites can map a visual row back to the underlying item.
-        """
-        # Remember where the top of the visible region is, so that if we
-        # cannot restore a selection we at least keep the scroll position.
-        try:
-            top_item = self.list.GetTopItem()
-        except Exception:
-            top_item = -1
-
+    def refresh_file_list(self):
         self.list.DeleteAllItems()
         self.items.clear()
-        # itemDataMap feeds ColumnSorterMixin: {data_id: (col0_key, col1_key)}
-        self.itemDataMap = {}
 
         for name, full, is_dir in self.get_entries():
             idx = self.list.InsertItem(self.list.GetItemCount(), name)
@@ -358,60 +309,7 @@ class FileBrowserPanel(wx.Panel, listmix.ListCtrlAutoWidthMixin,
             self.list.SetItemImage(idx, image_id)
             self.items.append((name, full, is_dir))
 
-            # --- Sorting wiring -------------------------------------------------
-            # data_id is the stable identity of this row. Its position in the
-            # list may change as the user clicks column headers, but the data
-            # value stays with the row, letting us recover (name, full, is_dir)
-            # from self.items[data_id] no matter the current visual order.
-            data_id = len(self.items) - 1
-            self.list.SetItemData(idx, data_id)
-
-            # Build the sort keys. Prefix "0_" for directories and "1_" for
-            # files so directories always sort to the top regardless of which
-            # column is sorted. Lowercase the rest so sort is case-insensitive.
-            dir_prefix = "0_" if is_dir else "1_"
-            name_key = dir_prefix + name.lower()
-            if name.lower().endswith(".dsc") and not is_dir:
-                # title was computed above for .dsc files
-                title_key = dir_prefix + (title or "").lower()
-            elif is_dir:
-                # Make dirs sort by name in the Title column too, so they
-                # still cluster at the top when user sorts by Title.
-                title_key = dir_prefix + name.lower()
-            else:
-                title_key = dir_prefix + ""   # non-DSC files have no title
-            self.itemDataMap[data_id] = (name_key, title_key)
-            # --------------------------------------------------------------------
-
         self.list.SetColumnWidth(0, -1)
-
-        # Re-apply whatever column sort the user had active before the refresh
-        # (ColumnSorterMixin keeps that state in self._col / self._colSortFlag).
-        # SortListItems() with no args re-uses the current settings.
-        try:
-            self.SortListItems()
-        except Exception:
-            pass
-
-        # Restore selection / scroll position after rebuild.
-        restored = False
-        if select_name is not None:
-            # After sorting, visual row order may differ from self.items order,
-            # so walk visible rows and match by filename via the attached data
-            # ID rather than by positional index.
-            for ridx in range(self.list.GetItemCount()):
-                data_id = self.list.GetItemData(ridx)
-                if 0 <= data_id < len(self.items) and self.items[data_id][0] == select_name:
-                    self.list.Select(ridx, on=1)
-                    self.list.Focus(ridx)
-                    self.list.EnsureVisible(ridx)
-                    restored = True
-                    break
-
-        if not restored and top_item >= 0 and self.list.GetItemCount() > 0:
-            # Best-effort fallback: scroll back to roughly where the user was.
-            last = self.list.GetItemCount() - 1
-            self.list.EnsureVisible(min(top_item, last))
         
     def extract_TITL_from_dsc(self, file_path):
         try:
@@ -430,12 +328,7 @@ class FileBrowserPanel(wx.Panel, listmix.ListCtrlAutoWidthMixin,
     # Sorting mixin helpers
     # ----------------------------------------------------------------------
     def GetListCtrl(self):  return self.list
-    def GetSortImages(self):
-        # Returned as (down-arrow-id, up-arrow-id) per ColumnSorterMixin's
-        # contract: the down arrow marks a descending sort, the up arrow
-        # marks an ascending sort. Returning (None, None) here would crash
-        # SetImage in current wxPython.
-        return self.sort_down_img_id, self.sort_up_img_id
+    def GetSortImages(self): return None, None
     def GetColumnSorterData(self): return self.items
 
     # ----------------------------------------------------------------------
@@ -453,14 +346,13 @@ class FileBrowserPanel(wx.Panel, listmix.ListCtrlAutoWidthMixin,
             wx.MessageBox("Please select a file to load.", "No file selected",
                           wx.OK | wx.ICON_WARNING)
             return
-        data_id = self.list.GetItemData(idx)
-        name, full, is_dir = self.items[data_id]
+        name, full, is_dir = self.items[idx]
         if is_dir:
             wx.MessageBox(f"{name} is a directory.", "Cannot load",
                           wx.OK | wx.ICON_INFORMATION)
         else:
             self.parent.loadData(full, BG=True)
-        self.refresh_file_list(select_name=name)
+        self.refresh_file_list()
         
     def on_change_folder(self, event):
         dlg = wx.DirDialog(self, message="Select a folder",
@@ -477,8 +369,7 @@ class FileBrowserPanel(wx.Panel, listmix.ListCtrlAutoWidthMixin,
 
     def on_item_activated(self, event):
         idx = event.GetIndex()
-        data_id = self.list.GetItemData(idx)
-        name, full, is_dir = self.items[data_id]
+        name, full, is_dir = self.items[idx]
         if is_dir:
             self.set_path(full)
 
@@ -492,21 +383,9 @@ class FileBrowserPanel(wx.Panel, listmix.ListCtrlAutoWidthMixin,
         new_path = os.path.abspath(new_path)
         if os.path.isdir(new_path):
             self.path = new_path
-            self.lbl_path.SetValue(self.path)
-            self.lbl_path.SetInsertionPointEnd()
+            self.lbl_path.SetLabel(self.path)
             self.refresh_file_list()
             self._save_path_to_file()
-
-    def on_path_entered(self, event):
-        """Navigate to a path typed directly into the path TextCtrl."""
-        typed = self.lbl_path.GetValue().strip()
-        if typed and os.path.isdir(typed):
-            self.set_path(typed)
-        else:
-            # Revert to current valid path on bad input
-            self.lbl_path.SetValue(self.path)
-            self.lbl_path.SetInsertionPointEnd()
-        event.Skip()
 # --------------------------------------------------------------------------- #
 # Matplotlib Canvas Panel
 # --------------------------------------------------------------------------- #
@@ -524,20 +403,13 @@ class MatplotlibPanel(wx.Panel):
         self.showOriSel = False
         self.showDiagonalProj = False
         self.OverlaySim = False
-        self.quadrant = 'all'   # 'all' | 'horizontal' | 'vertical'
         self.figure = Figure(figsize=(2, 2), dpi=100)
         self.axes = []
-        self.contours = []   # parallel to self.axes; holds QuadContourSet or None
         #self.axes.append(self.figure.add_subplot(111))
         #self.axes.set_title("Placeholder Figure")
         #self.axes.plot([0, 1, 2], [0, 1, 4], marker='o')
 
         self.canvas = FigureCanvasWxAgg(self, -1, self.figure)
-
-        # Track mouse motion over the figure so we can show data coordinates
-        # in the main frame's status bar whenever the cursor is over an axis.
-        self.canvas.mpl_connect('motion_notify_event', self.on_mouse_move)
-        self.canvas.mpl_connect('figure_leave_event', self.on_figure_leave)
         
         self.chk_FFT = wx.CheckBox(self, label="FFT(y)")
         self.chk_FFT.SetValue(self.showFFT)
@@ -564,12 +436,6 @@ class MatplotlibPanel(wx.Panel):
         self.chk_DiagProj.Bind(wx.EVT_CHECKBOX, self.on_check)
         self.chk_OverlaySim.Bind(wx.EVT_CHECKBOX, self.on_check)
 
-        self.rbox_quadrant = wx.RadioBox(
-            self, label="Quadrants",
-            choices=["All 4", "±ν₁  (horiz)", "±ν₂  (vert)"],
-            majorDimension=1, style=wx.RA_SPECIFY_ROWS)
-        self.rbox_quadrant.Bind(wx.EVT_RADIOBOX, self.on_quadrant)
-
         sizerH = wx.BoxSizer(wx.HORIZONTAL)
         sizerH.Add(self.chk_FFT, 0, wx.EXPAND)
         sizerH.Add(self.chk_BG, 0, wx.EXPAND)
@@ -577,8 +443,6 @@ class MatplotlibPanel(wx.Panel):
         sizerH.Add(self.chk_OriSel, 0, wx.EXPAND)
         sizerH.Add(self.chk_DiagProj, 0, wx.EXPAND)
         sizerH.Add(self.chk_OverlaySim, 0, wx.EXPAND)
-        sizerH.AddStretchSpacer(1)
-        sizerH.Add(self.rbox_quadrant, 0, wx.ALIGN_CENTER_VERTICAL)
 
         sizer = wx.BoxSizer(wx.VERTICAL)
         sizer.Add(sizerH, 0, wx.EXPAND)
@@ -594,40 +458,9 @@ class MatplotlibPanel(wx.Panel):
         self.toolbar.update()
         
         self.SetSizer(sizer)
-
-    # ----- Status-bar coordinate readout -------------------------------------
-    def on_mouse_move(self, event):
-        """Show data-space x, y in the main frame's status bar while the
-        cursor is hovering over a matplotlib axis."""
-        sb = getattr(self.parent, 'statusbar', None)
-        if sb is None:
-            return
-        ax = event.inaxes
-        if ax is None or event.xdata is None or event.ydata is None:
-            sb.SetStatusText("", 1)
-            return
-        # Use each axis's own formatter so units/precision match the ticks.
-        try:
-            xs = ax.format_xdata(event.xdata)
-            ys = ax.format_ydata(event.ydata)
-        except Exception:
-            xs = f"{event.xdata:.4g}"
-            ys = f"{event.ydata:.4g}"
-        sb.SetStatusText(f"x = {xs},  y = {ys}", 1)
-
-    def on_figure_leave(self, event):
-        """Clear the coordinate readout when the cursor leaves the figure."""
-        sb = getattr(self.parent, 'statusbar', None)
-        if sb is not None:
-            sb.SetStatusText("", 1)
-
-    def on_quadrant(self, event):
-        sel = self.rbox_quadrant.GetSelection()
-        self.quadrant = ('all', 'horizontal', 'vertical')[sel]
-        self.update_graph()
-
+        
     def on_check(self, event):
-        (self.showFFT, self.showBG, self.showSkyline, self.showOriSel, self.showDiagonalProj, self.OverlaySim) = (
+        (self.showFFT, self.showBG, self.showSkyline, self.showOriSel,self.showDiagonalProj, self.OverlaySim) = (
         self.chk_FFT.GetValue(),
         self.chk_BG.GetValue(),
         self.chk_Skyline.GetValue(),
@@ -652,7 +485,6 @@ class MatplotlibPanel(wx.Panel):
                     ax.clear()
                     ax.remove()
             self.axes = [None]*(nData*nrows)
-            self.contours = [None]*(nData*nrows)
             self.figure.clf()
             makenew = True
         axcnt= 0
@@ -672,7 +504,7 @@ class MatplotlibPanel(wx.Panel):
                 ma = np.max(np.max(data))*dd['zmax']
                 mi = np.max(np.max(data))*dd['zmin'] 
                 xmi,xma, ymi, yma = (dd['fmin'], dd['fmax'], dd['fmin'], dd['fmax'] )
-                axlabel='Frequency, MHz'
+                axlabel='Time, $mu$s'
             else:
                 data = np.real(dd['data'][:,:,0])
                 axEx = [np.min(dd['ax']['x']), np.max(dd['ax']['x']), 
@@ -687,13 +519,12 @@ class MatplotlibPanel(wx.Panel):
                     ma = np.max(np.max(data))*dd['zmax']
                     mi = np.max(np.max(data))*dd['zmin'] 
                     xmi,xma, ymi, yma = (dd['fmin'], dd['fmax'], dd['fmin'], dd['fmax'] )
-                axlabel=r'Time, $\mu$s'
+                axlabel='Frequency, MHz'
             if makenew:                                             
                 self.axes[axcnt]=self.figure.add_subplot(nrows, nData, axcnt+1)
                 
                 im = self.axes[axcnt].imshow(
-                    data, extent=axEx, origin="lower",
-                    cmap=self.parent.current_cmap, interpolation="nearest")
+                    data, extent=axEx, origin="lower", cmap="jet", interpolation="nearest")
                 im.set_clim(vmin=mi, vmax=ma)
 
             else:
@@ -702,22 +533,9 @@ class MatplotlibPanel(wx.Panel):
                         ch.set_data(data)
                         ch.set_extent(axEx)
                         ch.set_clim(vmin=mi, vmax=ma)
-                        ch.set_cmap(self.parent.current_cmap)
                         break
             self.axes[axcnt].set_xlim(xmi, xma)
             self.axes[axcnt].set_ylim(ymi, yma)
-            # -- Quadrant display mode ---------------------------------------
-            # xmi/xma/ymi/yma already span the full FFT range (negative to
-            # positive). Override limits to show only the requested quadrants.
-            if self.quadrant == 'horizontal':
-                # Show full x range (±ν₁) but only positive y (ν₂ ≥ 0)
-                self.axes[axcnt].set_xlim(xmi, xma)
-                self.axes[axcnt].set_ylim(0, yma)
-            elif self.quadrant == 'vertical':
-                # Show only positive x (ν₁ ≥ 0) but full y range (±ν₂)
-                self.axes[axcnt].set_xlim(0, xma)
-                self.axes[axcnt].set_ylim(ymi, yma)
-            # 'all' keeps the limits already set above unchanged
             tf = dd['field']
             self.axes[axcnt].set_title(f'B$_0$={tf} mT', fontsize = 'small')
             if showLabels:
@@ -750,8 +568,7 @@ class MatplotlibPanel(wx.Panel):
                 if makenew:                                             
                     self.axes[simax]=self.figure.add_subplot(nrows, nData, simax+1)
                     im = self.axes[simax].imshow(
-                        simdata, extent=simaxEx, origin="lower",
-                        cmap=self.parent.current_cmap, interpolation="nearest")
+                        simdata, extent=simaxEx, origin="lower", cmap="jet", interpolation="nearest")
                     im.set_clim(vmin=simi, vmax=sima)
 
                 else:
@@ -762,98 +579,28 @@ class MatplotlibPanel(wx.Panel):
                             ch.set_data(simdata)
                             ch.set_extent(simaxEx)
                             ch.set_clim(vmin=simi, vmax=sima)
-                            ch.set_cmap(self.parent.current_cmap)
                     # cycle through data panel to find contour
                     for ch in self.axes[axcnt].get_children():
                         if type(ch)== matplotlib.image.AxesImage:
                             pass
 
-                ### Contours cannot have their data replaced in-place;
-                ### we must remove the old QuadContourSet and draw a new one.
-                if len(self.contours) > axcnt and self.contours[axcnt] is not None:
-                    try:
-                        self.contours[axcnt].remove()
-                    except Exception:
-                        pass
-                    self.contours[axcnt] = None
+                ### there does not appear to be a way to just replace data in contours
+                ### one has to remove old objects and replace with new ones.
+                ### So, we have to do it every bloody time
+                for ch in self.axes[axcnt].get_children():
+                    if type(ch)== matplotlib.collections.PathCollection:
+                        ch.remove()
                 if self.OverlaySim:
-                    self.contours[axcnt] = self.axes[axcnt].contour(
-                        dd['simax']['x'], dd['simax']['y'],
-                        simdata, np.linspace(simi, sima, nlev),
-                        colors=['white'])
+                    co = self.axes[axcnt].contour(dd['simax']['x'], dd['simax']['y'],
+                                                   simdata, np.linspace(simi, sima, nlev),
+                                                   colors=['white'])
 
-                # axes lim set to data specs, then quadrant mode applied
+                # axes lim set to data specs
                 self.axes[simax].set_xlim(xmi, xma)
                 self.axes[simax].set_ylim(ymi, yma)
-                if self.quadrant == 'horizontal':
-                    self.axes[simax].set_xlim(xmi, xma)
-                    self.axes[simax].set_ylim(0, yma)
-                elif self.quadrant == 'vertical':
-                    self.axes[simax].set_xlim(0, xma)
-                    self.axes[simax].set_ylim(ymi, yma)
                 if len(realsim)>0:
                     self.axes[simax].annotate("no simulation", (.0, .0), xycoords='axes points', color='w')
                 rowcnt+=1
-            ########## ----- skyline (max projection along each axis) ----------
-            if self.showSkyline:
-                skyax = axcnt+rowcnt*nData
-                if makenew:
-                    # sharex links physical x width to the data panel above
-                    self.axes[skyax] = self.figure.add_subplot(
-                        nrows, nData, skyax+1, sharex=self.axes[axcnt])
-                else:
-                    self.axes[skyax].cla()
-
-                # Determine frequency range for each axis based on quadrant mode
-                # 'vertical'   -> only ν₁ ≥ 0, so x runs [0, xma]; y still full
-                # 'horizontal' -> only ν₂ ≥ 0, so y runs [0, yma]; x still full
-                sky_xmi = 0 if self.quadrant == 'vertical'   else xmi
-                sky_ymi = 0 if self.quadrant == 'horizontal' else ymi
-
-                # Slice data to the active quadrant before projecting
-                x_axis = np.linspace(axEx[0], axEx[1], data.shape[1])
-                y_axis = np.linspace(axEx[2], axEx[3], data.shape[0])
-                x_mask = x_axis >= sky_xmi
-                y_mask = y_axis >= sky_ymi
-                sky_data = data[np.ix_(y_mask, x_mask)]
-                show_x = self.quadrant in ('all', 'horizontal')
-                show_y = self.quadrant == 'vertical'
-                if show_x:
-                    sky_x = np.max(sky_data, axis=0)
-                    norm_val = np.max(sky_x) if np.max(sky_x) != 0 else 1.0
-                    self.axes[skyax].plot(x_axis[x_mask], sky_x / norm_val, color='b', label='x-proj')
-                if show_y:
-                    sky_y = np.max(sky_data, axis=1)
-                    norm_val = np.max(sky_y) if np.max(sky_y) != 0 else 1.0
-                    self.axes[skyax].plot(y_axis[y_mask], sky_y / norm_val, color='g', label='y-proj')
-
-                if type(dd['simdata']) != type(None):
-                    simdata_sky = dd['simdata']
-                    simaxEx_sky = [np.min(dd['simax']['x']), np.max(dd['simax']['x']),
-                               np.min(dd['simax']['y']), np.max(dd['simax']['y'])]
-                    sx_axis = np.linspace(simaxEx_sky[0], simaxEx_sky[1], simdata_sky.shape[1])
-                    sy_axis = np.linspace(simaxEx_sky[2], simaxEx_sky[3], simdata_sky.shape[0])
-                    sx_mask = sx_axis >= sky_xmi
-                    sy_mask = sy_axis >= sky_ymi
-                    ssky_data = simdata_sky[np.ix_(sy_mask, sx_mask)]
-                    if show_x:
-                        ssky_x = np.max(ssky_data, axis=0)
-                        snorm = np.max(ssky_x) if np.max(ssky_x) != 0 else 1.0
-                        self.axes[skyax].plot(sx_axis[sx_mask], ssky_x / snorm, color='r',
-                                              linestyle='--', label='sim x-proj')
-                    if show_y:
-                        ssky_y = np.max(ssky_data, axis=1)
-                        snorm = np.max(ssky_y) if np.max(ssky_y) != 0 else 1.0
-                        self.axes[skyax].plot(sy_axis[sy_mask], ssky_y / snorm, color='m',
-                                              linestyle='--', label='sim y-proj')
-
-                # x limits mirror the data panel (sharex keeps them in sync on zoom,
-                # but we set them explicitly so the initial view is correct too)
-                self.axes[skyax].set_xlim(sky_xmi, xma)
-                self.axes[skyax].set_ylabel('Intensity (norm.)', fontsize='small')
-                self.axes[skyax].legend(fontsize='x-small', loc='upper right')
-                rowcnt += 1
-
             ########## ----- show orientation selection -----------
           
             if self.showOriSel:
@@ -873,7 +620,7 @@ class MatplotlibPanel(wx.Panel):
                     norm = plt.Normalize(vmin=0, vmax=np.max(ak))
                     tri = mtri.Triangulation(x, y)    
                     triangle_ak = ak[tri.triangles].max(axis=1)          # one value per triangle
-                    facecolors = self.parent.current_cmap(norm(triangle_ak))
+                    facecolors = cm.jet(norm(triangle_ak))
                     
                     surf = self.axes[oriax].plot_trisurf(
                         x, y, z,
@@ -885,7 +632,7 @@ class MatplotlibPanel(wx.Panel):
                     self.axes[oriax].set_aspect('equal') 
                     self.axes[oriax].set_xlabel('X'); self.axes[oriax].set_ylabel('Y'); self.axes[oriax].set_zlabel('Z')
                     surf.set_facecolor(facecolors)
-                    surf.set_edgecolor(self.parent.current_cmap(norm(ak)))
+                    surf.set_edgecolor(cm.jet(norm(ak)))
                 rowcnt+=1
             if self.showDiagonalProj:
                 diagprj = axcnt+rowcnt*nData
@@ -931,8 +678,7 @@ class MatplotlibPanel(wx.Panel):
                 rowcnt+=1
                 
             axcnt+=1
-        if makenew:
-            self.figure.tight_layout(pad=1.2)
+        self.figure.tight_layout()
         self.canvas.draw()
     def rotate45(self, A):
         N = A.shape[0]
@@ -1114,7 +860,7 @@ class TabulatedPanel(wx.Panel):
         self.nb.AddPage(self.data_panel, "Data")
         
         sizer = wx.BoxSizer(wx.VERTICAL)
-
+        
         sizerBtns = wx.BoxSizer(wx.HORIZONTAL)
         self.btn_delete = wx.Button(self.data_panel, label="Delete Data")
         self.btn_delete.Bind(wx.EVT_BUTTON, self.on_delete)
@@ -1125,26 +871,10 @@ class TabulatedPanel(wx.Panel):
         sizerBtns.Add(self.btn_dsc, 1, wx.ALIGN_CENTER | wx.ALL, 5)
         sizer.Add(sizerBtns, 0, wx.ALIGN_LEFT | wx.ALL, 5)
 
-        row_expand = wx.BoxSizer(wx.HORIZONTAL)
         self.chk_expanded = wx.CheckBox(self.data_panel, label="Expand all")
         self.chk_expanded.SetValue(False)
         self.chk_expanded.Bind(wx.EVT_CHECKBOX, self.on_expandchk)
-        row_expand.Add(self.chk_expanded, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 12)
-        row_expand.AddStretchSpacer(1)
-
-        # bmp_up   = wx.ArtProvider.GetBitmap(wx.ART_GO_UP,   wx.ART_BUTTON, (16, 16))
-        # bmp_down = wx.ArtProvider.GetBitmap(wx.ART_GO_DOWN, wx.ART_BUTTON, (16, 16))
-        self.btn_moveUp   = wx.Button(self.data_panel, label="▲", size=(24, 22), style=wx.BORDER_NONE)
-        self.btn_moveDown = wx.Button(self.data_panel, label="▼", size=(24, 22), style=wx.BORDER_NONE)
-        self.btn_moveUp.SetToolTip("Move selected dataset up (earlier column)")
-        self.btn_moveDown.SetToolTip("Move selected dataset down (later column)")
-        self.btn_moveUp.SetBackgroundColour('white')
-        self.btn_moveDown.SetBackgroundColour('white')
-        self.btn_moveUp.Bind(  wx.EVT_BUTTON, lambda e: self.on_move_data(-1))
-        self.btn_moveDown.Bind(wx.EVT_BUTTON, lambda e: self.on_move_data(+1))
-        row_expand.Add(self.btn_moveUp,   0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 2)
-        row_expand.Add(self.btn_moveDown, 0, wx.ALIGN_CENTER_VERTICAL)
-        sizer.Add(row_expand, 0, wx.EXPAND | wx.ALL, 4)
+        sizer.Add(self.chk_expanded, 0, wx.ALIGN_LEFT | wx.ALL, 0)
         # file tree
         self.filetree = wxpg.PropertyGrid(
             self.data_panel,
@@ -1162,7 +892,7 @@ class TabulatedPanel(wx.Panel):
         
         self.filetree.SetCaptionBackgroundColour(self.Color_BG_FILE_Inact)
         self.filetree.SetCaptionTextColour(self.Color_FG_FILE_Title)
-        # cat1 = self.filetree.Append(wxpg.PropertyCategory("Nothing loaded yet"))
+        cat1 = self.filetree.Append(wxpg.PropertyCategory("Nothing loaded yet"))
         # self.filetree.AppendIn(cat1, wxpg.FloatProperty("MW Freq", value=9.43))
         # self.filetree.AppendIn(cat1, wxpg.FloatProperty("B0", value=350.0))
         # self.filetree.AppendIn(cat1, wxpg.FloatProperty("tau", value=120.0))
@@ -1305,7 +1035,7 @@ class TabulatedPanel(wx.Panel):
         pass
     def on_dsc(self, event):
         items_to_show = []
-        # selected_items = []
+        selected_items = []
         for dd in self.parent.Data:
             items_to_show.append(dd['title'])
         
@@ -1334,7 +1064,7 @@ class TabulatedPanel(wx.Panel):
             
     def on_delete(self, event):
         items_to_show = []
-        # selected_items = []
+        selected_items = []
         for dd in self.parent.Data:
             items_to_show.append(dd['title'])
         
@@ -1359,68 +1089,8 @@ class TabulatedPanel(wx.Panel):
             for de in selected_indices:
                 self.parent.Data.pop(de)
             self.parent.update_everything()
-
-    def _get_selected_data_index(self):
-        """
-        Return the index in self.parent.Data of the file that is currently
-        selected in filetree, or None if nothing file-related is selected.
-
-        Works whether the user has clicked the file's category header or any
-        of its child properties, because children are named "<key> <index>"
-        (e.g. "show 0", "fname 2") by update_filelist().
-        """
-        prop = self.filetree.GetSelection()
-        if prop is None:
-            return None
-
-        # Case 1: a child property is selected -> name ends with " <index>"
-        try:
-            name = prop.GetName()
-            parts = name.split()
-            if len(parts) >= 2 and parts[-1].lstrip('-').isdigit():
-                idx = int(parts[-1])
-                if 0 <= idx < len(self.parent.Data):
-                    return idx
-        except Exception:
-            pass
-
-        # Case 2: a category header is selected -> its displayed label is
-        # "<1-based-index>: <title>" (see update_filelist). Parse the prefix.
-        if isinstance(prop, wxpg.PropertyCategory):
-            try:
-                label = prop.GetLabel()
-                prefix, _, _ = label.partition(':')
-                prefix = prefix.strip()
-                if prefix.isdigit():
-                    idx = int(prefix) - 1
-                    if 0 <= idx < len(self.parent.Data):
-                        return idx
-            except Exception:
-                pass
-
-        return None
-
-    def on_move_data(self, direction):
-        """Move the currently selected dataset by direction (-1 or +1)."""
-        idx = self._get_selected_data_index()
-        if idx is None:
-            return
-        new_idx = idx + direction
-        if new_idx < 0 or new_idx >= len(self.parent.Data):
-            return
-        data_list = self.parent.Data
-        data_list[idx], data_list[new_idx] = data_list[new_idx], data_list[idx]
-        self.update_filelist()
-        self.parent.matplotlib_panel.update_graph()
-        try:
-            new_prop = self.filetree.GetPropertyByName(f"show {new_idx}")
-            if new_prop is not None:
-                self.filetree.SelectProperty(new_prop)
-                self.filetree.EnsureVisible(new_prop)
-        except Exception:
-            pass
-
-
+            
+            
     def on_doFFT(self, event):
         fftmethod = {}
         for kk in self.FFTparams.keys():
@@ -1451,18 +1121,24 @@ class TabulatedPanel(wx.Panel):
         
     def on_filetree_clicked(self, event):
         if isinstance(event.GetProperty(), wxpg.PropertyCategory):
-            cat_prop = event.GetProperty()
-
+            
             if not self.chk_expanded.GetValue():
                 self.filetree.CollapseAll()
-                self.filetree.Expand(cat_prop)
+                self.filetree.Expand(event.GetProperty())
+                #self.ffttree.SetCaptionTextColour(wx.Colour(215, 200, 150))
+                #self.ffttree.SetCaptionBackgroundColour(wx.Colour(215, 200, 150)) # 215, 120, 64
                 it = self.filetree.GetIterator(wxpg.PG_ITERATE_ALL)
+                #prop = self.filetree.GetFirstChild()
                 while not it.AtEnd():
+                # while it.IsOk():
                     prop = it.GetProperty()
+                    #for prop in it:
                     if isinstance(prop, wxpg.PropertyCategory):
                         prop.GetCell(0).SetBgCol(wx.Colour(100, 150, 215))
                     it.Next()
-                cat_prop.GetCell(0).SetBgCol(wx.Colour(64, 120, 215))
+                cll = event.GetProperty().GetCell(0).SetBgCol(wx.Colour(64, 120, 215))
+                #event.GetProperty().SetBackgroundColour(wx.Colour(200, 200, 200))
+        #(key, strval) = event.GetPropertyName().split()
 
     def on_filetree(self, event):
         (key, strval) = event.GetPropertyName().split()
@@ -1511,11 +1187,7 @@ class TabulatedPanel(wx.Panel):
             bgchoices.append(bg['title'])
             
         for ii, dd in enumerate(self.parent.Data):
-            # Prefix the displayed title with the 1-based order number so the
-            # user can see at a glance which column this dataset occupies in
-            # the graph. The underlying dd['title'] is left unmodified.
-            disp_title = f"{ii + 1}: {dd['title']}"
-            cat.append(self.filetree.Append(wxpg.PropertyCategory(disp_title)))
+            cat.append(self.filetree.Append(wxpg.PropertyCategory(dd['title'])))
             cat[ii].SetBackgroundColour(wx.Colour(255, 255, 255))
             cat[ii].SetTextColour(wx.Colour(0, 0, 180))
             self.filetree.AppendIn(cat[ii], wxpg.BoolProperty("Show", f"show {ii}",value=dd['show']))
@@ -1563,30 +1235,8 @@ class MainFrame(wx.Frame):
         self.ForegroundColor = wx.Colour(0, 0, 0)
         self.ControlBackgroundColor = wx.Colour(255, 255, 255)
 
-        # ---- Colormap state (default: jet) ---------------------------------
-        self.current_cmap_name  = "jet"
-        self.current_cmap_stops = colormap_to_stops("jet", 9)   # list of (pos, hex)
-        self.current_cmap       = stops_to_cmap(self.current_cmap_stops, "jet")
-
         self.settings = self.get_default_settings() ####  replace with ini loader in the future
 
-        # ---- Menu bar ------------------------------------------------------
-        menubar = wx.MenuBar()
-
-        cmap_menu = wx.Menu()
-        item_edit_cmap = cmap_menu.Append(wx.ID_ANY, "Edit Colormap…",
-                                          "Open the colormap editor")
-        menubar.Append(cmap_menu, "&Colormap")
-        self.SetMenuBar(menubar)
-        self.Bind(wx.EVT_MENU, self.on_edit_colormap, item_edit_cmap)
-
-        # ---- Status bar ----------------------------------------------------
-        # Field 0: general status messages
-        # Field 1: x, y coordinates when hovering over a matplotlib axis
-        self.statusbar = self.CreateStatusBar(2)
-        self.statusbar.SetStatusWidths([-1, 260])
-        self.statusbar.SetStatusText("Ready", 0)
-        self.statusbar.SetStatusText("", 1)
 
         # Root splitter:  left | right
         self.splitter_main = wx.SplitterWindow(self, style=wx.SP_3D)
@@ -1633,24 +1283,6 @@ class MainFrame(wx.Frame):
         # self.splitter_main.SetSashSize(10) 
         self.Centre()
         # self.Fit()
-    # -----------------------------------------------------------------------
-    def on_edit_colormap(self, event):
-        """Open the ColormapEditorDialog; apply the chosen colormap if OK."""
-        with ColormapEditorDialog(
-                parent=self,
-                preset_stops=self.current_cmap_stops,
-                preset_name=self.current_cmap_name,
-                title="Colormap Editor") as dlg:
-            if dlg.ShowModal() == wx.ID_OK:
-                cmap  = dlg.get_colormap()
-                name  = dlg.get_colormap_name()
-                stops = dlg.get_stops()
-                if cmap is not None:
-                    self.current_cmap       = cmap
-                    self.current_cmap_name  = name
-                    self.current_cmap_stops = stops
-                    self.matplotlib_panel.update_graph()
-
     # -----------------------------------------------------------------------
     def RaiseError(self, message):
         # Show a modal error dialog with a custom message
@@ -1872,30 +1504,18 @@ class MainFrame(wx.Frame):
         self.matplotlib_panel.update_graph()
              
     def update_FFT(self, fftmethod=None):
-        # Build a fallback fftmethod from the UI controls so we always have
-        # valid parameters even when called without an explicit argument.
-        ui_fftmethod = {}
-        for kk in self.tabulated_panel.FFTparams.keys():
-            prop = self.tabulated_panel.ffttree.GetProperty(kk)
-            ui_fftmethod[kk] = prop.GetValue()
 
         for ii, dd in enumerate(self.Data):
-            # Per-dataset fftmethod: prefer the explicit argument, then the
-            # value stored on the dataset, then fall back to the UI controls.
-            if fftmethod:
-                method = fftmethod
-            elif dd['fftmethod'] is not None:
-                method = dd['fftmethod'].copy()
-            else:
-                method = ui_fftmethod.copy()
-
+            if not fftmethod:
+                fftmethod=self.Data[ii]['fftmethod'].copy()
+            
             if len(dd['data'].shape)>2: ### need to fix at the source. Just for now let's deal with it.
                 Data = np.array(dd['data'][:,:,0])
             else:
                 Data = np.array(dd['data'])
                 
             if dd['isfft']:
-                continue          # skip already-FFT datasets; do NOT return
+                return
             
             # dd['bgdata'] is coming from a MultiChoice property, so it's value is a list
             if dd['bgdata'][0]!='none':
@@ -1916,33 +1536,33 @@ class MainFrame(wx.Frame):
                         self.RaiseError("😭 Background and Data have different dimensions.")
                     Data -=BGscale*BG
                 
-            if not method['imag']:
+            if not fftmethod['imag']:
                 Data=np.real(Data)
                 
             X=np.array(dd['ax']['x'])
             Y=np.array(dd['ax']['y'])
                                        
             for cc in range(Data.shape[0]):
-                pp = np.polyfit(Y, Data[cc,:], method['polynomial'])
+                pp = np.polyfit(Y, Data[cc,:], fftmethod['polynomial'])
                 Data[cc,:]-=np.polyval(pp, Y)
             for cc in range(Data.shape[1]):
-                pp = np.polyfit(X, Data[:, cc], method['polynomial'])
+                pp = np.polyfit(X, Data[:, cc], fftmethod['polynomial'])
                 Data[:, cc]-=np.polyval(pp, X)
             
-            if method['apodization'][0]!='none':
+            if fftmethod['apodization'][0]!='none':
                 tX, tY = np.meshgrid(X,Y)
-                awidth= method['awidth']
+                awidth= fftmethod['awidth']
                 ax = np.max(X)*awidth
                 ay = np.max(Y)*awidth
-                if method['apodization'][0]=='Hamming':
+                if fftmethod['apodization'][0]=='Hamming':
                     app = (27/50+23/50*np.cos(np.pi*tX/ax) )*(27/50+23/50*np.cos(np.pi*tY/ay) )
-                elif method['apodization'][0]=='Gaussian':
+                elif fftmethod['apodization'][0]=='Gaussian':
                     # sig = ax/2.0/2.354820045 # 2.354820045 = 2sqrt(2ln2)
                     sig2 = (ax/2.354820045)**2
                     app = np.exp(-( tX**2 + tY**2)/sig2 )
-                elif method['apodization'][0]=='Lor-Gau':
-                    alpha = method['aalpha']
-                    shift = method['ashift']
+                elif fftmethod['apodization'][0]=='Lor-Gau':
+                    alpha = fftmethod['aalpha']
+                    shift = fftmethod['ashift']
                     sig2 = (ax/2.354820045)**2 # 2.354820045 = 2sqrt(2ln2)
                     # app = ( np.exp(-0.5/sig**2* ( (tX-shift)**2 + (tY-shift)**2) )*
                     #         np.exp(tX/ax/alpha + tY/ay/alpha) 
@@ -1952,8 +1572,8 @@ class MainFrame(wx.Frame):
                            )
                 Data*=app
                 
-            if method['zfill']>0:
-                ndim = np.ceil(np.log2(Data.shape[0]))+method['zfill']
+            if fftmethod['zfill']>0:
+                ndim = np.ceil(np.log2(Data.shape[0]))+fftmethod['zfill']
                 if ndim>13:
                     # raise AttributeError("Zero Filling is set too high.")
                     self.RaiseError("😭 Zero Filling is set too high.")
@@ -2070,13 +1690,11 @@ class MainFrame(wx.Frame):
                              'fftmethod': fftmethod, 
                              'Sys': self.tabulated_panel.Sys_param.parameters, 
                              'Exp': self.tabulated_panel.Exp_param.parameters, 
-                             'Opt': self.tabulated_panel.Opt_param.parameters,
-                             'cmap_name': self.current_cmap_name,
-                             'cmap_stops': self.current_cmap_stops,
+                             'Opt': self.tabulated_panel.Opt_param.parameters, 
                              }
                 self.save_mixed_dict_xml(data_dict, pathname)
             except IOError:
-                wx.LogError("Cannot open file '%s'." % pathname)
+                wx.LogError("Cannot open file '%s'." % newfile)
                 
     def save_mixed_dict_xml(self, data_dict, filename):
         import xml.etree.ElementTree as ET
@@ -2157,23 +1775,6 @@ class MainFrame(wx.Frame):
                 for kk in fftmethod.keys():
                     prop=self.tabulated_panel.ffttree.GetPropertyByName(kk)
                     prop.SetValue(fftmethod[kk])
-
-            # ---- Restore colormap (fall back to jet if absent) -------------
-            if 'cmap_name' in result and 'cmap_stops' in result:
-                try:
-                    stops = [(float(p), str(c)) for p, c in result['cmap_stops']]
-                    self.current_cmap_name  = str(result['cmap_name'])
-                    self.current_cmap_stops = stops
-                    self.current_cmap       = stops_to_cmap(stops, self.current_cmap_name)
-                except Exception:
-                    self.current_cmap_name  = "jet"
-                    self.current_cmap_stops = colormap_to_stops("jet", 9)
-                    self.current_cmap       = stops_to_cmap(self.current_cmap_stops, "jet")
-            else:
-                # Older session file without colormap entry — use jet
-                self.current_cmap_name  = "jet"
-                self.current_cmap_stops = colormap_to_stops("jet", 9)
-                self.current_cmap       = stops_to_cmap(self.current_cmap_stops, "jet")
     
             self.Sys.setFromCtrl(self.tabulated_panel.Sys_param.parameters) # This is more to double check that input works
             self.Exp.setFromCtrl(self.tabulated_panel.Exp_param.parameters)                            
