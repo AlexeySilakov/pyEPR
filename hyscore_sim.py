@@ -167,8 +167,8 @@ class HYSCOREsim():
         #if self.verbose: print(f"HYSCORE spin_op in {elapsed2*1000:.2f} ms")
         
         self.rawSpec = np.zeros((self.Exp.nPoints, self.Exp.nPoints), dtype=complex)
-        self.X = np.linspace(-self.Exp.MaxFreq, self.Exp.MaxFreq, self.Exp.nPoints)
-        self.Y = np.linspace(-self.Exp.MaxFreq, self.Exp.MaxFreq, self.Exp.nPoints)
+        self.X = np.linspace(-self.Exp.MaxFreq, self.Exp.MaxFreq, self.Exp.nPoints, endpoint=False)
+        self.Y = np.linspace(-self.Exp.MaxFreq, self.Exp.MaxFreq, self.Exp.nPoints, endpoint=False)
         
         self.compute_transitions()
         self.makeFFT()
@@ -575,9 +575,10 @@ class HYSCOREsim():
                 # For Hermitian matrix
                 DA, VA = np.linalg.eigh(Ham_A)       # eigenvalues + eigenvectors
                 DB, VB = np.linalg.eigh(Ham_B)       # eigenvalues + eigenvectors
-                
+                # np.linalg.eigh returns V whose columns are eigenvectors, so VA[:, i] = |α_i> and VB[:, l] = |β_l>
                 M = VA.conj().T@VB  # check if needed a transpose !
-                cM=np.linalg.inv(M)
+                # cM=np.linalg.inv(M)
+                cM = M.conj().T # Because VA and VB are unitary (eigenvectors of Hermitian Hamiltonians from eigh), their product M = V_A^H V_B is also unitary. So
                 
                 wa = np.real(DA[:, None] - DA[None, :])   # shape (n, n)
                 wb = np.real(DB[:, None] - DB[None, :])   # shape (n, n)
@@ -674,11 +675,11 @@ class HYSCOREsim():
         #omega_b = np.asarray(omega_b, dtype=np.float64)
         # ---------- compute mapping ----------
         n_points_d = float(n_points)
-        dx = (n_points_d - 1.0) / (2.0 * max_freq)
+        dx = n_points_d / (2.0 * max_freq)   # was (n_points_d - 1.0) / (2*max_freq)
     
-        # Convert frequencies to integer indices
-        idx1 = np.floor((omega_a + max_freq) * dx).astype(np.int64)
-        idx2 = np.floor((omega_b + max_freq) * dx).astype(np.int64)
+        # Convert frequencies to integer indices ## in the future seek ways to make subbin.
+        idx1 = np.round((omega_a + max_freq) * dx).astype(np.int64)
+        idx2 = np.round((omega_b + max_freq) * dx).astype(np.int64)
     
         # Keep only peaks that fall inside the array bounds
         valid = (idx1 >= 0) & ((idx1+1) < n_points) & (idx2 >= 0) & ((idx2+1) < n_points) & ( ((omega_a==0.0)|(omega_b==0.0))==False)
