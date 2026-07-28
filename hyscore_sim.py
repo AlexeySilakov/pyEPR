@@ -324,7 +324,7 @@ class HYSCOREsim():
 
             # Effective frequency (MHz)
             feff = self.Exp.Field * self.geff / self.h_ov_beta_mTMHz   # shape (nangles,)
-            sig = self.Exp.ExciteWidth*2.35482
+            sig = self.Exp.ExciteWidth/2.35482
             if self.Opt.OriSelType[0]=='g_eff':
                 # Simple Gaussian line shape
                 ak = np.exp(-0.5 * ((feff - self.Exp.mwFreq*1e3) / sig)**2)
@@ -722,7 +722,7 @@ class HYSCOREsim():
         if not ((self.Exp.ExciteWidth > 0) and (self.Exp.mwFreq > 0)):
             self.errorFunc('computeOrisel_eig: Exp.ExciteWidth and Exp.mwFreq are not set')
 
-        sig = self.Exp.ExciteWidth*2.35482
+        sig = self.Exp.ExciteWidth/2.35482
         mwFreqMHz = self.Exp.mwFreq * 1e3
 
         if self.Sys.S[0] != 0.5:

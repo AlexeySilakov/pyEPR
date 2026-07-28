@@ -2,6 +2,7 @@ import wx
 import wx.propgrid as wxpg
 import numpy as np
 import classFunctionModPG as MypgMod
+import theme
 # ----------------------------------------------------------------------
 # Custom SpinCtrlDouble Editor for Float Properties in a wxPropertyGrid. 
 # Largely based on answers from qwen3-coder:30b, with earier versions 
@@ -87,6 +88,7 @@ class SpinCtrlDoubleEditor(wxpg.PGEditor):
         self.spin.Bind(wx.EVT_SPINCTRLDOUBLE, self.OnSpin)
         self.spin.Bind(wx.EVT_TEXT_ENTER, self.OnTextEnter)
         self.spin.Bind(wx.EVT_KILL_FOCUS, self.OnLostFocus)
+        theme.theme_control(self.spin)
 
         return wxpg.PGWindowList(self.spin)
     def OnLostFocus(self, event):
@@ -277,7 +279,8 @@ class PropGridPanel(wx.Panel):
             style=wxpg.PG_SPLITTER_AUTO_CENTER | wxpg.PG_AUTO_SORT | wx.TAB_TRAVERSAL | wxpg.PG_NO_INTERNAL_BORDER,
 
         ) #wxpg.PG_HIDE_MARGIN |
-        
+        theme.theme_propgrid(self.pg, caption_key="accent")
+
         if showModFunc:
             insizer = wx.BoxSizer(wx.VERTICAL)
             insizer.Add(self.pg, 1, wx.EXPAND)

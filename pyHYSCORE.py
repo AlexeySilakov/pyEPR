@@ -7,7 +7,9 @@ import wx.propgrid as wxpg
 
 import numpy as np
 #import re
-import wx.lib.agw.flatnotebook as fnb
+
+import theme
+from theme import PillButton, PillCheckBox, PillTabBar, SegmentedPill
 
 # Matplotlib imports
 import matplotlib
@@ -115,13 +117,9 @@ class FileBrowserPanel(wx.Panel, listmix.ListCtrlAutoWidthMixin,
 
         vbox.Add(hbox_path, 0, wx.EXPAND | wx.ALL, 0)
 
-        # 2️⃣ Navigation buttons
-        hbox_nav = wx.BoxSizer(wx.HORIZONTAL)
-        self.btn_change = wx.Button(self, label="Change folder…")
-        self.btn_up = wx.Button(self, label="Up")
-        hbox_nav.Add(self.btn_change, 0, wx.RIGHT, 0)
-        hbox_nav.Add(self.btn_up, 0)
-        vbox.Add(hbox_nav, 0, wx.ALIGN_LEFT | wx.ALL, 0)
+        # Change folder / Up now live as toolbar icons on MainFrame
+        # (self.parent.tb_change_folder / tb_up), bound near the end of
+        # this constructor once self.on_change_folder/on_up_clicked exist.
 
         # 3️⃣ Filter combobox
         hbox_filter = wx.BoxSizer(wx.HORIZONTAL)
@@ -175,28 +173,30 @@ class FileBrowserPanel(wx.Panel, listmix.ListCtrlAutoWidthMixin,
         self.list.AssignImageList(img_list, wx.IMAGE_LIST_SMALL)
 
         # 5️⃣ Load button
-        gbox_Load = wx.GridSizer(rows=1, cols=2, vgap=2, hgap=0)
-        self.btn_load   = wx.Button(self, label="Load")
+        gbox_Load = wx.BoxSizer(wx.VERTICAL)
+        self.btn_load   = PillButton(self, "Load", color_key="pill_load",
+                                     draw_badge=theme.draw_squiggle_badge)
         self.btn_load.Bind(wx.EVT_BUTTON, self.on_load_clicked)
-        gbox_Load.Add(self.btn_load, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
-        
-        self.btn_loadbg = wx.Button(self, label="+ BG")
+        gbox_Load.Add(self.btn_load, 0, wx.EXPAND | wx.ALL, 2)
+
+        self.btn_loadbg = PillButton(self, "+ BG", color_key="pill_load",
+                                     draw_badge=theme.draw_flatline_badge)
         self.btn_loadbg.Bind(wx.EVT_BUTTON, self.on_loadBG_clicked)
-        gbox_Load.Add(self.btn_loadbg, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
-        
-        gbox_Save = wx.GridSizer(rows=1, cols=1, vgap=0, hgap=0)
-        self.btn_sessionSave = wx.Button(self, label="Save Session")
-        self.btn_sessionSave.Bind(wx.EVT_BUTTON, self.on_save_session)
-        gbox_Save.Add(self.btn_sessionSave, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
-        
-        vbox.Add(gbox_Load, 0, wx.ALIGN_CENTER | wx.ALL, 0)
-        vbox.Add(gbox_Save, 0, wx.ALIGN_CENTER | wx.ALL, 0)
-        
+        gbox_Load.Add(self.btn_loadbg, 0, wx.EXPAND | wx.ALL, 2)
+
+        # Save Session now lives as a toolbar icon on MainFrame
+        # (self.parent.tb_save_session), bound below once
+        # self.on_save_session exists.
+
+        vbox.Add(gbox_Load, 0, wx.EXPAND | wx.ALL, 0)
+
         mainbox.Add(vbox, 1, wx.EXPAND | wx.ALL, 0)
-        
-        self.toggle_btn = wx.Button(self, label="<", size=(18,-1))
-        mainbox.Add(self.toggle_btn, 0, wx.EXPAND, 0)
-        
+
+        # The collapse toggle used to live here, but a button *inside* this
+        # panel would disappear along with the rest of it once the panel is
+        # actually hidden (see MainFrame.on_toggle_left) -- it now lives in
+        # MainFrame itself, to the left of the splitter, so it stays visible.
+
         self.SetSizer(mainbox)
 
         # ------------------------------------------------------------------
@@ -212,9 +212,13 @@ class FileBrowserPanel(wx.Panel, listmix.ListCtrlAutoWidthMixin,
         # 4️⃣ Event bindings (now that all widgets exist)
         # ------------------------------------------------------------------
         self.choice_filter.Bind(wx.EVT_COMBOBOX, self.on_filter_changed)
-        
-        self.btn_change.Bind(wx.EVT_BUTTON, self.on_change_folder)
-        self.btn_up.Bind(wx.EVT_BUTTON, self.on_up_clicked)
+
+        # Change folder / Up / Save Session are toolbar icons on MainFrame
+        # (built before FileBrowserPanel -- see MainFrame.__init__), bound
+        # here now that this panel's handler methods exist.
+        self.parent.tb_change_folder.Bind(wx.EVT_BUTTON, self.on_change_folder)
+        self.parent.tb_up.Bind(wx.EVT_BUTTON, self.on_up_clicked)
+        self.parent.tb_save_session.Bind(wx.EVT_BUTTON, self.on_save_session)
         self.list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_item_activated)
         
         self.Bind(wx.EVT_WINDOW_DESTROY, self.on_destroy)   # persistence
@@ -545,22 +549,22 @@ class MatplotlibPanel(wx.Panel):
         self.canvas.mpl_connect('motion_notify_event', self.on_mouse_move)
         self.canvas.mpl_connect('figure_leave_event', self.on_figure_leave)
         
-        self.chk_FFT = wx.CheckBox(self, label="FFT(y)")
+        self.chk_FFT = PillCheckBox(self, "FFT(y)")
         self.chk_FFT.SetValue(self.showFFT)
-        
-        self.chk_BG = wx.CheckBox(self, label="Background")
+
+        self.chk_BG = PillCheckBox(self, "Background")
         self.chk_BG.SetValue(self.showBG)
-        
-        self.chk_Skyline = wx.CheckBox(self, label="Skyline")
+
+        self.chk_Skyline = PillCheckBox(self, "Skyline")
         self.chk_Skyline.SetValue(self.showSkyline)
-        
-        self.chk_OriSel = wx.CheckBox(self, label="Orientat maps")
+
+        self.chk_OriSel = PillCheckBox(self, "Orientat maps")
         self.chk_OriSel.SetValue(self.showOriSel)
-        
-        self.chk_DiagProj = wx.CheckBox(self, label="Diag.Projection")
+
+        self.chk_DiagProj = PillCheckBox(self, "Diag.Projection")
         self.chk_DiagProj.SetValue(self.showDiagonalProj)
-        
-        self.chk_OverlaySim = wx.CheckBox(self, label="Overlay Sim")
+
+        self.chk_OverlaySim = PillCheckBox(self, "Overlay Sim")
         self.chk_OverlaySim.SetValue(self.OverlaySim)
 
         self.chk_FFT.Bind(wx.EVT_CHECKBOX, self.on_check)
@@ -570,10 +574,8 @@ class MatplotlibPanel(wx.Panel):
         self.chk_DiagProj.Bind(wx.EVT_CHECKBOX, self.on_check)
         self.chk_OverlaySim.Bind(wx.EVT_CHECKBOX, self.on_check)
 
-        self.rbox_quadrant = wx.RadioBox(
-            self, label="Quadrants",
-            choices=["All 4", "±ν₁  (horiz)", "±ν₂  (vert)"],
-            majorDimension=1, style=wx.RA_SPECIFY_ROWS)
+        self.rbox_quadrant = SegmentedPill(
+            self, choices=["All 4", "±ν₁  (horiz)", "±ν₂  (vert)"])
         self.rbox_quadrant.Bind(wx.EVT_RADIOBOX, self.on_quadrant)
 
         sizerH = wx.BoxSizer(wx.HORIZONTAL)
@@ -584,6 +586,8 @@ class MatplotlibPanel(wx.Panel):
         sizerH.Add(self.chk_DiagProj, 0, wx.EXPAND)
         sizerH.Add(self.chk_OverlaySim, 0, wx.EXPAND)
         sizerH.AddStretchSpacer(1)
+        self.lbl_quadrant = wx.StaticText(self, label="Quadrants:")
+        sizerH.Add(self.lbl_quadrant, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
         sizerH.Add(self.rbox_quadrant, 0, wx.ALIGN_CENTER_VERTICAL)
 
         sizer = wx.BoxSizer(wx.VERTICAL)
@@ -966,71 +970,47 @@ class TabulatedPanel(wx.Panel):
             "imag":  ["Use 'imaginary'",  False, [], 'bool'],
             }
         
-        self.Color_BG_FILE_Title = wx.Colour(64, 120, 215)
-        self.Color_BG_FILE_Inact = wx.Colour(100, 150, 215)
-        self.Color_FG_FILE_Title = wx.Colour(255, 255, 255)
-        self.Color_BG_FILE_Main = wx.Colour(255, 255, 255)
-        self.Color_FG_FILE_Main = wx.Colour(0, 0, 0)
+        self.Color_BG_FILE_Title = wx.Colour(theme.theme_colors()["accent"])
+        self.Color_BG_FILE_Inact = wx.Colour(theme.theme_colors()["tab_inactive"])
+        self.Color_FG_FILE_Title = wx.Colour(theme.theme_colors()["propgrid_caption_fg"])
+        self.Color_BG_FILE_Main = wx.Colour(theme.theme_colors()["ctrl_bg"])
+        self.Color_FG_FILE_Main = wx.Colour(theme.theme_colors()["text"])
 
-        self.Color_BG_FFT_Title = wx.Colour(215, 120, 64)
-        self.Color_BG_FFT_Inact = wx.Colour(100, 150, 215)
-        self.Color_FG_FFT_Title = wx.Colour(255, 255, 255)
-        self.Color_BG_FFT_Main = wx.Colour(255, 255, 255)
-        self.Color_FG_FFT_Main = wx.Colour(0, 0, 0)
+        self.Color_BG_FFT_Title = wx.Colour(theme.theme_colors()["pill_load"])
+        self.Color_BG_FFT_Inact = wx.Colour(theme.theme_colors()["tab_inactive"])
+        self.Color_FG_FFT_Title = wx.Colour(theme.theme_colors()["propgrid_caption_fg"])
+        self.Color_BG_FFT_Main = wx.Colour(theme.theme_colors()["ctrl_bg"])
+        self.Color_FG_FFT_Main = wx.Colour(theme.theme_colors()["text"])
 
+        # PillTabBar (tab strip) driving a wx.Simplebook (page container) --
+        # the book must exist before add_*panel() below, since those call
+        # self.nb_book.AddPage(); the tab bar itself is built afterwards,
+        # once the pages (and hence their labels/order) exist.
+        self.nb_book = wx.Simplebook(self)
 
-        # self.nb = wx.Notebook(self)
-        self.nb = fnb.FlatNotebook(self, agwStyle=fnb.FNB_NO_X_BUTTON|fnb.FNB_NO_NAV_BUTTONS|
-                                  fnb.FNB_SMART_TABS)
-        #self.nb.SetActiveTabColour(wx.Colour("black"))
-        self.nb.SetActiveTabTextColour(self.parent.ForegroundColor)
-        self.nb.SetBackgroundColour(self.parent.ControlBackgroundColor)
-        # bold_font = wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
-        # self.nb.SetFont(bold_font)
-
-        # Main horizontal sizer – grid on the left, params on the right
-        
         sizer = wx.BoxSizer(wx.VERTICAL)
-        sizer.Add(self.nb, 1, wx.EXPAND)
         self.add_datapanel()
         self.add_syspanel()
         self.add_exppanel()
         self.add_optpanel()
-        
-        # font = wx.Font(20, wx.FONTFAMILY_TELETYPE,
-        #        wx.FONTSTYLE_NORMAL,
-        #        wx.FONTWEIGHT_BOLD)
-        # self.nb.SetTabAreaColour(wx.Colour("white"))
-        
-        # self.nb.SetFont(font)
 
-        
-        hbox_FFT = wx.BoxSizer(wx.HORIZONTAL)
-        self.btn_doFFT   = wx.Button(self, label="Do FFT")
-        self.chk_autoFFT = wx.CheckBox(self, label="auto FFT")
-        self.chk_autoFFT.SetValue(True)
-        hbox_FFT.Add(self.btn_doFFT, 0, wx.ALIGN_CENTER | wx.ALL, 5)
-        hbox_FFT.Add(self.chk_autoFFT, 0, wx.ALIGN_CENTER | wx.ALL, 5)
-        sizer.Add(hbox_FFT, 0, wx.EXPAND | wx.ALL, 5)
-        
-        hbox_SIM = wx.BoxSizer(wx.HORIZONTAL)
-        self.btn_doSIM   = wx.Button(self, label="Do SIM")
-        self.chk_autoSIM = wx.CheckBox(self, label="auto SIM")
-        self.chk_autoSIM.SetValue(True)
-        hbox_SIM.Add(self.btn_doSIM, 0, wx.ALIGN_CENTER | wx.ALL, 5)
-        hbox_SIM.Add(self.chk_autoSIM, 0, wx.ALIGN_CENTER | wx.ALL, 5)
-        sizer.Add(hbox_SIM, 0, wx.EXPAND | wx.ALL, 5)
-        self.btn_doSIM.Bind(wx.EVT_BUTTON, self.on_update_sim)
-        
+        self.nb = PillTabBar(self, self.nb_book, ["Data", "Sys", "Exp", "Opt"])
+        sizer.Add(self.nb, 0, wx.EXPAND)
+        sizer.Add(self.nb_book, 1, wx.EXPAND)
+
+        # Do FFT / Do SIM / auto FFT / auto SIM now live as toolbar icons on
+        # MainFrame (self.parent.tb_doFFT etc.) -- see MainFrame.__init__.
+        # Bind them here now that self.on_doFFT/self.on_update_sim exist.
+        self.parent.tb_doFFT.Bind(wx.EVT_BUTTON, self.on_doFFT)
+        self.parent.tb_doSIM.Bind(wx.EVT_BUTTON, self.on_update_sim)
+        self.parent.tb_gridsearch.Bind(wx.EVT_BUTTON, self.on_open_grid_search)
+
         self.SetSizer(sizer)
 
         # Store for later
         self.param_definitions = None
         self.param_controls   = {}
-       
-        
-        self.btn_doFFT.Bind(wx.EVT_BUTTON, self.on_doFFT)
-        
+
         self.ffttree.Bind(wxpg.EVT_PG_CHANGED, self.on_ffttree)
         #self.filetree.Bind(wxpg.EVT_PG_DOUBLE_CLICK, self.on_filetree) #EVT_G_SELECTED EVT_PG_RIGHT_CLICK
         #self.tree.Bind(CT.EVT_TREE_BEGIN_LABEL_EDIT, self.on_begin_edit)
@@ -1045,8 +1025,8 @@ class TabulatedPanel(wx.Panel):
     def add_optpanel(self):
         # ------------- Opt
         
-        self.Opt_panel = wx.Panel(self.nb)
-        self.nb.AddPage(self.Opt_panel, "Opt") 
+        self.Opt_panel = wx.Panel(self.nb_book)
+        self.nb_book.AddPage(self.Opt_panel, "Opt") 
         Optsizer = wx.BoxSizer(wx.VERTICAL)
         
         self.Opt_param = MypgPanel.PropGridPanel(self.Opt_panel, Prop_Dict = {}, onChangeFunc=self.on_Opt)
@@ -1055,7 +1035,7 @@ class TabulatedPanel(wx.Panel):
 
         Optsizer.Add(self.Opt_param, 1, wx.EXPAND)
 
-        self.btn_doOriSel   = wx.Button(self.Opt_panel, label="Update Ori.Sel. Grid")
+        self.btn_doOriSel   = PillButton(self.Opt_panel, "Update Ori.Sel. Grid", color_key="pill_load")
         Optsizer.Add(self.btn_doOriSel, 0, wx.EXPAND)
         self.btn_doOriSel.Bind(wx.EVT_BUTTON, self.parent.on_update_orisel)
 
@@ -1063,8 +1043,8 @@ class TabulatedPanel(wx.Panel):
 
     def add_setpanel(self):
         # ------------- Opt
-        self.Set_panel = wx.Panel(self.nb)
-        self.nb.AddPage(self.Set_panel, "Opt")
+        self.Set_panel = wx.Panel(self.nb_book)
+        self.nb_book.AddPage(self.Set_panel, "Opt")
         Optsizer = wx.BoxSizer(wx.VERTICAL)
         
         self.Set_param = MypgPanel.PropGridPanel(self.Set_panel, Prop_Dict = {}, onChangeFunc=self.on_Set)
@@ -1077,8 +1057,8 @@ class TabulatedPanel(wx.Panel):
         
     def add_exppanel(self):
         # ------------- Exp
-        self.Exp_panel = wx.Panel(self.nb)
-        self.nb.AddPage(self.Exp_panel, "Exp") 
+        self.Exp_panel = wx.Panel(self.nb_book)
+        self.nb_book.AddPage(self.Exp_panel, "Exp") 
         
         Expsizer = wx.BoxSizer(wx.VERTICAL)
         
@@ -1091,26 +1071,23 @@ class TabulatedPanel(wx.Panel):
          
     def add_syspanel(self):
         # ------------- Sys 
-        self.Sys_panel = wx.Panel(self.nb)
-        self.nb.AddPage(self.Sys_panel, "Sys") 
+        self.Sys_panel = wx.Panel(self.nb_book)
+        self.nb_book.AddPage(self.Sys_panel, "Sys") 
         
         Syssizer = wx.BoxSizer(wx.VERTICAL)
         
         btnszr = wx.BoxSizer(wx.HORIZONTAL)
-        self.btn_add = wx.Button(self.Sys_panel, label="Add Nuc")
+        self.btn_add = PillButton(self.Sys_panel, "Add Nuc", color_key="accent")
         self.btn_add.Bind(wx.EVT_BUTTON, self.on_add_Nuc)
         btnszr.Add(self.btn_add, 0, wx.EXPAND)
-        self.btn_delete = wx.Button(self.Sys_panel, label="Delete Nuc")
+        self.btn_delete = PillButton(self.Sys_panel, "Delete Nuc", color_key="pill_warn")
         self.btn_delete.Bind(wx.EVT_BUTTON, self.on_delete_nuc)
         btnszr.Add(self.btn_delete, 0, wx.EXPAND)
 
-        self.btn_gridsearch = wx.Button(self.Sys_panel, label="Grid Search…")
-        self.btn_gridsearch.Bind(wx.EVT_BUTTON, self.on_open_grid_search)
-        btnszr.Add(self.btn_gridsearch, 0, wx.EXPAND)
-
         Syssizer.Add(btnszr, 0, wx.EXPAND)
         
-        self.Sys_param = MypgPanel.PropGridPanel(self.Sys_panel, Prop_Dict = {}, onChangeFunc=self.on_Sys)
+        self.Sys_param = MypgPanel.PropGridPanel(self.Sys_panel, Prop_Dict = {},
+                                                  onChangeFunc=self.on_Sys, showModFunc=True)
         self.Sys_param.tooltips =self.parent.Sys.getToolTips()
         self.Sys_param.SetFromParClean(self.parent.Sys.getDefaultDict())
 
@@ -1120,23 +1097,23 @@ class TabulatedPanel(wx.Panel):
                
     def add_datapanel(self):
         # ----------Data panel
-        self.data_panel = wx.Panel(self.nb)
-        self.nb.AddPage(self.data_panel, "Data")
+        self.data_panel = wx.Panel(self.nb_book)
+        self.nb_book.AddPage(self.data_panel, "Data")
         
         sizer = wx.BoxSizer(wx.VERTICAL)
 
         sizerBtns = wx.BoxSizer(wx.HORIZONTAL)
-        self.btn_delete = wx.Button(self.data_panel, label="Delete Data")
+        self.btn_delete = PillButton(self.data_panel, "Delete Data", color_key="pill_warn")
         self.btn_delete.Bind(wx.EVT_BUTTON, self.on_delete)
         sizerBtns.Add(self.btn_delete, 1, wx.ALIGN_CENTER | wx.ALL, 5)
-        
-        self.btn_dsc = wx.Button(self.data_panel, label="Show DSC")
+
+        self.btn_dsc = PillButton(self.data_panel, "Show DSC", color_key="pill_load")
         self.btn_dsc.Bind(wx.EVT_BUTTON, self.on_dsc)
         sizerBtns.Add(self.btn_dsc, 1, wx.ALIGN_CENTER | wx.ALL, 5)
         sizer.Add(sizerBtns, 0, wx.ALIGN_LEFT | wx.ALL, 5)
 
         row_expand = wx.BoxSizer(wx.HORIZONTAL)
-        self.chk_expanded = wx.CheckBox(self.data_panel, label="Expand all")
+        self.chk_expanded = PillCheckBox(self.data_panel, "Expand all")
         self.chk_expanded.SetValue(False)
         self.chk_expanded.Bind(wx.EVT_CHECKBOX, self.on_expandchk)
         row_expand.Add(self.chk_expanded, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 12)
@@ -1144,12 +1121,13 @@ class TabulatedPanel(wx.Panel):
 
         # bmp_up   = wx.ArtProvider.GetBitmap(wx.ART_GO_UP,   wx.ART_BUTTON, (16, 16))
         # bmp_down = wx.ArtProvider.GetBitmap(wx.ART_GO_DOWN, wx.ART_BUTTON, (16, 16))
+        # Tiny icon-only utility buttons -- kept as plain native wx.Button
+        # (theme-retinted by theme.apply_theme_to_window) rather than pill
+        # widgets, since the label-pill shape doesn't suit a 24px glyph button.
         self.btn_moveUp   = wx.Button(self.data_panel, label="▲", size=(24, 22), style=wx.BORDER_NONE)
         self.btn_moveDown = wx.Button(self.data_panel, label="▼", size=(24, 22), style=wx.BORDER_NONE)
         self.btn_moveUp.SetToolTip("Move selected dataset up (earlier column)")
         self.btn_moveDown.SetToolTip("Move selected dataset down (later column)")
-        self.btn_moveUp.SetBackgroundColour('white')
-        self.btn_moveDown.SetBackgroundColour('white')
         self.btn_moveUp.Bind(  wx.EVT_BUTTON, lambda e: self.on_move_data(-1))
         self.btn_moveDown.Bind(wx.EVT_BUTTON, lambda e: self.on_move_data(+1))
         row_expand.Add(self.btn_moveUp,   0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 2)
@@ -1305,7 +1283,7 @@ class TabulatedPanel(wx.Panel):
         self.parent.runSim()
     def on_Sys(self, mainname, name, val):
         self.parent.Sys.setFromCtrl(self.Sys_param.parameters) # This is more to double check that input works
-        if self.chk_autoSIM.GetValue():
+        if self.parent.tb_autoSIM.GetValue():
             self.parent.runSim()
         
     def on_Exp(self, mainname, name, val):
@@ -1481,7 +1459,7 @@ class TabulatedPanel(wx.Panel):
         (key, strval) = event.GetPropertyName().split()
         val = int(strval)
         self.parent.Data[val][key]=event.GetValue()
-        if self.chk_autoFFT.GetValue():
+        if self.parent.tb_autoFFT.GetValue():
             self.parent.update_FFT()
             
     def on_ffttree(self, event):
@@ -1494,14 +1472,14 @@ class TabulatedPanel(wx.Panel):
             self.parent.Data[ii]['fftmethod'] = fftmethod
             self.parent.Data[ii]['fftactual'] = False # make sure to remember that things got changed.
 
-        if self.chk_autoFFT.GetValue():
+        if self.parent.tb_autoFFT.GetValue():
             self.parent.update_FFT(fftmethod)
     # ------------------------------------------------------------------
     # # Simulations tab (empty for now)
     # # ------------------------------------------------------------------
     # def _create_simulation_tab(self):
-    #     self.sim_panel = wx.Panel(self.nb)
-    #     self.nb.AddPage(self.sim_panel, "Simulations")
+    #     self.sim_panel = wx.Panel(self.nb_book)
+    #     self.nb_book.AddPage(self.sim_panel, "Simulations")
 
     #     placeholder = wx.StaticText(
     #         self.sim_panel,
@@ -1552,10 +1530,11 @@ class TabulatedPanel(wx.Panel):
                                                                      value=val))
             self.filetree.AppendIn(cat[ii], wxpg.FloatProperty("BG Scale", f"bgscale {ii}",value=dd['bgscale']))
         if self.chk_expanded.GetValue():
-            self.filetree.ExpandAll()  
-        else:  
+            self.filetree.ExpandAll()
+        else:
             self.filetree.CollapseAll()
-            self.filetree.Expand(cat[-1])
+            if cat:
+                self.filetree.Expand(cat[-1])
             #self.filetree.AppendIn(cat[ii], wxpg.FloatProperty("scale [ns]", f"tau{ii}",value=dd['tau']))
 
                 
@@ -1577,21 +1556,86 @@ class MainFrame(wx.Frame):
         self.ControlBackgroundColor = wx.Colour(255, 255, 255)
 
         # ---- Colormap state (default: jet) ---------------------------------
+        # Unrelated to the UI theme below: this colours the HYSCORE spectra
+        # themselves, not the app's chrome.
         self.current_cmap_name  = "jet"
         self.current_cmap_stops = colormap_to_stops("jet", 9)   # list of (pos, hex)
         self.current_cmap       = stops_to_cmap(self.current_cmap_stops, "jet")
 
+        # ---- UI theme (light/dark; pill buttons, checkboxes, tab bar) ------
+        self._theme = "light"
+
         self.settings = self.get_default_settings() ####  replace with ini loader in the future
 
-        # ---- Menu bar ------------------------------------------------------
-        menubar = wx.MenuBar()
+        # ---- Top icon toolbar ------------------------------------------------
+        # Hand-drawn glyphs (no icon asset files needed) replacing what used
+        # to be scattered pill buttons (file browser, Data tab) and the
+        # Colormap/View menu bar. FileBrowserPanel and TabulatedPanel bind
+        # their own handlers to tb_change_folder/tb_up/tb_save_session/
+        # tb_doFFT/tb_doSIM once *they* exist (built after this toolbar);
+        # tb_autoFFT/tb_autoSIM need no binding -- other code just reads
+        # their .GetValue() on demand.
+        self.top_toolbar = wx.Panel(self)
+        toolbar_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
-        cmap_menu = wx.Menu()
-        item_edit_cmap = cmap_menu.Append(wx.ID_ANY, "Edit Colormap…",
-                                          "Open the colormap editor")
-        menubar.Append(cmap_menu, "&Colormap")
-        self.SetMenuBar(menubar)
-        self.Bind(wx.EVT_MENU, self.on_edit_colormap, item_edit_cmap)
+        def add_sep():
+            line = wx.StaticLine(self.top_toolbar, style=wx.LI_VERTICAL)
+            toolbar_sizer.Add(line, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 6)
+
+        self.tb_change_folder = theme.IconButton(
+            self.top_toolbar, theme.draw_folder_icon, tooltip="Change folder…")
+        self.tb_up = theme.IconButton(
+            self.top_toolbar, theme.draw_up_icon, tooltip="Up")
+        toolbar_sizer.Add(self.tb_change_folder, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
+        toolbar_sizer.Add(self.tb_up, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
+        add_sep()
+
+        self.tb_save_session = theme.IconButton(
+            self.top_toolbar, theme.draw_save_icon, tooltip="Save Session")
+        toolbar_sizer.Add(self.tb_save_session, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
+        add_sep()
+
+        self.tb_doFFT = theme.IconButton(
+            self.top_toolbar, theme.draw_text_icon("FFT"), tooltip="Do FFT")
+        self.tb_autoFFT = theme.IconToggleButton(
+            self.top_toolbar, theme.draw_auto_toggle_icon("FFT"),
+            tooltip="auto FFT (recompute automatically on change)", value=True)
+        toolbar_sizer.Add(self.tb_doFFT, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
+        toolbar_sizer.Add(self.tb_autoFFT, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
+        add_sep()
+
+        self.tb_doSIM = theme.IconButton(
+            self.top_toolbar, theme.draw_text_icon("SIM"), tooltip="Do SIM")
+        self.tb_autoSIM = theme.IconToggleButton(
+            self.top_toolbar, theme.draw_auto_toggle_icon("SIM"),
+            tooltip="auto SIM (re-simulate automatically on change)", value=True)
+        toolbar_sizer.Add(self.tb_doSIM, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
+        toolbar_sizer.Add(self.tb_autoSIM, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
+        add_sep()
+
+        self.tb_gridsearch = theme.IconButton(
+            self.top_toolbar, theme.draw_gridsearch_icon, tooltip="Sys 2D Grid Search…")
+        toolbar_sizer.Add(self.tb_gridsearch, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
+
+        toolbar_sizer.AddStretchSpacer(1)
+        add_sep()
+
+        self.btn_cmap_icon = theme.IconButton(
+            self.top_toolbar, theme.draw_colormap_icon, tooltip="Edit Colormap…")
+        self.btn_theme_icon = theme.IconButton(
+            self.top_toolbar, theme.draw_theme_icon, tooltip="Toggle dark mode (Ctrl+D)")
+        toolbar_sizer.Add(self.btn_cmap_icon, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
+        toolbar_sizer.Add(self.btn_theme_icon, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
+        self.top_toolbar.SetSizer(toolbar_sizer)
+        self.btn_cmap_icon.Bind(wx.EVT_BUTTON, self.on_edit_colormap)
+        self.btn_theme_icon.Bind(wx.EVT_BUTTON, self.on_toggle_theme)
+
+        # Ctrl+D still toggles the theme without needing a menu.
+        theme_id = wx.NewIdRef()
+        self.Bind(wx.EVT_MENU, self.on_toggle_theme, id=theme_id)
+        self.SetAcceleratorTable(wx.AcceleratorTable([
+            (wx.ACCEL_CTRL, ord('D'), theme_id),
+        ]))
 
         # ---- Status bar ----------------------------------------------------
         # Field 0: general status messages
@@ -1609,11 +1653,11 @@ class MainFrame(wx.Frame):
         self.file_browser = FileBrowserPanel(self.splitter_main, self)
 
         # ---- Right pane (will contain a *second* splitter) ---------------
-        right_panel = wx.Panel(self.splitter_main)
+        self.right_panel = wx.Panel(self.splitter_main)
         right_sizer = wx.BoxSizer(wx.HORIZONTAL)
 
         # Second splitter (horizontal) inside the right panel
-        self.splitter_right = wx.SplitterWindow(right_panel, style=wx.SP_3D)
+        self.splitter_right = wx.SplitterWindow(self.right_panel, style=wx.SP_3D)
 
         # Panels for the second splitter
         self.matplotlib_panel = MatplotlibPanel(self.splitter_right, self)
@@ -1625,27 +1669,91 @@ class MainFrame(wx.Frame):
             sashPosition=400   # initial height of the top pane
         )
         self.splitter_right.SetSashGravity(1)  # proportion of space for the top pane
-        
+
         # Put the second splitter into the right panel's sizer
         right_sizer.Add(self.splitter_right, 1, wx.EXPAND)
-        right_panel.SetSizer(right_sizer)
+        self.right_panel.SetSizer(right_sizer)
 
         # ---- Attach the two top level panes --------------------------------
+        self._left_sash = 200      # remembered width to restore on expand
         self.splitter_main.SplitVertically(
-            self.file_browser, right_panel,
-            sashPosition=200      # initial width of left pane
+            self.file_browser, self.right_panel,
+            sashPosition=self._left_sash
         )
         self.splitter_main.SetSashGravity(0)  # proportion of space for left pane
 
-        # ----------- Enable collapsing the left panel ----------------------
-        # Store the last sash position so we can restore it when expanding
-        self.splitter_main._prev_left_sash = 200
-        self.file_browser.toggle_btn.Bind(wx.EVT_BUTTON, self.on_toggle_left)
-        
-        # self.splitter_right.SetSashSize(10) 
-        # self.splitter_main.SetSashSize(10) 
+        # ----------- Collapse toggle for the left panel ---------------------
+        # Lives outside the splitter (not inside file_browser) so it stays
+        # visible even once the panel it controls is fully hidden.
+        self.toggle_btn = theme.IconButton(
+            self, theme.draw_chevron_icon("left"), tooltip="Hide file browser",
+            size=wx.Size(18, -1), fill_key="accent")
+        self.toggle_btn.Bind(wx.EVT_BUTTON, self.on_toggle_left)
+
+        content_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        content_sizer.Add(self.toggle_btn, 0, wx.EXPAND)
+        content_sizer.Add(self.splitter_main, 1, wx.EXPAND)
+
+        main_sizer = wx.BoxSizer(wx.VERTICAL)
+        main_sizer.Add(self.top_toolbar, 0, wx.EXPAND)
+        main_sizer.Add(content_sizer, 1, wx.EXPAND)
+        self.SetSizer(main_sizer)
+
         self.Centre()
-        # self.Fit()
+        self.apply_theme()
+    # -----------------------------------------------------------------------
+    def on_toggle_theme(self, event):
+        self._theme = "dark" if self._theme == "light" else "light"
+        self.apply_theme()
+
+    def on_toggle_left(self, event):
+        """Actually hide/show the file-browser pane (Unsplit/SplitVertically)
+        rather than just shrinking its sash to the minimum -- the toggle
+        button itself stays visible either way (see __init__)."""
+        if self.splitter_main.IsSplit():
+            self._left_sash = self.splitter_main.GetSashPosition()
+            self.splitter_main.Unsplit(self.file_browser)
+            self.toggle_btn.SetDrawIcon(theme.draw_chevron_icon("right"))
+            self.toggle_btn.SetToolTip("Show file browser")
+        else:
+            self.splitter_main.SplitVertically(
+                self.file_browser, self.right_panel, sashPosition=self._left_sash)
+            self.toggle_btn.SetDrawIcon(theme.draw_chevron_icon("left"))
+            self.toggle_btn.SetToolTip("Hide file browser")
+
+    def apply_theme(self):
+        """Push self._theme through every themed surface: native controls
+        (via theme.apply_theme_to_window, which also Refresh()es every pill
+        widget so it repaints in the new colours), the property grids (not
+        reached by that generic walk -- they need a caption-colour choice),
+        and the matplotlib figures (separate from the per-file data
+        colormap, which is untouched here)."""
+        theme.set_theme(self._theme)
+        theme.apply_theme_to_window(self, self._theme)
+
+        tp = self.tabulated_panel
+        tp.Color_BG_FILE_Title = wx.Colour(theme.theme_colors()["accent"])
+        tp.Color_BG_FILE_Inact = wx.Colour(theme.theme_colors()["tab_inactive"])
+        tp.Color_FG_FILE_Title = wx.Colour(theme.theme_colors()["propgrid_caption_fg"])
+        tp.Color_BG_FILE_Main = wx.Colour(theme.theme_colors()["ctrl_bg"])
+        tp.Color_FG_FILE_Main = wx.Colour(theme.theme_colors()["text"])
+        tp.Color_BG_FFT_Title = wx.Colour(theme.theme_colors()["pill_load"])
+        tp.Color_BG_FFT_Inact = wx.Colour(theme.theme_colors()["tab_inactive"])
+        tp.Color_FG_FFT_Title = wx.Colour(theme.theme_colors()["propgrid_caption_fg"])
+        tp.Color_BG_FFT_Main = wx.Colour(theme.theme_colors()["ctrl_bg"])
+        tp.Color_FG_FFT_Main = wx.Colour(theme.theme_colors()["text"])
+        theme.theme_propgrid(tp.filetree, caption_key="accent")
+        theme.theme_propgrid(tp.ffttree, caption_key="pill_load")
+        theme.theme_propgrid(tp.Sys_param.pg, caption_key="accent")
+        theme.theme_propgrid(tp.Exp_param.pg, caption_key="accent")
+        theme.theme_propgrid(tp.Opt_param.pg, caption_key="accent")
+        tp.update_filelist()
+
+        theme.style_figure(self.matplotlib_panel.figure, self.matplotlib_panel.axes)
+        self.matplotlib_panel.canvas.draw_idle()
+
+        self.Refresh()
+
     # -----------------------------------------------------------------------
     def on_edit_colormap(self, event):
         """Open the ColormapEditorDialog; apply the chosen colormap if OK."""
@@ -1783,18 +1891,6 @@ class MainFrame(wx.Frame):
     def update_settings_tab(self):
         self.collect_current_settings()
         ######### TBD #################
-    def on_toggle_left(self, event):
-        """Called when the left panel collapse/expand button is pressed."""
-        minsize = self.splitter_main.GetMinimumPaneSize()
-        if self.splitter_main.GetSashPosition() > minsize and self.file_browser.toggle_btn.GetLabel() == "<":
-            # Collapse: store current position and move sash to zero
-            self._prev_left_sash = self.splitter_main.GetSashPosition()
-            self.splitter_main.SetSashPosition(minsize)
-            self.file_browser.toggle_btn.SetLabel(">")
-        else:
-            # Expand: restore previous position
-            self.splitter_main.SetSashPosition(self.splitter_main._prev_left_sash)
-            self.file_browser.toggle_btn.SetLabel("<")
 
     def loadData(self, path, BG=False):
         name, ext = os.path.splitext(path) 
@@ -1997,7 +2093,7 @@ class MainFrame(wx.Frame):
             for ii,dd in enumerate(self.Data):
                 self.Data[ii]['orisel'] = None
 
-        if self.tabulated_panel.chk_autoSIM.GetValue():
+        if self.tb_autoSIM.GetValue():
             self.runSim()
 
     def actuateSimMethod(self, hs, data):
@@ -2257,7 +2353,10 @@ class MainFrame(wx.Frame):
                 data = base64.b64decode(data_b64)
                 try:
                     array = np.array(np.frombuffer(data, dtype=dtype)).reshape(shape)
-                except Exception:
+                except Exception as e:
+                    print(f"[pyHYSCORE] Could not reconstruct array '{key}' "
+                          f"(dtype={dtype}, shape={shape}) from '{filename}': "
+                          f"{type(e).__name__}: {e}")
                     array = None
                 return key, array
     
