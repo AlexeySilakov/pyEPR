@@ -339,6 +339,54 @@ def _shade(color, factor):
     return wx.Colour(clamp(color.Red()), clamp(color.Green()), clamp(color.Blue()))
 
 
+def _refresh_on_real_size_change(win, event):
+    """Shared EVT_SIZE handler for the owner-drawn pill/icon controls below.
+
+    A resize/sash-drag burst fires many EVT_SIZE events per second, and
+    several of these controls only ever *move* (their sizer position
+    shifts) without their own pixel size actually changing -- e.g. a
+    right-aligned toolbar icon when a stretch spacer grows/shrinks. The
+    plain `self.Refresh()` these used to call unconditionally repainted
+    every one of them on every tick regardless. Comparing against the
+    last size actually painted at skips that dead work; controls whose
+    size genuinely does change (a pill button stretched by wx.EXPAND)
+    still repaint exactly as before.
+    """
+    new_size = win.GetSize()
+    if getattr(win, '_last_paint_size', None) != new_size:
+        win._last_paint_size = new_size
+        win.Refresh()
+    event.Skip()
+
+
+def _cached_paint_bitmap(win, key):
+    """For the owner-drawn controls below: `key` must be a tuple capturing
+    every input that determines the control's appearance (size, theme,
+    hover/down/checked state, label text, ...). Returns (bitmap, fresh):
+    on a cache hit (key unchanged since the control's last paint) `fresh`
+    is False and the caller should skip straight to blitting the returned
+    bitmap; on a miss (or first paint) it's True and the caller must
+    render into the (blank) bitmap before blitting it.
+
+    This exists because these controls redraw via wx.GraphicsContext
+    (rounded rects, badges, text layout), which costs real CPU every
+    single paint even though most repaints are
+    triggered by something that didn't actually change how the control
+    looks (a sibling's Refresh(), a stretch-spacer shifting a fixed-size
+    icon's position, ...). Re-running that vector drawing only when `key`
+    actually changed turns the rest into a cheap bitmap blit.
+    """
+    w, h = key[0], key[1]
+    if w <= 0 or h <= 0:
+        return None, False
+    cached = getattr(win, '_paint_cache', None)
+    if cached is not None and cached[0] == key:
+        return cached[1], False
+    bmp = wx.Bitmap(w, h)
+    win._paint_cache = (key, bmp)
+    return bmp, True
+
+
 # --------------------------------------------------------------------------- #
 # Pill-style buttons/tabs/checkboxes -- owner-drawn with wx.GraphicsContext
 # since native wx.Button/wx.CheckBox/wx.Notebook can't do rounded/pill
@@ -376,7 +424,7 @@ class PillButton(wx.Panel):
         self.Bind(wx.EVT_LEAVE_WINDOW, self._on_leave)
         self.Bind(wx.EVT_LEFT_DOWN, self._on_down)
         self.Bind(wx.EVT_LEFT_UP, self._on_up)
-        self.Bind(wx.EVT_SIZE, lambda e: (self.Refresh(), e.Skip()))
+        self.Bind(wx.EVT_SIZE, lambda e, w=self: _refresh_on_real_size_change(w, e))
 
     def SetLabel(self, label):
         self._label = label
@@ -443,54 +491,62 @@ class PillButton(wx.Panel):
         return base
 
     def _on_paint(self, _evt):
-        dc = wx.AutoBufferedPaintDC(self)
-        gc = wx.GraphicsContext.Create(dc)
-        if gc is None:
-            return
         w, h = self.GetClientSize()
-        if w <= 0 or h <= 0:
-            return
-        dc.SetBackground(wx.Brush(wx.Colour(theme_colors()["win_bg"])))
-        dc.Clear()
-
         color = self._current_color()
-        radius = h / 2.0
-        path = gc.CreatePath()
-        path.AddRoundedRectangle(0.5, 0.5, max(w - 1, 1), h - 1, radius)
-        gc.SetBrush(gc.CreateBrush(wx.Brush(color)))
-        gc.SetPen(wx.TRANSPARENT_PEN)
-        gc.DrawPath(path)
+        key = (w, h, theme_colors()["win_bg"], color.GetRGBA(), self._label)
+        bmp, fresh = _cached_paint_bitmap(self, key)
+        if bmp is None:
+            return
+        if fresh:
+            mdc = wx.MemoryDC(bmp)
+            gc = wx.GraphicsContext.Create(mdc)
+            if gc is None:
+                mdc.SelectObject(wx.NullBitmap)
+                return
+            mdc.SetBackground(wx.Brush(wx.Colour(theme_colors()["win_bg"])))
+            mdc.Clear()
 
-        has_badge = self._icon is not None or self._draw_badge is not None
-        badge_d = h - self.FromDIP(4)
-        bx = by = (h - badge_d) / 2.0
-        if has_badge:
-            gc.SetBrush(gc.CreateBrush(wx.Brush(wx.Colour("#FFFFFF"))))
-            gc.DrawEllipse(bx, by, badge_d, badge_d)
-            if self._draw_badge is not None:
-                self._draw_badge(gc, bx, by, badge_d, color)
-            else:
-                icon_sz = max(1, int(badge_d * 0.6))
-                img = self._icon.Scale(icon_sz, icon_sz, wx.IMAGE_QUALITY_HIGH)
-                ix = bx + (badge_d - icon_sz) / 2.0
-                iy = by + (badge_d - icon_sz) / 2.0
-                gc.DrawBitmap(wx.Bitmap(img), ix, iy, icon_sz, icon_sz)
+            radius = h / 2.0
+            path = gc.CreatePath()
+            path.AddRoundedRectangle(0.5, 0.5, max(w - 1, 1), h - 1, radius)
+            gc.SetBrush(gc.CreateBrush(wx.Brush(color)))
+            gc.SetPen(wx.TRANSPARENT_PEN)
+            gc.DrawPath(path)
 
-        font = self.GetFont()
-        bold = font.Bold()
-        gc.SetFont(bold, wx.Colour("#FFFFFF"))
-        left_pad = (bx + badge_d + self.FromDIP(8)) if has_badge else self.FromDIP(12)
-        tw, th = gc.GetTextExtent(self._label)[:2]
-        avail = w - left_pad - self.FromDIP(8)
-        label = self._label
-        if avail > 0 and tw > avail:
-            while label and gc.GetTextExtent(label + "...")[0] > avail:
-                label = label[:-1]
-            if label != self._label:
-                label += "..."
-                tw, th = gc.GetTextExtent(label)[:2]
-        text_x = left_pad if has_badge else max(left_pad, (w - tw) / 2.0)
-        gc.DrawText(label, text_x, (h - th) / 2.0)
+            has_badge = self._icon is not None or self._draw_badge is not None
+            badge_d = h - self.FromDIP(4)
+            bx = by = (h - badge_d) / 2.0
+            if has_badge:
+                gc.SetBrush(gc.CreateBrush(wx.Brush(wx.Colour("#FFFFFF"))))
+                gc.DrawEllipse(bx, by, badge_d, badge_d)
+                if self._draw_badge is not None:
+                    self._draw_badge(gc, bx, by, badge_d, color)
+                else:
+                    icon_sz = max(1, int(badge_d * 0.6))
+                    img = self._icon.Scale(icon_sz, icon_sz, wx.IMAGE_QUALITY_HIGH)
+                    ix = bx + (badge_d - icon_sz) / 2.0
+                    iy = by + (badge_d - icon_sz) / 2.0
+                    gc.DrawBitmap(wx.Bitmap(img), ix, iy, icon_sz, icon_sz)
+
+            font = self.GetFont()
+            bold = font.Bold()
+            gc.SetFont(bold, wx.Colour("#FFFFFF"))
+            left_pad = (bx + badge_d + self.FromDIP(8)) if has_badge else self.FromDIP(12)
+            tw, th = gc.GetTextExtent(self._label)[:2]
+            avail = w - left_pad - self.FromDIP(8)
+            label = self._label
+            if avail > 0 and tw > avail:
+                while label and gc.GetTextExtent(label + "...")[0] > avail:
+                    label = label[:-1]
+                if label != self._label:
+                    label += "..."
+                    tw, th = gc.GetTextExtent(label)[:2]
+            text_x = left_pad if has_badge else max(left_pad, (w - tw) / 2.0)
+            gc.DrawText(label, text_x, (h - th) / 2.0)
+            mdc.SelectObject(wx.NullBitmap)
+
+        dc = wx.AutoBufferedPaintDC(self)
+        dc.DrawBitmap(bmp, 0, 0)
 
     def DoGetBestSize(self):
         dc = wx.ClientDC(self)
@@ -557,7 +613,7 @@ class PillTabBar(wx.Panel):
         self.Bind(wx.EVT_MOTION, self._on_motion)
         self.Bind(wx.EVT_LEAVE_WINDOW, self._on_leave)
         self.Bind(wx.EVT_LEFT_DOWN, self._on_click)
-        self.Bind(wx.EVT_SIZE, lambda e: (self.Refresh(), e.Skip()))
+        self.Bind(wx.EVT_SIZE, lambda e, w=self: _refresh_on_real_size_change(w, e))
 
     def GetSelection(self):
         return self._active
@@ -603,16 +659,27 @@ class PillTabBar(wx.Panel):
         evt.Skip()
 
     def _on_paint(self, _evt):
-        dc = wx.AutoBufferedPaintDC(self)
-        gc = wx.GraphicsContext.Create(dc)
-        if gc is None:
-            return
         w, h = self.GetClientSize()
-        if w <= 0 or h <= 0:
-            return
         tc = theme_colors()
-        dc.SetBackground(wx.Brush(wx.Colour(tc["win_bg"])))
-        dc.Clear()
+        key = (w, h, tc["win_bg"], tc["tab_inactive"], tc["accent"],
+              tc["tab_inactive_icon"], tuple(self._labels), self._active, self._hover)
+        bmp, fresh = _cached_paint_bitmap(self, key)
+        if bmp is None:
+            return
+        if not fresh:
+            # self._rects (used for click hit-testing) only depends on
+            # w/h/labels, all part of `key` -- still valid on a cache hit.
+            dc = wx.AutoBufferedPaintDC(self)
+            dc.DrawBitmap(bmp, 0, 0)
+            return
+
+        mdc = wx.MemoryDC(bmp)
+        gc = wx.GraphicsContext.Create(mdc)
+        if gc is None:
+            mdc.SelectObject(wx.NullBitmap)
+            return
+        mdc.SetBackground(wx.Brush(wx.Colour(tc["win_bg"])))
+        mdc.Clear()
 
         inactive_fill = wx.Colour(tc["tab_inactive"])
         radius = self.FromDIP(10)
@@ -650,6 +717,10 @@ class PillTabBar(wx.Panel):
 
             self._rects.append(wx.Rect(int(x), 0, int(round(tab_w)), int(h)))
             x += tab_w + gap
+        mdc.SelectObject(wx.NullBitmap)
+
+        dc = wx.AutoBufferedPaintDC(self)
+        dc.DrawBitmap(bmp, 0, 0)
 
     def DoGetBestSize(self):
         return wx.Size(-1, self.FromDIP(32))
@@ -670,7 +741,7 @@ class PillCheckBox(wx.Panel):
         self.Bind(wx.EVT_PAINT, self._on_paint)
         self.Bind(wx.EVT_ERASE_BACKGROUND, lambda e: None)
         self.Bind(wx.EVT_LEFT_UP, self._on_click)
-        self.Bind(wx.EVT_SIZE, lambda e: (self.Refresh(), e.Skip()))
+        self.Bind(wx.EVT_SIZE, lambda e, w=self: _refresh_on_real_size_change(w, e))
 
     def GetValue(self):
         return self._value
@@ -711,19 +782,28 @@ class PillCheckBox(wx.Panel):
                          int(c1.Blue() + (c2.Blue() - c1.Blue()) * t))
 
     def _on_paint(self, _evt):
-        dc = wx.AutoBufferedPaintDC(self)
-        gc = wx.GraphicsContext.Create(dc)
-        if gc is None:
-            return
         w, h = self.GetClientSize()
-        if w <= 0 or h <= 0:
-            return
         tc = theme_colors()
+        key = (w, h, tc["win_bg"], tc["text"], tc[self._color_key],
+              self._value, self.IsEnabled(), self._label)
+        bmp, fresh = _cached_paint_bitmap(self, key)
+        if bmp is None:
+            return
+        if not fresh:
+            dc = wx.AutoBufferedPaintDC(self)
+            dc.DrawBitmap(bmp, 0, 0)
+            return
+
+        mdc = wx.MemoryDC(bmp)
+        gc = wx.GraphicsContext.Create(mdc)
+        if gc is None:
+            mdc.SelectObject(wx.NullBitmap)
+            return
         bg = wx.Colour(tc["win_bg"])
         fg = wx.Colour(tc["text"])
         accent = wx.Colour(tc[self._color_key])
-        dc.SetBackground(wx.Brush(bg))
-        dc.Clear()
+        mdc.SetBackground(wx.Brush(bg))
+        mdc.Clear()
 
         box = self.FromDIP(15)
         bx, by = 0.0, (h - box) / 2.0
@@ -754,6 +834,10 @@ class PillCheckBox(wx.Panel):
         gc.SetFont(font, fg if self.IsEnabled() else self._blend(bg, fg, 0.4))
         tw, th = gc.GetTextExtent(self._label)[:2]
         gc.DrawText(self._label, bx + box + self.FromDIP(6), (h - th) / 2.0)
+        mdc.SelectObject(wx.NullBitmap)
+
+        dc = wx.AutoBufferedPaintDC(self)
+        dc.DrawBitmap(bmp, 0, 0)
 
     def DoGetBestSize(self):
         dc = wx.ClientDC(self)
@@ -784,7 +868,7 @@ class SegmentedPill(wx.Panel):
         self.Bind(wx.EVT_MOTION, self._on_motion)
         self.Bind(wx.EVT_LEAVE_WINDOW, self._on_leave)
         self.Bind(wx.EVT_LEFT_UP, self._on_click)
-        self.Bind(wx.EVT_SIZE, lambda e: (self.Refresh(), e.Skip()))
+        self.Bind(wx.EVT_SIZE, lambda e, w=self: _refresh_on_real_size_change(w, e))
 
     def GetSelection(self):
         return self._selection
@@ -831,16 +915,27 @@ class SegmentedPill(wx.Panel):
         evt.Skip()
 
     def _on_paint(self, _evt):
-        dc = wx.AutoBufferedPaintDC(self)
-        gc = wx.GraphicsContext.Create(dc)
-        if gc is None:
-            return
         w, h = self.GetClientSize()
-        if w <= 0 or h <= 0:
-            return
         tc = theme_colors()
-        dc.SetBackground(wx.Brush(wx.Colour(tc["win_bg"])))
-        dc.Clear()
+        key = (w, h, tc["win_bg"], tc["tab_inactive"], tc["accent"],
+              tc["tab_inactive_icon"], tuple(self._choices), self._selection, self._hover)
+        bmp, fresh = _cached_paint_bitmap(self, key)
+        if bmp is None:
+            return
+        if not fresh:
+            # self._rects (used for click/hover hit-testing) only depends
+            # on w/h/choices, all part of `key` -- still valid on a hit.
+            dc = wx.AutoBufferedPaintDC(self)
+            dc.DrawBitmap(bmp, 0, 0)
+            return
+
+        mdc = wx.MemoryDC(bmp)
+        gc = wx.GraphicsContext.Create(mdc)
+        if gc is None:
+            mdc.SelectObject(wx.NullBitmap)
+            return
+        mdc.SetBackground(wx.Brush(wx.Colour(tc["win_bg"])))
+        mdc.Clear()
 
         inactive_fill = wx.Colour(tc["tab_inactive"])
         radius = h / 2.0
@@ -905,6 +1000,10 @@ class SegmentedPill(wx.Panel):
 
             self._rects.append(wx.Rect(int(x), 0, int(round(seg_w)), int(h)))
             x += seg_w
+        mdc.SelectObject(wx.NullBitmap)
+
+        dc = wx.AutoBufferedPaintDC(self)
+        dc.DrawBitmap(bmp, 0, 0)
 
     def DoGetBestSize(self):
         return wx.Size(-1, self.FromDIP(26))
@@ -941,7 +1040,7 @@ class IconButton(wx.Panel):
         self.Bind(wx.EVT_LEAVE_WINDOW, self._on_leave)
         self.Bind(wx.EVT_LEFT_DOWN, self._on_down)
         self.Bind(wx.EVT_LEFT_UP, self._on_up)
-        self.Bind(wx.EVT_SIZE, lambda e: (self.Refresh(), e.Skip()))
+        self.Bind(wx.EVT_SIZE, lambda e, w=self: _refresh_on_real_size_change(w, e))
 
     def SetDrawIcon(self, draw_icon):
         self._draw_icon = draw_icon
@@ -984,16 +1083,30 @@ class IconButton(wx.Panel):
         evt.Skip()
 
     def _on_paint(self, _evt):
-        dc = wx.AutoBufferedPaintDC(self)
-        gc = wx.GraphicsContext.Create(dc)
-        if gc is None:
-            return
         w, h = self.GetClientSize()
-        if w <= 0 or h <= 0:
-            return
         tc = theme_colors()
-        dc.SetBackground(wx.Brush(wx.Colour(tc["win_bg"])))
-        dc.Clear()
+        # id(self._draw_icon) matters because SetDrawIcon() can swap the
+        # glyph callback itself (e.g. the file-browser collapse chevron
+        # flips between draw_chevron_icon("left")/("right")) without
+        # touching size/theme/hover -- the key must change then too.
+        key = (w, h, tc["win_bg"], self._fill_key, tc.get(self._fill_key),
+              self.IsEnabled(), self._down, self._hover, tc["accent"], tc["text"],
+              id(self._draw_icon))
+        bmp, fresh = _cached_paint_bitmap(self, key)
+        if bmp is None:
+            return
+        if not fresh:
+            dc = wx.AutoBufferedPaintDC(self)
+            dc.DrawBitmap(bmp, 0, 0)
+            return
+
+        mdc = wx.MemoryDC(bmp)
+        gc = wx.GraphicsContext.Create(mdc)
+        if gc is None:
+            mdc.SelectObject(wx.NullBitmap)
+            return
+        mdc.SetBackground(wx.Brush(wx.Colour(tc["win_bg"])))
+        mdc.Clear()
 
         if self._fill_key:
             base = wx.Colour(tc[self._fill_key])
@@ -1023,6 +1136,10 @@ class IconButton(wx.Panel):
 
         if self._draw_icon:
             self._draw_icon(gc, w, h, color)
+        mdc.SelectObject(wx.NullBitmap)
+
+        dc = wx.AutoBufferedPaintDC(self)
+        dc.DrawBitmap(bmp, 0, 0)
 
     def DoGetBestSize(self):
         return self.GetMinSize()
@@ -1054,7 +1171,7 @@ class IconToggleButton(wx.Panel):
         self.Bind(wx.EVT_LEAVE_WINDOW, self._on_leave)
         self.Bind(wx.EVT_LEFT_DOWN, self._on_down)
         self.Bind(wx.EVT_LEFT_UP, self._on_up)
-        self.Bind(wx.EVT_SIZE, lambda e: (self.Refresh(), e.Skip()))
+        self.Bind(wx.EVT_SIZE, lambda e, w=self: _refresh_on_real_size_change(w, e))
 
     def GetValue(self):
         return self._value
@@ -1103,16 +1220,25 @@ class IconToggleButton(wx.Panel):
         evt.Skip()
 
     def _on_paint(self, _evt):
-        dc = wx.AutoBufferedPaintDC(self)
-        gc = wx.GraphicsContext.Create(dc)
-        if gc is None:
-            return
         w, h = self.GetClientSize()
-        if w <= 0 or h <= 0:
-            return
         tc = theme_colors()
-        dc.SetBackground(wx.Brush(wx.Colour(tc["win_bg"])))
-        dc.Clear()
+        key = (w, h, tc["win_bg"], tc["accent"], tc["tab_inactive"], tc["tab_inactive_icon"],
+              self._value, self.IsEnabled(), self._down, self._hover, id(self._draw_icon))
+        bmp, fresh = _cached_paint_bitmap(self, key)
+        if bmp is None:
+            return
+        if not fresh:
+            dc = wx.AutoBufferedPaintDC(self)
+            dc.DrawBitmap(bmp, 0, 0)
+            return
+
+        mdc = wx.MemoryDC(bmp)
+        gc = wx.GraphicsContext.Create(mdc)
+        if gc is None:
+            mdc.SelectObject(wx.NullBitmap)
+            return
+        mdc.SetBackground(wx.Brush(wx.Colour(tc["win_bg"])))
+        mdc.Clear()
 
         accent = wx.Colour(tc["accent"])
         r = self.FromDIP(8)
@@ -1135,6 +1261,10 @@ class IconToggleButton(wx.Panel):
             color = _shade(color, 1.6)
         if self._draw_icon:
             self._draw_icon(gc, w, h, color, self._value)
+        mdc.SelectObject(wx.NullBitmap)
+
+        dc = wx.AutoBufferedPaintDC(self)
+        dc.DrawBitmap(bmp, 0, 0)
 
     def DoGetBestSize(self):
         return self.GetMinSize()
@@ -1339,3 +1469,121 @@ def draw_flatline_badge(gc, bx, by, d, color):
     gc.SetPen(gc.CreatePen(wx.GraphicsPenInfo(color).Width(max(1.4, d * 0.11))
                            .Cap(wx.CAP_ROUND)))
     gc.StrokeLine(bx + d * 0.22, y, bx + d * 0.78, y)
+
+
+# --------------------------------------------------------------------------- #
+# Resize/sash-drag performance helpers.
+#
+# Neither of these change what gets drawn -- only when. A live window
+# resize or splitter sash drag fires a burst of many EVT_SIZE (or
+# EVT_SPLITTER_SASH_POS_CHANGING) events per second; without debouncing,
+# each one redraws the matplotlib canvas (a full Agg re-render of the 2D
+# spectrum/contours/colorbar -- genuinely expensive) and every owner-drawn
+# pill/icon control repaints too. Both helpers collapse a whole burst down
+# to a single redraw/repaint once the burst settles.
+# --------------------------------------------------------------------------- #
+class CanvasRedrawDebouncer:
+    """Suppresses a matplotlib FigureCanvasWxAgg's actual (expensive) Agg
+    re-render during a burst of resize events, doing exactly one real
+    redraw ~delay_ms after the last event in the burst instead of once per
+    intermediate tick.
+
+    matplotlib's own canvas._on_size() already resizes the Figure and asks
+    to redraw on every tick (see backend_wx._FigureCanvasWxBase._on_size /
+    draw_idle), but the actual rendering only happens lazily in
+    _on_paint(), which calls canvas.draw() whenever canvas._isDrawn is
+    False (true throughout an active resize/redraw burst). Swapping
+    canvas.draw for a no-op for the duration of the burst makes that
+    per-tick paint effectively free -- the last-rendered bitmap just stays
+    on screen (stretched/clipped as the widget resizes, with any newly
+    exposed margin blank until the real redraw) -- then restoring the real
+    draw() and calling it once when the burst settles gives one correct,
+    full-quality render instead of dozens.
+
+    Usage: deb = CanvasRedrawDebouncer(canvas); bind deb.on_size to
+    EVT_SIZE on the panel hosting the canvas (or the canvas itself).
+    """
+
+    def __init__(self, canvas, delay_ms=150):
+        self.canvas = canvas
+        self._delay_ms = delay_ms
+        self._suspended = False
+        self._timer = wx.Timer(canvas)
+        canvas.Bind(wx.EVT_TIMER, self._on_settle, self._timer)
+        canvas.Bind(wx.EVT_WINDOW_DESTROY, self._on_destroy)
+
+    def on_size(self, event):
+        if not self._suspended:
+            self._suspended = True
+            self.canvas.draw = lambda *a, **k: None
+        self._timer.Start(self._delay_ms, wx.TIMER_ONE_SHOT)
+        event.Skip()
+
+    def _resume(self):
+        if self._suspended:
+            try:
+                del self.canvas.draw
+            except AttributeError:
+                pass
+            self._suspended = False
+
+    def _on_settle(self, event):
+        self._resume()
+        try:
+            self.canvas.draw()
+        except RuntimeError:
+            pass  # canvas was destroyed while the settle timer was pending
+
+    def _on_destroy(self, event):
+        self._timer.Stop()
+        self._resume()
+        event.Skip()
+
+
+class ResizeFreezeGuard:
+    """Freeze()s a top-level window once at the start of a burst of
+    resize/sash-drag events and Thaw()s it once ~delay_ms after the last
+    one, instead of letting every intermediate tick repaint the window's
+    owner-drawn pill/icon controls individually. Complementary to
+    CanvasRedrawDebouncer: this suppresses the *screen blit* of everything
+    else in the window, while that one suppresses the expensive matplotlib
+    *rendering* work specifically.
+
+    Usage: guard = ResizeFreezeGuard(frame); bind guard.on_event to
+    EVT_SIZE on the frame and to EVT_SPLITTER_SASH_POS_CHANGING on any
+    splitters inside it (a sash drag alone doesn't resize the frame, so it
+    needs its own trigger). Freeze()/Thaw() calls are balanced exactly
+    once per burst; EVT_CLOSE is handled defensively so the window can
+    never be left frozen if it's closed mid-drag.
+    """
+
+    def __init__(self, window, delay_ms=150):
+        self.window = window
+        self._delay_ms = delay_ms
+        self._frozen = False
+        self._timer = wx.Timer(window)
+        window.Bind(wx.EVT_TIMER, self._on_settle, self._timer)
+        window.Bind(wx.EVT_CLOSE, self._on_close)
+
+    def on_event(self, event):
+        if not self._frozen:
+            self._frozen = True
+            self.window.Freeze()
+        self._timer.Start(self._delay_ms, wx.TIMER_ONE_SHOT)
+        event.Skip()
+
+    def _thaw(self):
+        if self._frozen:
+            self._frozen = False
+            try:
+                self.window.Thaw()
+            except RuntimeError:
+                pass  # window was destroyed
+
+    def _on_settle(self, event):
+        self._thaw()
+
+    def _on_close(self, event):
+        self._timer.Stop()
+        self._thaw()
+        event.Skip()

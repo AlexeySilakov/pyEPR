@@ -459,6 +459,11 @@ class HeatmapPanel(wx.Panel):
         sizer.Add(self.toolbar, 0, wx.EXPAND)
         self.SetSizer(sizer)
 
+        # Debounce the (expensive) full-figure redraw during a live window
+        # resize or splitter-sash drag -- see theme.CanvasRedrawDebouncer.
+        self._redraw_debouncer = theme.CanvasRedrawDebouncer(self.canvas)
+        self.Bind(wx.EVT_SIZE, self._redraw_debouncer.on_size)
+
         self.results = None
         self.grid1 = None
         self.grid2 = None

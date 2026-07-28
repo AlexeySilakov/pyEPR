@@ -602,8 +602,17 @@ class MatplotlibPanel(wx.Panel):
         sizer.Add(self.toolbar, 0, wx.LEFT | wx.EXPAND)
         # update the axes menu on the toolbar
         self.toolbar.update()
-        
+
         self.SetSizer(sizer)
+
+        # Debounce the (expensive, full-figure) canvas redraw during a
+        # live window resize or splitter sash drag -- see
+        # theme.CanvasRedrawDebouncer for why this targets canvas.draw
+        # specifically. Bound on this panel (not the canvas) since the
+        # canvas's own size only actually changes as a *result* of this
+        # panel's sizer being relaid out.
+        self._redraw_debouncer = theme.CanvasRedrawDebouncer(self.canvas)
+        self.Bind(wx.EVT_SIZE, self._redraw_debouncer.on_size)
 
     # ----- Status-bar coordinate readout -------------------------------------
     def on_mouse_move(self, event):
@@ -1698,6 +1707,16 @@ class MainFrame(wx.Frame):
         main_sizer.Add(self.top_toolbar, 0, wx.EXPAND)
         main_sizer.Add(content_sizer, 1, wx.EXPAND)
         self.SetSizer(main_sizer)
+
+        # Freeze the whole window for the duration of a live resize or
+        # splitter-sash drag, instead of letting every intermediate tick
+        # repaint the ~25+ owner-drawn pill/icon controls individually.
+        # A sash drag alone doesn't fire EVT_SIZE on the frame (the frame's
+        # own size is unchanged), so both splitters feed the same guard too.
+        self._resize_freeze = theme.ResizeFreezeGuard(self)
+        self.Bind(wx.EVT_SIZE, self._resize_freeze.on_event)
+        self.splitter_main.Bind(wx.EVT_SPLITTER_SASH_POS_CHANGING, self._resize_freeze.on_event)
+        self.splitter_right.Bind(wx.EVT_SPLITTER_SASH_POS_CHANGING, self._resize_freeze.on_event)
 
         self.Centre()
         self.apply_theme()
