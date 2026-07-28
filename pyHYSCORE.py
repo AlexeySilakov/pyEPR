@@ -26,6 +26,7 @@ from SysPar import sysPar, expPar
 from hyscore_sim import optHYSCORE, HYSCOREsim
 from colormap_editor import (ColormapEditorDialog, stops_to_cmap,
                               colormap_to_stops)
+import grid_search
 # import wx.lib.agw.customtreectrl as CT
 VERSION=0.6
 
@@ -266,7 +267,8 @@ class FileBrowserPanel(wx.Panel, listmix.ListCtrlAutoWidthMixin,
         try:
             with open(self.ini_file, "r", encoding="utf-8") as f:
                 stored = f.readline().strip()
-        except Exception:
+        except Exception as e:
+            print(f"[pyHYSCORE] Could not read {self.ini_file}: {e}")
             return
 
         if stored and os.path.isdir(stored):
@@ -278,8 +280,8 @@ class FileBrowserPanel(wx.Panel, listmix.ListCtrlAutoWidthMixin,
         try:
             with open(self.ini_file, "w", encoding="utf-8") as f:
                 f.write(self.path + "\n")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[pyHYSCORE] Could not save last folder to {self.ini_file}: {e}")
 
     # ----------------------------------------------------------------------
     # Core listing / filtering logic
@@ -287,7 +289,10 @@ class FileBrowserPanel(wx.Panel, listmix.ListCtrlAutoWidthMixin,
     def get_entries(self):
         try:
             raw = os.listdir(self.path)
-        except OSError:
+        except OSError as e:
+            print(f"[pyHYSCORE] Could not list folder '{self.path}': {e}")
+            if hasattr(self.parent, 'statusbar'):
+                self.parent.statusbar.SetStatusText(f"Could not list folder: {e}", 0)
             raw = []
 
         dirs, files = [], []
@@ -422,9 +427,10 @@ class FileBrowserPanel(wx.Panel, listmix.ListCtrlAutoWidthMixin,
                         if len(parts) > 1:
                             return parts[1]  # Return the string between the first two quotes
             return ''  # No matching line found
-        except FileNotFoundError:
-            #print(f"Error: File not found at {file_path}")
-            self.parent.RaiseError(f"Error: File not found at {file_path}")
+        except Exception as e:
+            # Non-fatal: skip the title for this one file rather than aborting
+            # the whole folder listing, but still surface why.
+            print(f"[pyHYSCORE] Could not read title from '{file_path}': {e}")
             return ''
     # ----------------------------------------------------------------------
     # Sorting mixin helpers
@@ -1097,7 +1103,11 @@ class TabulatedPanel(wx.Panel):
         self.btn_delete = wx.Button(self.Sys_panel, label="Delete Nuc")
         self.btn_delete.Bind(wx.EVT_BUTTON, self.on_delete_nuc)
         btnszr.Add(self.btn_delete, 0, wx.EXPAND)
-       
+
+        self.btn_gridsearch = wx.Button(self.Sys_panel, label="Grid Search…")
+        self.btn_gridsearch.Bind(wx.EVT_BUTTON, self.on_open_grid_search)
+        btnszr.Add(self.btn_gridsearch, 0, wx.EXPAND)
+
         Syssizer.Add(btnszr, 0, wx.EXPAND)
         
         self.Sys_param = MypgPanel.PropGridPanel(self.Sys_panel, Prop_Dict = {}, onChangeFunc=self.on_Sys)
@@ -1288,6 +1298,9 @@ class TabulatedPanel(wx.Panel):
         #self.update_filelist()
     def on_delete_nuc(self, event):
         pass
+    def on_open_grid_search(self, event):
+        frame = grid_search.GridSearchFrame(self.parent)
+        frame.Show()
     def on_update_sim(self, event):
         self.parent.runSim()
     def on_Sys(self, mainname, name, val):
@@ -2021,23 +2034,38 @@ class MainFrame(wx.Frame):
         
         hs = HYSCOREsim(Sys=self.Sys, errorFunc=self.RaiseError)
         hs.preCompute() ## get housekeeping stuff out of the way to speed up computations a bit
-        
+
+        failed_titles = []
         for ii,dd in enumerate(self.Data):
             self.actuateSimMethod(hs, self.Data[ii])
 
             try:
                 hs.reRun()
-                
+
                 self.Data[ii]['simdata']=hs.Spectrum
-                self.Data[ii]['simax']={'x':hs.X, 'y':hs.Y, 'xlabel':'Frequency, MHz', 'ylabel':'Frequency, MHz', 
+                self.Data[ii]['simax']={'x':hs.X, 'y':hs.Y, 'xlabel':'Frequency, MHz', 'ylabel':'Frequency, MHz',
                                         'orisel': np.array([hs.phi, hs.theta, hs.ak])}
                 self.Data[ii]['simactual']=True
-            except Exception:
+            except Exception as e:
+                # errorFunc (RaiseError) already showed a dialog for errors it
+                # anticipated (e.g. "no resonances"); this catch-all also has
+                # to handle genuinely unexpected exceptions, which otherwise
+                # would vanish here with zero feedback. Always print so there
+                # is at least a paper trail on the command line.
+                print(f"[pyHYSCORE] Simulation failed for '{dd.get('title', dd.get('fname', '?'))}': "
+                      f"{type(e).__name__}: {e}")
+                failed_titles.append(dd.get('title', dd.get('fname', f'dataset {ii}')))
                 self.Data[ii]['simdata']=None
-                self.Data[ii]['simax']={'x':hs.X, 'y':hs.Y, 'xlabel':'Frequency, MHz', 'ylabel':'Frequency, MHz', 
+                self.Data[ii]['simax']={'x':hs.X, 'y':hs.Y, 'xlabel':'Frequency, MHz', 'ylabel':'Frequency, MHz',
                                         'orisel': np.array([[0], [0], [0]])}
                 self.Data[ii]['simactual']=True
-                #self.RaiseError('Something went wrong with the simulation run. Good luck figuring out 🫩')
+
+        if failed_titles:
+            self.statusbar.SetStatusText(
+                f"Simulation failed for {len(failed_titles)}/{len(self.Data)} dataset(s) "
+                f"(see console for details): {', '.join(failed_titles)}", 0)
+        else:
+            self.statusbar.SetStatusText("Ready", 0)
 
         self.matplotlib_panel.update_graph()
             
@@ -2075,8 +2103,11 @@ class MainFrame(wx.Frame):
                              'cmap_stops': self.current_cmap_stops,
                              }
                 self.save_mixed_dict_xml(data_dict, pathname)
-            except IOError:
-                wx.LogError("Cannot open file '%s'." % pathname)
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                wx.MessageBox(f"Could not save session to '{pathname}':\n{type(e).__name__}: {e}",
+                              "Save Session Failed", wx.OK | wx.ICON_ERROR)
                 
     def save_mixed_dict_xml(self, data_dict, filename):
         import xml.etree.ElementTree as ET
@@ -2165,7 +2196,9 @@ class MainFrame(wx.Frame):
                     self.current_cmap_name  = str(result['cmap_name'])
                     self.current_cmap_stops = stops
                     self.current_cmap       = stops_to_cmap(stops, self.current_cmap_name)
-                except Exception:
+                except Exception as e:
+                    print(f"[pyHYSCORE] Could not restore saved colormap from '{filename}' "
+                          f"({type(e).__name__}: {e}); falling back to jet.")
                     self.current_cmap_name  = "jet"
                     self.current_cmap_stops = colormap_to_stops("jet", 9)
                     self.current_cmap       = stops_to_cmap(self.current_cmap_stops, "jet")
@@ -2181,7 +2214,7 @@ class MainFrame(wx.Frame):
             self.tabulated_panel.update_filelist()    
             self.matplotlib_panel.update_graph() 
             
-            if type(self.Data[0]['simdata'])!=type(None):
+            if self.Data and type(self.Data[0]['simdata'])!=type(None):
                 dlg = wx.MessageDialog(self,
                         "The loaded session contains a simulation resut. \t Would you like to refresh it by running simulaiton again?",
                         "Actualize simulation", wx.YES_NO | wx.ICON_QUESTION)
@@ -2189,10 +2222,14 @@ class MainFrame(wx.Frame):
                 dlg.Destroy()
                 if result == wx.ID_YES:
                     self.runSim()
-                
-        except Exception:
-            wx.MessageBox(f"Loading {filename} failed.", "Cannot load",
-                          wx.OK | wx.ICON_INFORMATION)
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            wx.MessageBox(
+                f"Loading '{filename}' failed:\n\n{type(e).__name__}: {e}\n\n"
+                f"(full traceback printed to the console)",
+                "Cannot load", wx.OK | wx.ICON_ERROR)
     
     def load_mixed_dict_xml(self, filename):
         import xml.etree.ElementTree as ET
