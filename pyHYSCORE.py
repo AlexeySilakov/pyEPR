@@ -1666,7 +1666,7 @@ class MainFrame(wx.Frame):
         # Split the right panel horizontally
         self.splitter_right.SplitVertically(
             self.matplotlib_panel, self.tabulated_panel,
-            sashPosition=400   # initial height of the top pane
+            sashPosition=200   # initial height of the top pane
         )
         self.splitter_right.SetSashGravity(1)  # proportion of space for the top pane
 
@@ -1690,9 +1690,18 @@ class MainFrame(wx.Frame):
             size=wx.Size(18, -1), fill_key="accent")
         self.toggle_btn.Bind(wx.EVT_BUTTON, self.on_toggle_left)
 
+        # ----------- Collapse toggle for the right panel ---------------------
+        # Lives outside the splitter (not inside right_panel) so it stays
+        # visible even once the panel it controls is fully hidden.
+        self.toggle_right_btn = theme.IconButton(
+            self, theme.draw_chevron_icon("right"), tooltip="Hide right panel",
+            size=wx.Size(18, -1), fill_key="accent")
+        self.toggle_right_btn.Bind(wx.EVT_BUTTON, self.on_toggle_right)
+
         content_sizer = wx.BoxSizer(wx.HORIZONTAL)
         content_sizer.Add(self.toggle_btn, 0, wx.EXPAND)
         content_sizer.Add(self.splitter_main, 1, wx.EXPAND)
+        content_sizer.Add(self.toggle_right_btn, 0, wx.EXPAND)
 
         main_sizer = wx.BoxSizer(wx.VERTICAL)
         main_sizer.Add(self.top_toolbar, 0, wx.EXPAND)
@@ -1720,6 +1729,18 @@ class MainFrame(wx.Frame):
                 self.file_browser, self.right_panel, sashPosition=self._left_sash)
             self.toggle_btn.SetDrawIcon(theme.draw_chevron_icon("left"))
             self.toggle_btn.SetToolTip("Hide file browser")
+
+    def on_toggle_right(self, event):
+        if self.splitter_right.IsSplit():
+            self._right_sash = self.splitter_right.GetSashPosition()
+            self.splitter_right.Unsplit(self.tabulated_panel)
+            self.toggle_right_btn.SetDrawIcon(theme.draw_chevron_icon("left"))
+            self.toggle_right_btn.SetToolTip("Show tabulated panel")
+        else:
+            self.splitter_right.SplitVertically(
+                self.matplotlib_panel, self.tabulated_panel, sashPosition=self._right_sash)
+            self.toggle_right_btn.SetDrawIcon(theme.draw_chevron_icon("right"))
+            self.toggle_right_btn.SetToolTip("Hide right panel")
 
     def apply_theme(self):
         """Push self._theme through every themed surface: native controls
