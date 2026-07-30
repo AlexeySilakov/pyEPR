@@ -574,8 +574,10 @@ class MatplotlibPanel(wx.Panel):
         self.chk_DiagProj.Bind(wx.EVT_CHECKBOX, self.on_check)
         self.chk_OverlaySim.Bind(wx.EVT_CHECKBOX, self.on_check)
 
-        self.rbox_quadrant = SegmentedPill(
-            self, choices=["All 4", "±ν₁  (horiz)", "±ν₂  (vert)"])
+        self.rbox_quadrant = wx.RadioBox(
+            self, label="Quadrants",
+            choices=["All 4", "±ν₁  (horiz)", "±ν₂  (vert)"],
+            majorDimension=1, style=wx.RA_SPECIFY_ROWS)
         self.rbox_quadrant.Bind(wx.EVT_RADIOBOX, self.on_quadrant)
 
         sizerH = wx.BoxSizer(wx.HORIZONTAL)
@@ -586,8 +588,6 @@ class MatplotlibPanel(wx.Panel):
         sizerH.Add(self.chk_DiagProj, 0, wx.EXPAND)
         sizerH.Add(self.chk_OverlaySim, 0, wx.EXPAND)
         sizerH.AddStretchSpacer(1)
-        self.lbl_quadrant = wx.StaticText(self, label="Quadrants:")
-        sizerH.Add(self.lbl_quadrant, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
         sizerH.Add(self.rbox_quadrant, 0, wx.ALIGN_CENTER_VERTICAL)
 
         sizer = wx.BoxSizer(wx.VERTICAL)
