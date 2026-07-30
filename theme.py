@@ -382,7 +382,9 @@ def _cached_paint_bitmap(win, key):
     cached = getattr(win, '_paint_cache', None)
     if cached is not None and cached[0] == key:
         return cached[1], False
-    bmp = wx.Bitmap(w, h)
+    scale = win.GetDPIScaleFactor()
+    bmp = wx.Bitmap(int(w * scale), int(h * scale))
+    bmp.SetScaleFactor(scale)
     win._paint_cache = (key, bmp)
     return bmp, True
 
@@ -500,6 +502,7 @@ class PillButton(wx.Panel):
         if fresh:
             mdc = wx.MemoryDC(bmp)
             gc = wx.GraphicsContext.Create(mdc)
+
             if gc is None:
                 mdc.SelectObject(wx.NullBitmap)
                 return
@@ -546,7 +549,7 @@ class PillButton(wx.Panel):
             mdc.SelectObject(wx.NullBitmap)
 
         dc = wx.AutoBufferedPaintDC(self)
-        dc.DrawBitmap(bmp, 0, 0)
+        dc.DrawBitmap(bmp, 0, 0, useMask=False)
 
     def DoGetBestSize(self):
         dc = wx.ClientDC(self)
