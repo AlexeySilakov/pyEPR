@@ -486,7 +486,7 @@ class HeatmapPanel(wx.Panel):
 
     def show_results(self, results, grid1, grid2, label1, label2,
                      contour_levels=None, raw_points=None, subtitle="",
-                     background_levels=None):
+                     background_levels=None, half_width=None):
         """results/grid1/grid2 are whatever should currently be displayed
         and hit-tested (hover/right-click) -- the interpolated fine grid
         once a scan has completed, or the raw coarse grid as a fallback.
@@ -572,9 +572,23 @@ class HeatmapPanel(wx.Panel):
             bi, bj = np.unravel_index(np.nanargmin(results), results.shape)
             self.ax.plot(grid1[bi], grid2[bj], marker='*', markersize=16,
                          markeredgecolor='k', markerfacecolor='white', zorder=5)
+
+            text = (f"Best: ")
+            best_ci1 = (f"")
+            best_ci2 = (f"")
+            if half_width is not None:
+                hw1 = half_width[1]
+                hw2 = half_width[2]
+
+                if hw1 is not None: 
+                    best_ci1 += f"{grid1[bi]:.4g} ± {hw1:.4g} (95%)\n"
+                if hw2 is not None:
+                    best_ci2 += f"{grid2[bj]:4g} ± {hw2:.4g} (95%)\n"
+            text += best_ci1
+            text += best_ci2
             self.ax.annotate(
-                f"best: {grid1[bi]:.4g}, {grid2[bj]:.4g}\nRMSD={results[bi, bj]:.4g}",
-                (grid1[bi], grid2[bj]), textcoords='offset points',
+                f"{text}RMSD={results[bi, bj]:.4g}",xy=(grid1[bi], grid2[bj]), 
+                textcoords='offset points',
                 xytext=(8, 8), fontsize='small', color='white',
                 bbox=dict(boxstyle='round', fc='black', alpha=0.6))
 
@@ -671,6 +685,7 @@ class GridSearchFrame(wx.Frame):
         self.param_pg = wxpg.PropertyGrid(
             left, style=wxpg.PG_DEFAULT_STYLE | wxpg.PG_HIDE_MARGIN | wxpg.PG_TOOLTIPS)
         leftsizer.Add(self.param_pg, 1, wx.EXPAND | wx.ALL, 4)
+        wx.CallAfter(self.param_pg.SetSplitterPosition, 100)
 
         self.btn_refresh = PillButton(left, "Refresh Parameters from Main Window",
                                       color_key="pill_load")
@@ -1199,7 +1214,7 @@ class GridSearchFrame(wx.Frame):
         self.heatmap.show_results(fine_vals, fine1, fine2, label1, label2,
                                   contour_levels=contour_levels,
                                   background_levels=background_levels,
-                                  raw_points=(grid1, grid2), subtitle=subtitle)
+                                  raw_points=(grid1, grid2), subtitle=subtitle, half_width=half_width)
         self.left_panel.Layout()
         self.Layout()
 

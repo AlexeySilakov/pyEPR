@@ -1674,10 +1674,10 @@ class MainFrame(wx.Frame):
 
         # Split the right panel horizontally
         self.splitter_right.SplitVertically(
-            self.matplotlib_panel, self.tabulated_panel,
-            sashPosition=200   # initial height of the top pane
+            self.matplotlib_panel, self.tabulated_panel,   # initial height of the top pane
         )
         self.splitter_right.SetSashGravity(1)  # proportion of space for the top pane
+        self.splitter_right.SetSashPosition(-250)
 
         # Put the second splitter into the right panel's sizer
         right_sizer.Add(self.splitter_right, 1, wx.EXPAND)
