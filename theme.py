@@ -210,7 +210,8 @@ def apply_theme_to_window(win, theme):
                 w.SetForegroundColour(fg)
             except Exception:
                 pass
-        elif isinstance(w, (wx.Button, wx.ToggleButton, wx.RadioBox)):
+        elif isinstance(w, (wx.Button, wx.ToggleButton, wx.RadioButton)):
+            strip_native_visual_style(w)
             w.SetBackgroundColour(win_bg)
             try:
                 w.SetForegroundColour(fg)
@@ -278,6 +279,7 @@ def theme_propgrid(pg, theme=None, caption_key="accent"):
     pg.SetSelectionBackgroundColour(selection)
     pg.SetSelectionTextColour(wx.Colour("#FFFFFF"))
     pg.SetLineColour(wx.Colour(t["border"]))
+    pg.SetEmptySpaceColour(wx.Colour(win_bg))
     pg.Refresh()
 
 
@@ -1011,6 +1013,78 @@ class SegmentedPill(wx.Panel):
     def DoGetBestSize(self):
         return wx.Size(-1, self.FromDIP(26))
 
+class ThemedRadioButton(wx.Panel):
+    def __init__(self, parent, label, group=None, value=False):
+        super().__init__(parent)
+
+        self.label = label
+        self.checked = value
+        self.group = group if group is not None else []
+        self.group.append(self)
+
+        self.callback = None
+
+        self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
+
+        self.Bind(wx.EVT_PAINT, self.on_paint)
+        self.Bind(wx.EVT_LEFT_DOWN, self.on_click)
+
+        #Size to fit radio circle and text
+        dc = wx.ClientDC(self)
+        dc.SetFont(self.GetFont())
+        text_w,text_h = dc.GetTextExtent(self.label)
+        self.SetMinSize((text_w + 35, max(text_h + 6, 20)))
+
+    def BindRadio(self, callback):
+        self.callback = callback
+
+    def on_click(self, event):
+        # uncheck group
+        for button in self.group:
+            button.checked = False
+
+        self.checked = True
+
+        for button in self.group:
+            button.Refresh()
+
+        if self.callback:
+            self.callback(self)
+
+    def GetValue(self):
+        return self.checked
+
+    def SetValue(self, value):
+        self.checked = value
+        self.Refresh()
+
+    def GetLabel(self):
+        return self.label
+
+    def on_paint(self, event):
+        dc = wx.AutoBufferedPaintDC(self)
+
+        bg = self.GetBackgroundColour()
+        fg = self.GetForegroundColour()
+
+        dc.SetBackground(wx.Brush(bg))
+        dc.Clear()
+
+        cy = self.GetSize().height // 2
+
+        # outer circle
+        dc.SetPen(wx.Pen(fg, 1))
+        dc.SetBrush(wx.Brush(bg))
+        dc.DrawCircle(8, cy, 7)
+
+        # filled dot
+        if self.checked:
+            dc.SetBrush(wx.Brush(fg))
+            dc.DrawCircle(8, cy, 4)
+
+        # text
+        dc.SetTextForeground(fg)
+        dc.DrawText(self.label, 22, cy - 8)
 
 class IconButton(wx.Panel):
     """Small square icon-only toolbar button: a hand-drawn vector glyph
@@ -1129,12 +1203,17 @@ class IconButton(wx.Panel):
         else:
             if self.IsEnabled() and (self._hover or self._down):
                 accent = wx.Colour(tc["accent"])
-                alpha = 210 if self._down else 130
-                gc.SetBrush(gc.CreateBrush(wx.Brush(
-                    wx.Colour(accent.Red(), accent.Green(), accent.Blue(), alpha))))
+                alpha = 180 if self._down else 120
+                fill = wx.Colour(accent.Red(), accent.Green(), accent.Blue(), alpha)
+                gc.SetBrush(gc.CreateBrush(wx.Brush(fill)))
+                #alpha = 210 if self._down else 130
+                #gc.SetBrush(gc.CreateBrush(wx.Brush(
+                    #wx.Colour(accent.Red(), accent.Green(), accent.Blue(), alpha))))
                 gc.SetPen(wx.TRANSPARENT_PEN)
-                d = min(w, h) - self.FromDIP(2)
-                gc.DrawEllipse((w - d) / 2.0, (h - d) / 2.0, d, d)
+                r = self.FromDIP(8)
+                gc.DrawRoundedRectangle(1, 1, w - 2, h - 2, r)
+                #d = min(w, h) - self.FromDIP(2)
+                #gc.DrawEllipse((w - d) / 2.0, (h - d) / 2.0, d, d)
             color = wx.Colour(tc["text"]) if self.IsEnabled() else _shade(wx.Colour(tc["text"]), 1.6)
 
         if self._draw_icon:

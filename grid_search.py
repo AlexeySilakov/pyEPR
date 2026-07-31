@@ -442,6 +442,23 @@ class HeatmapPanel(wx.Panel):
         super().__init__(parent)
         self.figure = Figure(figsize=(5, 4.5), dpi=100)
         self.ax = self.figure.add_subplot(111)
+
+        # self.figure.patch.set_facecolor(
+        #     theme.theme_colors()["ctrl_bg"]
+        # )
+
+        # self.ax = self.figure.add_subplot(111)
+
+        # self.ax.set_facecolor(
+        #     theme.theme_colors()["ctrl_bg"]
+        # )
+
+
+
+
+
+
+
         # figure.colorbar(im, ax=self.ax) shrinks self.ax's position to make
         # room for the colorbar, and that shrink sticks around after
         # ax.clear() (clear() wipes content, not geometry) -- so redrawing
@@ -593,7 +610,7 @@ class HeatmapPanel(wx.Panel):
                 bbox=dict(boxstyle='round', fc='black', alpha=0.6))
 
         self.figure.tight_layout()
-        self.canvas.draw()
+        self.canvas.draw_idle()
 
     def _nearest_index(self, x, y):
         if self.grid1 is None or self.grid2 is None:
@@ -703,7 +720,7 @@ class GridSearchFrame(wx.Frame):
         cmap_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.btn_cmap = PillButton(left, "Colormap…", color_key="accent")
         self.cmap_swatch = wx.Panel(left, size=(70, 22), style=wx.BORDER_SIMPLE)
-        self.chk_invert_cmap = wx.CheckBox(left, label="Invert")
+        self.chk_invert_cmap = wx.CheckBox(left, "Invert")
         cmap_sizer.Add(self.btn_cmap, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
         cmap_sizer.Add(self.cmap_swatch, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
         cmap_sizer.Add(self.chk_invert_cmap, 0, wx.ALIGN_CENTER_VERTICAL)

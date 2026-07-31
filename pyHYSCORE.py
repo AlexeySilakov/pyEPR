@@ -9,7 +9,7 @@ import numpy as np
 #import re
 
 import theme
-from theme import PillButton, PillCheckBox, PillTabBar, SegmentedPill
+from theme import PillButton, PillCheckBox, PillTabBar, ThemedRadioButton
 
 # Matplotlib imports
 import matplotlib
@@ -574,11 +574,22 @@ class MatplotlibPanel(wx.Panel):
         self.chk_DiagProj.Bind(wx.EVT_CHECKBOX, self.on_check)
         self.chk_OverlaySim.Bind(wx.EVT_CHECKBOX, self.on_check)
 
-        self.rbox_quadrant = wx.RadioBox(
-            self, label="Quadrants",
-            choices=["All 4", "±ν₁  (horiz)", "±ν₂  (vert)"],
-            majorDimension=1, style=wx.RA_SPECIFY_ROWS)
-        self.rbox_quadrant.Bind(wx.EVT_RADIOBOX, self.on_quadrant)
+        self.quadrant_box = wx.StaticBox(self, label="Quadrants")
+        self.quadrant_box_sizer = wx.StaticBoxSizer(self.quadrant_box, wx.HORIZONTAL)
+
+        self.quadrant_group = []
+
+        self.button_all4 = ThemedRadioButton(self, "All 4", self.quadrant_group, True)
+        self.button_horiz = ThemedRadioButton(self, "±ν₁  (horiz)", self.quadrant_group)
+        self.button_vert = ThemedRadioButton(self, "±ν₂  (vert)", self.quadrant_group)
+
+        self.quadrant_box_sizer.Add(self.button_all4, 0, wx.ALL, 3)
+        self.quadrant_box_sizer.Add(self.button_horiz, 0, wx.ALL, 3)
+        self.quadrant_box_sizer.Add(self.button_vert, 0, wx.ALL, 3)
+        self.button_all4.BindRadio(self.on_quadrant)
+        self.button_horiz.BindRadio(self.on_quadrant)
+        self.button_vert.BindRadio(self.on_quadrant)
+        self.button_all4.SetValue(True)
 
         sizerH = wx.BoxSizer(wx.HORIZONTAL)
         sizerH.Add(self.chk_FFT, 0, wx.EXPAND)
@@ -588,7 +599,7 @@ class MatplotlibPanel(wx.Panel):
         sizerH.Add(self.chk_DiagProj, 0, wx.EXPAND)
         sizerH.Add(self.chk_OverlaySim, 0, wx.EXPAND)
         sizerH.AddStretchSpacer(1)
-        sizerH.Add(self.rbox_quadrant, 0, wx.ALIGN_CENTER_VERTICAL)
+        sizerH.Add(self.quadrant_box_sizer, 0, wx.ALIGN_CENTER_VERTICAL)
 
         sizer = wx.BoxSizer(wx.VERTICAL)
         sizer.Add(sizerH, 0, wx.EXPAND)
@@ -641,9 +652,16 @@ class MatplotlibPanel(wx.Panel):
             sb.SetStatusText("", 1)
 
     def on_quadrant(self, event):
-        sel = self.rbox_quadrant.GetSelection()
+        sel = self.get_quadrant()
         self.quadrant = ('all', 'horizontal', 'vertical')[sel]
         self.update_graph()
+
+    def get_quadrant(self):
+        if self.button_all4.GetValue():
+            return 0
+        if self.button_horiz.GetValue():
+            return 1
+        return 2
 
     def on_check(self, event):
         (self.showFFT, self.showBG, self.showSkyline, self.showOriSel, self.showDiagonalProj, self.OverlaySim) = (
@@ -799,7 +817,7 @@ class MatplotlibPanel(wx.Panel):
                     self.contours[axcnt] = self.axes[axcnt].contour(
                         dd['simax']['x'], dd['simax']['y'],
                         simdata, np.linspace(simi, sima, nlev),
-                        colors=['white'])
+                        colors=['white'], linewidths=0.5)
 
                 # axes lim set to data specs, then quadrant mode applied
                 self.axes[simax].set_xlim(xmi, xma)
@@ -1159,6 +1177,7 @@ class TabulatedPanel(wx.Panel):
         
         self.filetree.SetCaptionBackgroundColour(self.Color_BG_FILE_Inact)
         self.filetree.SetCaptionTextColour(self.Color_FG_FILE_Title)
+        self.filetree.SetEmptySpaceColour(self.Color_BG_FILE_Main)
         # cat1 = self.filetree.Append(wxpg.PropertyCategory("Nothing loaded yet"))
         # self.filetree.AppendIn(cat1, wxpg.FloatProperty("MW Freq", value=9.43))
         # self.filetree.AppendIn(cat1, wxpg.FloatProperty("B0", value=350.0))
@@ -1703,7 +1722,7 @@ class MainFrame(wx.Frame):
         # Lives outside the splitter (not inside right_panel) so it stays
         # visible even once the panel it controls is fully hidden.
         self.toggle_right_btn = theme.IconButton(
-            self, theme.draw_chevron_icon("right"), tooltip="Hide right panel",
+            self, theme.draw_chevron_icon("right"), tooltip="Hide tabulated panel",
             size=wx.Size(18, -1), fill_key="accent")
         self.toggle_right_btn.Bind(wx.EVT_BUTTON, self.on_toggle_right)
 
