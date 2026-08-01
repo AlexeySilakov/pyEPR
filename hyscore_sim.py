@@ -1,12 +1,16 @@
 import numpy as np
+from scipy.spatial import Delaunay, ConvexHull
 from SysPar import sysPar, expPar
 import mathfunctions as mf
 import time
 
+
+
 class optHYSCORE():
     def __init__(self, **kwargs):
-        self.Symmetry = 'Ci' 
-        self.nKnots = 20 
+        self.Symmetry = 'Ci'
+        self.nKnots = 20
+        self.Grid = ['fibonacci', ['fibonacci', 'sphgrid', 'spiral']]
         self.OriSelInp = None #'orisel.mat'; alternatively, one can load pregenerated grid
                               # it should contain three columns : "phi", "theta" and "weights"
         self.Verbosity = False
@@ -36,8 +40,9 @@ class optHYSCORE():
                 else:
                     self.errorFunc(f"Unknown parameter '{key}' for Opt")
     def getDefaultDict(self):
-        return {'Symmetry': 'Ci', 
-        'nKnots': 20, 
+        return {'Symmetry': 'Ci',
+        'nKnots': 20,
+        'Grid': ['fibonacci', ['fibonacci', 'sphgrid', 'spiral']],
         'Verbosity': False,
         'KillNeg': True,           # flag for suppression of negative time in timedomain spectrum
         'ProdRule': True,      # use product rule, producing combination frequencies (memory/time consuming)
@@ -47,6 +52,11 @@ class optHYSCORE():
         }
     def getToolTips(self, param=None):
         dc = {'nKnots':'number of Knots in the orientation grid',
+              'Grid': ("Orientation grid construction.\n"+
+                       " 'fibonacci' = golden-angle spiral, equal-area, uniform weights \n"+
+                       " 'sphgrid' = SOPHE/triangular grid (EasySpin Ci), non-uniform weights \n"+
+                       " 'spiral' = latitude-ring spiral over the full sphere \n"+
+                       "nKnots is rescaled per method so the knot count stays comparable"),
               'OriSelInp': 'Input matrix of orientations. Must have three columns [phi, theta, weights]',
               'AmpRatios': 'Modify relative absolute amplitudes of crosspeaks from different nuclei',
               'OriSelType': ("Orientation selection algorithm.\n"+
@@ -122,6 +132,8 @@ class HYSCOREsim():
         self.theta = None
         self.ak = None
         self.ww = None
+        self.tri = None            # (nTri,3) knot indices, or None if not built
+        self.triareas = None       # solid angle per triangle, sums to 4*pi
         self.lxyz = None
         
         self.rawSpec = None
@@ -129,12 +141,119 @@ class HYSCOREsim():
         self.Y = None
         self.verbose = True
         self.Spectrum = None
-        self.Grid = 'fibonacci'
-    
+        # Grid construction. Left as None so Opt.Grid (set from the Opt tab)
+        # decides; set it to a name to override the Opt setting.
+        self.Grid = None
+        self.gridSig = None        # signature of the grid currently in self.phi
+
+    def grid_name(self):
+        """Selected grid construction: 'fibonacci', 'sphgrid' or 'spiral'.
+
+        self.Grid wins if set; otherwise Opt.Grid, which the property grid
+        stores in the [value, [choices]] form used by OriSelType.
+        """
+        g = self.Grid if self.Grid is not None else getattr(self.Opt, 'Grid', 'fibonacci')
+        if isinstance(g, (list, tuple)):
+            g = g[0] if len(g) else 'fibonacci'
+        return g
+
     def get_orisel(self, file):
         pass
     def preCompute(self):
         self.build_spin_operators()
+
+    # =====================================================================
+    #  >>> GRID CACHE <<<   grid_signature / ensure_grid
+    #
+    #  Look here if the orientation grid is rebuilt too often, or -- worse --
+    #  not rebuilt when it should be. grid_signature() is the single list of
+    #  everything the grid and its ak weights depend on; ensure_grid() only
+    #  rebuilds when that list changes.
+    #
+    #  If you add a parameter that must force a grid rebuild, add it to
+    #  grid_signature(). If you add one that must NOT, keep it out.
+    # =====================================================================
+    def grid_signature(self):
+        """Everything the orientation grid and its ak weights depend on.
+
+        Excluded on purpose:
+          - parameters that only shape the spectrum once the orientations are
+            known (tau, nPoints, MaxFreq, ProdRule, KillNeg, Treshold, ...)
+          - nuclei flagged useFor='sim.only', which contribute to the spectrum
+            but are skipped by computeOrisel_eig and so cannot move the grid.
+        """
+        def tag(v):
+            # canonical, exactly comparable form -- no rounding, so a change of
+            # any size counts as a change
+            if isinstance(v, np.ndarray):
+                return (v.shape, v.dtype.str, v.tobytes())
+            if isinstance(v, (list, tuple)):
+                return tuple(tag(x) for x in v)
+            if isinstance(v, dict):
+                return tuple((k, tag(v[k])) for k in sorted(v, key=repr))
+            return v
+
+        Sys, Exp, Opt = self.Sys, self.Exp, self.Opt
+
+        # Which nuclei may influence the grid: everything except 'sim.only'
+        nucs = getattr(Sys, 'Nucs', None)
+        useFor = getattr(Sys, 'useFor', None)
+        keep = []
+        for ii in range(len(nucs) if nucs is not None else 0):
+            flag = useFor[ii] if (useFor is not None and ii < len(useFor)) else 'all'
+            if flag != 'sim.only':
+                keep.append(ii)
+
+        sig = [('grid', self.grid_name()),
+               ('nKnots', tag(getattr(Opt, 'nKnots', None))),
+               ('Symmetry', tag(getattr(Opt, 'Symmetry', None))),
+               ('useFor', tag(useFor)),
+               ('OriSelType', tag(getattr(Opt, 'OriSelType', [None])[0])),
+               ('OriSelInp', tag(getattr(Opt, 'OriSelInp', None)))]
+
+        # Experimental settings that enter the orientation weighting
+        for name in ('mwFreq', 'Field', 'gField', 'ExciteWidth'):
+            sig.append((name, tag(getattr(Exp, name, None))))
+
+        # Electron part of the spin system
+        for name in ('S', 'g', 'gFrame', 'D', 'DFrame'):
+            sig.append((name, tag(getattr(Sys, name, None))))
+
+        # Per-nucleus parameters, restricted to the nuclei kept above
+        for name in ('Nucs', 'nNucs', 'I', 'gn', 'gamma',
+                     'A', 'Apa', 'AFrame', 'Q', 'Qpa', 'QFrame'):
+            v = getattr(Sys, name, None)
+            if v is None:
+                sig.append((name, None))
+                continue
+            try:
+                sig.append((name, tuple(tag(v[ii]) for ii in keep)))
+            except (TypeError, IndexError, KeyError):
+                sig.append((name, tag(v)))    # not per-nucleus after all
+
+        return tuple(sig)
+
+    def ensure_grid(self):
+        """Build the orientation grid only when grid_signature() has changed.
+
+        Returns True if the grid was (re)built. The signature is stored after
+        the build, not before, because compute_weights writes Exp.Field back
+        when Exp.gField is set -- capturing it first would cost a spurious
+        rebuild on the very next call.
+        """
+        if (self.gridSig is not None and self.phi is not None
+                and self.grid_signature() == self.gridSig):
+            return False
+
+        if self.Opt.OriSelType[0] in ['g_eff', 'g_eff+HFC']:
+            self.make_grid(grid=self.grid_name(), nKnots=self.Opt.nKnots)
+            self.compute_weights()
+        elif self.Opt.OriSelType[0] == 'brute force':
+            self.computeOrisel_eig(grid=self.grid_name(), nKnots=self.Opt.nKnots,
+                                   epsilon=0.33, returnMatrix=False, setActive=True)
+        self.gridSig = self.grid_signature()
+        return True
+
     def reRun(self):
         if self.verbose: print('----start calculaitons ----');
         sta = time.perf_counter()
@@ -151,12 +270,13 @@ class HYSCOREsim():
             self.phi = self.Opt.OriSelInp[:, 0]
             self.theta = self.Opt.OriSelInp[:, 1]
             self.ak = self.Opt.OriSelInp[:, 2]
+            self.tri = None
+            self.triareas = None
+            self.gridSig = None       # a loaded grid is not one we can re-derive
         else:
-            if self.Opt.OriSelType[0] in ['g_eff', 'g_eff+HFC']:
-                self.make_grid(grid=self.Grid, nKnots=self.Opt.nKnots)
-                self.compute_weights()
-            elif self.Opt.OriSelType[0]== 'brute force':
-                self.computeOrisel_eig(grid=self.Grid, nKnots=self.Opt.nKnots, epsilon=0.33, returnMatrix=False, setActive=True)
+            # see the GRID CACHE banner above: this is a no-op unless something
+            # the grid depends on has actually changed
+            self.ensure_grid()
 
 
         #elapsed = time.perf_counter() - sta
@@ -207,6 +327,8 @@ class HYSCOREsim():
         phi=None
         theta=None
         ww=None
+        tri=None
+        triareas=None
         if grid=='input':
             if phiDeg and thetaDeg:
                 phiT   = np.asarray(phiDeg)*np.pi/180 # inputs are assumed in MHz
@@ -218,8 +340,16 @@ class HYSCOREsim():
         elif grid=='fibonacci':
             n   = int(nKnots**1.5)
             thLim=np.pi
-            if not Symmetry:
-                phLim=2*np.pi
+            phLim=2*np.pi
+            if Symmetry:
+                # Symmetry-restricted azimuthal ranges are not implemented here,
+                # so the full azimuth is used regardless. Bound unconditionally
+                # above because errorFunc does not necessarily abort (the GUI
+                # handler only shows a dialog), and the mask below needs phLim.
+                # Use grid='sphgrid' for a symmetry-aware (Ci) EasySpin grid.
+                self.errorFunc(f"make_grid: Symmetry={Symmetry!r} is not "
+                               "implemented for grid='fibonacci'; "
+                               "covering the full azimuth")
             # Golden angle
             golden_angle = np.pi * (3.0 - np.sqrt(5.0))   # ≈ 2.39996322973
             idx = np.arange(0, n, dtype='float64')
@@ -229,22 +359,36 @@ class HYSCOREsim():
             mask = (ttheta <= thLim) & (tphi <= phLim)
             
             phi = tphi[mask]
-            theta = ttheta[mask] 
+            theta = ttheta[mask]
+            # Equal-area grid, so the knots carry equal weight; normalised by
+            # the sum so that the intensity scale does not depend on nKnots and
+            # is directly comparable with the 'sphgrid' branch below.
             ww = np.ones_like(phi)
-        elif grid=='spiral':      
+            ww = ww/np.sum(ww)
+            tri, triareas = self.grid_triangulation(phi, theta)
+        elif grid=='spiral':
             # Curtesy of Ed Reijerse /MAGRES.. currently not working well
-            krid   = int(nKnots)
+            # Rescaled like the 'sphgrid' branch so nKnots means a comparable
+            # cost in every method. This grid holds about
+            #   sum_i floor(sin(i*pi/K)*4K) ~ 4K*cot(pi/2K) ~ 8K^2/pi
+            # knots, so invert that against what 'fibonacci' would produce.
+            krid   = max(2, int(round(np.sqrt(int(nKnots**1.5)*np.pi/8))))
             itheta, iphi = krid, 0
             step = np.pi/krid
             phi_l, theta_l = [], []
             thetaa=0.0
             dthe=0.0
             dphi=0.0
-            nphi=1
+            nphi=0            # 0 so the first pass opens a ring straight away
             while True:
                 if itheta <= 0:
                     self.errorFunc('pdrpeal too many calls')
-                if iphi == 2*krid:               # new latitude ring
+                    break                        # errorFunc may not abort
+                # A ring is full after its own nphi knots. Testing against
+                # 2*krid instead put every ring's surplus knots on top of each
+                # other -- with nKnots=20 the first 40 knots were all the north
+                # pole, which is what made this grid "not work well".
+                if iphi == nphi:                 # new latitude ring
                     iphi   = 0
                     itheta -= 1
                     thetam  = itheta * step
@@ -253,7 +397,9 @@ class HYSCOREsim():
                         self.errorFunc('BUG pdrpeal 1')
                     thetaa = thetam + 0.5*step
                     dthe   = -step/nphi
-                    dphi   = 360/nphi
+                    # radians: theta is built in radians from step = pi/krid, so
+                    # a degree increment here left phi on a different scale
+                    dphi   = 2*np.pi/nphi
                 thetap = thetaa + iphi*dthe
                 phip   = iphi*dphi
                 phi_l.append(phip)
@@ -261,12 +407,81 @@ class HYSCOREsim():
                 iphi += 1
                 if iphi == nphi and itheta == 1:
                     break
-            phi = np.array(phi_l)
+            phi = np.remainder(np.array(phi_l), 2*np.pi)
             theta = np.array(theta_l)
-            ww = np.ones_like(phi_l)
-    
-        elif grid=='sphgrid':                                   # sphgrid – placeholder
-            self.errorFunc('sphgrid not implemented')
+            # Rings sit at constant steps in theta but hold nphi ~ sin(theta)
+            # knots each, so a knot covers (2*pi*sin(th)*dth)/nphi = const solid
+            # angle: the grid is equal-area and the weights stay uniform.
+            # Normalised by the sum, as in the other branches.
+            ww = np.ones_like(theta)
+            ww = ww/np.sum(ww)
+            tri, triareas = self.grid_triangulation(phi, theta)
+
+        elif grid=='sphgrid':
+            # SOPHE / triangular grid, Ci branch (upper hemisphere, four
+            # octants, open phi). Port of sphgrid_ in EasySpin's sphgrid.m.
+            # The grid is Eq. (15) of Stoll & Schweiger, J.Magn.Reson. 178
+            # (2006) 42-55, p.47 -- which prints only the one-octant case --
+            # generalised by sphgrid.m to
+            #    theta_k = (pi/2)*k/(K-1), nPhi = nOct*k+1, phi = 0..maxPhi
+            # Original grid: Wang & Hanson, J.Magn.Reson. A 117, 1-8 (1995).
+            #
+            # nKnots is rescaled rather than passed through: EasySpin's GridSize
+            # counts knots along a quarter meridian, so GridSize=20 would give
+            # 761 knots against the 89 that 'fibonacci' produces for nKnots=20.
+            # Inverting the knot count 1+2*K*(K-1) keeps the two branches
+            # interchangeable at equal cost (one diagonalisation per knot).
+            nTarget = int(nKnots**1.5)
+            K = max(2, int(round((1.0+np.sqrt(max(2.0*nTarget-1.0, 1.0)))/2.0)))
+            nOct = 4
+            maxPhi = 2*np.pi
+            dtheta = (np.pi/2)/(K-1)
+
+            n = K + nOct*K*(K-1)//2
+            phi = np.zeros(n)
+            theta = np.zeros(n)
+            ww = np.zeros(n)
+            sindth2 = np.sin(dtheta/2)
+            w0 = 1.0                          # open phi -> full weight at phi=0
+
+            # North pole. Handled outside the loop, which is also why Eq. (15)'s
+            # phi = (pi/2)*(q/k) never has to evaluate 0/0.
+            ww[0] = maxPhi*(1.0-np.cos(dtheta/2))
+
+            start = 1
+            for iSlice in range(2, K):        # every slice but the equatorial one
+                nPhi = nOct*(iSlice-1)+1
+                dPhi = maxPhi/(nPhi-1)
+                idx = start+np.arange(nPhi)
+                ww[idx] = (2*np.sin((iSlice-1)*dtheta)*sindth2*dPhi
+                           * np.r_[w0, np.ones(nPhi-2), 0.5])
+                phi[idx] = np.linspace(0.0, maxPhi, nPhi)
+                theta[idx] = (iSlice-1)*dtheta
+                start += nPhi
+
+            # Equatorial slice. The missing 2*sin(theta) factor is deliberate:
+            # on a hemisphere the equator spans only half a band.
+            nPhi = nOct*(K-1)+1
+            dPhi = maxPhi/(nPhi-1)
+            idx = start+np.arange(nPhi)
+            phi[idx] = np.linspace(0.0, maxPhi, nPhi)
+            theta[idx] = np.pi/2
+            ww[idx] = sindth2*dPhi*np.r_[w0, np.ones(nPhi-2), 0.5]
+
+            # Border removal: drop the phi=2*pi duplicate ending every ring
+            keep = np.ones(n, dtype=bool)
+            keep[np.cumsum(nOct*np.arange(1, K)+1)] = False
+            phi = phi[keep]
+            theta = theta[keep]
+            ww = 2*(2*np.pi/maxPhi)*ww[keep]              # EasySpin: sum = 4*pi
+
+            # This grid is NOT equal-area (nPhi grows as k, i.e. as theta,
+            # whereas equal-area sampling needs sin(theta)), so the weights are
+            # essential -- uniform weights would bias the powder average toward
+            # the poles. Normalised by the sum as for 'fibonacci'; that is a
+            # pure global scale, so relative weights stay exact vs EasySpin.
+            ww = ww/np.sum(ww)
+            tri, triareas = self.grid_triangulation(phi, theta)
         # 3.  Default case – latitude rings
         else:
             nknots = int(nKnots)
@@ -289,6 +504,67 @@ class HYSCOREsim():
         self.phi = phi
         self.theta = theta
         self.ww = ww
+        # TODO(pyHYSCORE): 'fibonacci' and 'sphgrid' now both publish a knot
+        # triangulation here, so the orientation-selection plot in pyHYSCORE can
+        # consume self.tri/self.triareas instead of building its own Delaunay.
+        # Not wired up yet -- ask before modifying pyHYSCORE.py.
+        self.tri = tri
+        self.triareas = triareas
+
+    def grid_triangulation(self, phi, theta):
+        """Delaunay triangulation of an orientation grid, with exact solid angles.
+
+        Hemisphere grids follow the nOctants=4 branch of sphgrid.m: triangulate
+        in the azimuthal-equidistant projection (r = theta), which is a
+        bijection there and keeps triangles well conditioned out to the equator.
+        Full-sphere grids fall back to the 3D convex hull instead, since that
+        projection is no longer injective past the equator.
+        Returns (tri, areas), areas summing to 4*pi.
+        """
+        phi = np.asarray(phi, dtype=float).ravel()
+        theta = np.asarray(theta, dtype=float).ravel()
+        if phi.size < 4:
+            return np.zeros((0, 3), dtype=int), np.zeros(0)
+
+        st = np.sin(theta)
+        vecs = np.vstack((st*np.cos(phi), st*np.sin(phi), np.cos(theta)))
+
+        if theta.max() <= np.pi/2 + 1e-9:
+            # Hemisphere ('fibonacci', 'sphgrid'): the azimuthal-equidistant
+            # projection is a bijection there, so a planar Delaunay suffices.
+            tri = Delaunay(np.column_stack((theta*np.cos(phi),
+                                            theta*np.sin(phi)))).simplices
+        else:
+            # Full sphere ('spiral'): that projection folds the two hemispheres
+            # onto each other, so triangulate on the sphere itself. For points
+            # on a sphere the convex hull IS the spherical Delaunay.
+            tri = ConvexHull(vecs.T).simplices
+
+        # Triangle solid angles by l'Huilier's formula, as triangleareas() in
+        # sphgrid.m: edge arc lengths, then the spherical excess.
+        x1 = vecs[:, tri[:, 0]]
+        x2 = vecs[:, tri[:, 1]]
+        x3 = vecs[:, tri[:, 2]]
+        a1 = np.arccos(np.clip(np.sum(x2*x3, axis=0), -1.0, 1.0))
+        a2 = np.arccos(np.clip(np.sum(x3*x1, axis=0), -1.0, 1.0))
+        a3 = np.arccos(np.clip(np.sum(x1*x2, axis=0), -1.0, 1.0))
+        s = (a1+a2+a3)/2                      # half the perimeter
+        t = np.tan(s/2)*np.tan((s-a1)/2)*np.tan((s-a2)/2)*np.tan((s-a3)/2)
+        # MATLAB takes real(sqrt(t)); for t<0 that is 0, which np.maximum matches
+        areas = 4*np.arctan(np.sqrt(np.maximum(t, 0.0)))
+
+        # Discard slivers thrown off by the Delaunay call, as sphgrid.m does
+        if areas.size:
+            keep = areas >= areas.mean()*1e-3
+            tri, areas = tri[keep], areas[keep]
+
+        tri = np.sort(tri, axis=1)
+        order = np.lexsort((tri[:, 2], tri[:, 1], tri[:, 0]))
+        tri, areas = tri[order], areas[order]
+        total = areas.sum()
+        if total > 0:
+            areas = areas/total*4*np.pi
+        return tri, areas
 
     def compute_weights(self):
         if (self.Exp.ExciteWidth > 0) and (self.Exp.mwFreq > 0):
@@ -850,6 +1126,14 @@ class HYSCOREsim():
 
         if np.max(self.ak) < 1e-4:
             self.errorFunc(f'HYSCORE_computeOrisel_eig: no orientations were found with P(θ,ϕ)>1e-4. Aborting the run. \n\t mwFreq = {self.Exp.mwFreq :.8} [GHz] \n\t Field = {self.Exp.Field :.8} [mT]')
+
+        # Apply the grid weights, as compute_weights does. Grids like 'sphgrid'
+        # are not equal-area, so skipping this would bias the powder average
+        # toward the poles. Deliberately after the threshold test above, which
+        # has to see the unweighted ak: normalised weights are O(1/N) and would
+        # trip it on every run.
+        if self.ww is not None:
+            self.ak = self.ak*self.ww
 
         OriSelOut[:, 2] =self.ak
     

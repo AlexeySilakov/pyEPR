@@ -907,22 +907,34 @@ class MatplotlibPanel(wx.Panel):
                     x = np.sin(theta)*np.cos(phi)
                     y = np.sin(theta)*np.sin(phi)
                     z = np.cos(theta)
-                    norm = plt.Normalize(vmin=0, vmax=np.max(ak))
-                    tri = mtri.Triangulation(x, y)    
-                    triangle_ak = ak[tri.triangles].max(axis=1)          # one value per triangle
+                    amax = np.max(ak)
+                    norm = plt.Normalize(vmin=0, vmax=amax if amax > 0 else 1.0)
+
+                    # Triangulation from the simulation grid (make_grid). It is
+                    # built on the sphere, so it stays correct for the 'spiral'
+                    # grid, which covers the full sphere -- there the old
+                    # Triangulation(x, y) folded the two hemispheres together.
+                    triangles = dd['simax'].get('oriseltri')
+                    if triangles is None or len(triangles) == 0 or np.max(triangles) >= len(x):
+                        # precalculated grids carry no triangulation of their own
+                        triangles = mtri.Triangulation(x, y).triangles
+
+                    triangle_ak = ak[triangles].max(axis=1)          # one value per triangle
                     facecolors = self.parent.current_cmap(norm(triangle_ak))
-                    
+
                     surf = self.axes[oriax].plot_trisurf(
                         x, y, z,
-                        triangles=tri.triangles,
+                        triangles=triangles,
                         linewidth=0, antialiased=True,
                         shade=False,  # we supply colour via facecolors
                         )
                         #
-                    self.axes[oriax].set_aspect('equal') 
+                    self.axes[oriax].set_aspect('equal')
                     self.axes[oriax].set_xlabel('X'); self.axes[oriax].set_ylabel('Y'); self.axes[oriax].set_zlabel('Z')
                     surf.set_facecolor(facecolors)
-                    surf.set_edgecolor(self.parent.current_cmap(norm(ak)))
+                    # per-triangle, like the faces: ak is per-knot and would be
+                    # the wrong length here
+                    surf.set_edgecolor(facecolors)
                 rowcnt+=1
             if self.showDiagonalProj:
                 diagprj = axcnt+rowcnt*nData
@@ -2146,7 +2158,9 @@ class MainFrame(wx.Frame):
             if len(self.Data)>0:
                 for ii,dd in enumerate(self.Data):
                     self.actuateSimMethod(hs, self.Data[ii])
-                    matr = hs.computeOrisel_eig(grid='fibonacci', nKnots=hs.Opt.nKnots, epsilon=0.33, returnMatrix=True, setActive=False)
+                    # honour the Grid choice on the Opt tab; this used to be
+                    # hardwired to 'fibonacci' and ignored the selection
+                    matr = hs.computeOrisel_eig(grid=hs.grid_name(), nKnots=hs.Opt.nKnots, epsilon=0.33, returnMatrix=True, setActive=False)
                     self.Data[ii]['orisel'] = matr.copy()
         else:
             for ii,dd in enumerate(self.Data):
@@ -2199,7 +2213,11 @@ class MainFrame(wx.Frame):
 
                 self.Data[ii]['simdata']=hs.Spectrum
                 self.Data[ii]['simax']={'x':hs.X, 'y':hs.Y, 'xlabel':'Frequency, MHz', 'ylabel':'Frequency, MHz',
-                                        'orisel': np.array([hs.phi, hs.theta, hs.ak])}
+                                        'orisel': np.array([hs.phi, hs.theta, hs.ak]),
+                                        # knot triangulation from make_grid; None
+                                        # for a precalculated grid, in which case
+                                        # the plot falls back to its own
+                                        'oriseltri': None if hs.tri is None else hs.tri.copy()}
                 self.Data[ii]['simactual']=True
             except Exception as e:
                 # errorFunc (RaiseError) already showed a dialog for errors it
@@ -2212,7 +2230,8 @@ class MainFrame(wx.Frame):
                 failed_titles.append(dd.get('title', dd.get('fname', f'dataset {ii}')))
                 self.Data[ii]['simdata']=None
                 self.Data[ii]['simax']={'x':hs.X, 'y':hs.Y, 'xlabel':'Frequency, MHz', 'ylabel':'Frequency, MHz',
-                                        'orisel': np.array([[0], [0], [0]])}
+                                        'orisel': np.array([[0], [0], [0]]),
+                                        'oriseltri': None}
                 self.Data[ii]['simactual']=True
 
         if failed_titles:
@@ -2325,7 +2344,33 @@ class MainFrame(wx.Frame):
         with open(filename, 'w') as f:
             f.write(pretty_xml)
         
-    def loadXML(self, filename):    
+    def withDefaults(self, saved, defaults):
+        """Saved session values laid over the current defaults.
+
+        A session written before a parameter existed simply has no key for it,
+        and SetFromParClean builds the property grid from exactly the dict it
+        is handed -- so without this merge an older session silently drops
+        every parameter added since (Opt.Grid was the first casualty) and the
+        control vanishes from the tab.
+
+        Enum entries are stored as [value, [choices]]. The saved selection is
+        kept, but the choice list always comes from the defaults, so options
+        added later show up on old sessions too; a selection that is no longer
+        offered falls back to the default.
+        """
+        out = defaults.copy()
+        for key, val in saved.items():
+            dflt = defaults.get(key)
+            isEnum = (isinstance(dflt, list) and len(dflt) == 2
+                      and isinstance(dflt[1], list))
+            if isEnum:
+                sel = val[0] if (isinstance(val, list) and len(val) == 2) else val
+                out[key] = [sel if sel in dflt[1] else dflt[0], list(dflt[1])]
+            else:
+                out[key] = val
+        return out
+
+    def loadXML(self, filename):
         try:
             result = self.load_mixed_dict_xml(filename)
             if 'Data' in result.keys():
@@ -2337,7 +2382,10 @@ class MainFrame(wx.Frame):
             if 'Exp' in result.keys():
                 self.tabulated_panel.Exp_param.SetFromParClean(result['Exp'].copy())
             if 'Opt' in result.keys():
-                self.tabulated_panel.Opt_param.SetFromParClean(result['Opt'].copy())
+                # merged, so a session saved before Opt.Grid existed still
+                # gets the Grid dropdown (at its default) instead of losing it
+                self.tabulated_panel.Opt_param.SetFromParClean(
+                    self.withDefaults(result['Opt'], self.Opt.getDefaultDict()))
             if 'fftmethod' in result.keys():
                 fftmethod = result['fftmethod']
                 for kk in fftmethod.keys():
