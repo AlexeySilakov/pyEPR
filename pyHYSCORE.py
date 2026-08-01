@@ -1074,6 +1074,34 @@ class TabulatedPanel(wx.Panel):
 
         Optsizer.Add(self.Opt_param, 1, wx.EXPAND)
 
+        # ---- Target Grid Points ------------------------------------------
+        # Off-grid helper for nKnots: nKnots means a different thing in every
+        # Grid method, so this lets the resolution be set by the one figure
+        # that is comparable. Kept out of the property grid because it is not
+        # an Opt parameter -- nKnots remains the stored one, and the two stay
+        # in sync in both directions via updateGridInfo().
+        tgtBox = wx.StaticBoxSizer(
+            wx.StaticBox(self.Opt_panel, label="Target Grid Points"), wx.VERTICAL)
+        self.spin_gridTarget = wx.SpinCtrl(
+            self.Opt_panel, min=1, max=10000000,
+            initial=int(self.parent.Opt.nGridPoints() or 1),
+            style=wx.SP_ARROW_KEYS | wx.TE_PROCESS_ENTER)
+        self.spin_gridTarget.SetToolTip(
+            "Requested number of orientations. nKnots is integer, so the grid "
+            "snaps to the nearest achievable size -- the result is shown below.")
+        tgtBox.Add(self.spin_gridTarget, 0, wx.EXPAND | wx.ALL, 2)
+
+        self.txt_gridActual = wx.TextCtrl(
+            self.Opt_panel, style=wx.TE_READONLY | wx.TE_CENTRE)
+        self.txt_gridActual.SetToolTip(
+            "Grid actually produced for the current Grid method and nKnots.")
+        tgtBox.Add(self.txt_gridActual, 0, wx.EXPAND | wx.ALL, 2)
+        Optsizer.Add(tgtBox, 0, wx.EXPAND | wx.TOP, 4)
+
+        self.spin_gridTarget.Bind(wx.EVT_SPINCTRL, self.on_gridTarget)
+        self.spin_gridTarget.Bind(wx.EVT_TEXT_ENTER, self.on_gridTarget)
+        self.updateGridInfo()
+
         self.btn_doOriSel   = PillButton(self.Opt_panel, "Update Ori.Sel. Grid", color_key="pill_load")
         Optsizer.Add(self.btn_doOriSel, 0, wx.EXPAND)
         self.btn_doOriSel.Bind(wx.EVT_BUTTON, self.parent.on_update_orisel)
@@ -1332,6 +1360,64 @@ class TabulatedPanel(wx.Panel):
         self.parent.Opt.setFromCtrl(self.Opt_param.parameters)
         if name=='OriSelType':
             self.parent.on_update_orisel(None)
+        if name in ('Grid', 'nKnots'):
+            self.updateGridInfo()
+
+    def on_gridTarget(self, event):
+        """Convert a requested grid size into nKnots and push it to the grid.
+
+        Only a ladder of totals is reachable, so the value asked for and the
+        value obtained generally differ; the read-only box below reports what
+        was actually built. Written with trigger_run=False so syncing nKnots
+        does not re-enter on_Opt while this handler is still running.
+        """
+        if event is not None:
+            event.Skip()
+        Opt = self.parent.Opt
+        k = Opt.nKnotsForGridPoints(self.spin_gridTarget.GetValue())
+        if k is None:
+            self.updateGridInfo()
+            return
+        prop = self.Opt_param.pg.GetPropertyByName('nKnots')
+        if prop is not None and prop.GetValue() != k:
+            prop.SetValue(k)
+            self.Opt_param.OnValueChanged(None, prop=prop, trigger_run=False)
+            Opt.setFromCtrl(self.Opt_param.parameters)
+        self.updateGridInfo(keepTarget=True)
+
+    def updateGridInfo(self, keepTarget=False):
+        """Keep nKnots, Target Grid Points and the actual count consistent.
+
+        nKnots means a different thing in every grid method (89 / 761 / 968 at
+        nKnots=20), so the knot count is the only comparable figure -- and the
+        only one that predicts run time, which is one diagonalisation per knot.
+        Called whenever Grid or nKnots changes and after a session is loaded.
+
+        keepTarget leaves the spin control alone, so a request of 800 that
+        snapped to 761 still reads 800 rather than silently rewriting itself.
+        """
+        Opt = self.parent.Opt
+        n = Opt.nGridPoints()
+        gname = Opt.Grid[0] if isinstance(Opt.Grid, (list, tuple)) else Opt.Grid
+
+        txt = Opt.getToolTips('nKnots')
+        if n is not None:
+            txt = (f"{txt}\n\n"
+                   f"Currently: '{gname}' with nKnots={Opt.nKnots}"
+                   f"  ->  {n} grid points")
+        self.Opt_param.tooltips['nKnots'] = txt
+        prop = self.Opt_param.pg.GetPropertyByName('nKnots')
+        if prop is not None:
+            prop.SetHelpString(txt)
+
+        if getattr(self, 'txt_gridActual', None) is not None:
+            self.txt_gridActual.SetValue(
+                'grid: n/a' if n is None
+                else f'actual: {n} points  (nKnots = {Opt.nKnots})')
+        # nKnots edited directly, or a session loaded -> follow it
+        if not keepTarget and getattr(self, 'spin_gridTarget', None) is not None:
+            if n is not None and self.spin_gridTarget.GetValue() != n:
+                self.spin_gridTarget.SetValue(int(n))
     def on_Set(self, mainname, name, val):
         pass
     def on_dsc(self, event):
@@ -2386,6 +2472,8 @@ class MainFrame(wx.Frame):
                 # gets the Grid dropdown (at its default) instead of losing it
                 self.tabulated_panel.Opt_param.SetFromParClean(
                     self.withDefaults(result['Opt'], self.Opt.getDefaultDict()))
+                self.Opt.setFromCtrl(self.tabulated_panel.Opt_param.parameters)
+                self.tabulated_panel.updateGridInfo()
             if 'fftmethod' in result.keys():
                 fftmethod = result['fftmethod']
                 for kk in fftmethod.keys():

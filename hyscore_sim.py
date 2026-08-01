@@ -50,12 +50,82 @@ class optHYSCORE():
         'Treshold': 1e-3,
         'OriSelType': ['g_eff', ['g_eff', 'g_eff+HFC', 'brute force', 'precalculated']]
         }
+    def nGridPoints(self, grid=None, nKnots=None):
+        """Knots the selected grid will produce, without actually building it.
+
+        nKnots means something different in every method, so this count is the
+        only figure that is comparable between them; pyHYSCORE shows it live in
+        the nKnots hint. Mirrors the three branches of HYSCOREsim.make_grid --
+        tmp/check_gridhint.py asserts the two stay in step.
+        Returns None if the grid has no closed-form count.
+        """
+        if grid is None:
+            grid = self.Grid
+        if isinstance(grid, (list, tuple)):
+            grid = grid[0] if len(grid) else 'fibonacci'
+        if nKnots is None:
+            nKnots = self.nKnots
+        try:
+            nKnots = int(nKnots)
+        except (TypeError, ValueError):
+            return None
+
+        if grid == 'fibonacci':
+            return int(nKnots**1.5)
+        if grid == 'sphgrid':
+            K = max(2, nKnots)
+            return 1+2*K*(K-1)
+        if grid == 'spiral':
+            krid = max(2, nKnots)
+            step = (np.pi/2)/krid
+            return int(sum(int(np.floor(np.sin(ii*step)*(4*krid)))
+                           for ii in range(1, krid)))
+        return None
+
+    def nKnotsForGridPoints(self, target, grid=None):
+        """Smallest-error nKnots for a requested total number of grid points.
+
+        nKnots is an integer, so only a ladder of totals actually exists (for
+        'sphgrid' the rungs near 800 are 761 and 841, nothing between). This
+        returns the nKnots landing closest to `target`, preferring the smaller
+        grid on a tie. Returns None if the grid has no closed-form count.
+        """
+        if grid is None:
+            grid = self.Grid
+        if isinstance(grid, (list, tuple)):
+            grid = grid[0] if len(grid) else 'fibonacci'
+        if self.nGridPoints(grid, 2) is None:
+            return None
+        try:
+            target = int(target)
+        except (TypeError, ValueError):
+            return None
+
+        # bracket by doubling, then bisect: nGridPoints rises monotonically
+        # with nKnots in every method, and this keeps it to ~log(n) calls
+        hi = 2
+        while hi < (1 << 20) and self.nGridPoints(grid, hi) < target:
+            hi *= 2
+        lo = 2
+        while lo < hi:
+            mid = (lo+hi)//2
+            if self.nGridPoints(grid, mid) < target:
+                lo = mid+1
+            else:
+                hi = mid
+        if lo > 2:
+            below = self.nGridPoints(grid, lo-1)
+            if abs(target-below) <= abs(self.nGridPoints(grid, lo)-target):
+                return lo-1
+        return lo
+
     def getToolTips(self, param=None):
         dc = {'nKnots': ("Orientation grid resolution. Each Grid method reads this\n"+
-                         "in its own units, so the knot count is NOT comparable:\n"+
-                         " 'fibonacci' : int(nKnots**1.5) knots   (20 ->   89) \n"+
-                         " 'sphgrid'   : knots per quarter meridian (20 ->  761) \n"+
-                         " 'spiral'    : ring parameter krid       (20 -> 1010)"),
+                         "in its own units, so nKnots itself is NOT comparable:\n"+
+                         " 'fibonacci' : int(nKnots**1.5) knots     (20 ->  89) \n"+
+                         " 'sphgrid'   : knots per quarter meridian (20 -> 761) \n"+
+                         " 'spiral'    : rings pole to equator      (20 -> 968) \n"+
+                         "Cost is one diagonalisation per grid point."),
               'Grid': ("Orientation grid construction.\n"+
                        " 'fibonacci' = golden-angle spiral, equal-area, uniform weights \n"+
                        " 'sphgrid' = SOPHE/triangular grid (EasySpin Ci), non-uniform weights \n"+
@@ -379,14 +449,16 @@ class HYSCOREsim():
             tri, triareas = self.grid_triangulation(phi, theta)
         elif grid=='spiral':
             # Curtesy of Ed Reijerse /MAGRES.. currently not working well
-            # nKnots is this method's own krid, as originally written: rings are
-            # spaced pi/krid apart and hold floor(sin(theta)*4*krid) knots each,
-            # so the total is about 4*krid*cot(pi/2krid) ~ 8*krid**2/pi. Not
-            # rescaled, so nKnots=20 means ~1010 knots here against 89 for
-            # 'fibonacci'.
+            # nKnots is this method's own krid: the number of rings from the
+            # pole to the equator. Each holds floor(sin(theta)*4*krid) knots,
+            # so the total is about 8*krid**2/pi. Not rescaled, so nKnots=20
+            # means ~1010 knots here against 89 for 'fibonacci'.
             krid   = max(2, int(nKnots))
             itheta, iphi = krid, 0
-            step = np.pi/krid
+            # quarter meridian: krid rings between the pole and the equator, so
+            # this grid covers the upper hemisphere like 'fibonacci' and
+            # 'sphgrid'. (pi/krid here would carry it over the whole sphere.)
+            step = (np.pi/2)/krid
             phi_l, theta_l = [], []
             thetaa=0.0
             dthe=0.0

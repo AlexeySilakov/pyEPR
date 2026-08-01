@@ -281,6 +281,14 @@ class PropGridPanel(wx.Panel):
         ) #wxpg.PG_HIDE_MARGIN |
         theme.theme_propgrid(self.pg, caption_key="accent")
 
+        # Show the help strings set below via SetHelpString. The grid is built
+        # without wxpg.PG_DESCRIPTION and a plain PropertyGrid has no
+        # description box (that needs a PropertyGridManager), so every hint in
+        # this file was being written somewhere invisible. Rendering them on
+        # hover costs no layout.
+        self.lastTip = None
+        self.pg.Bind(wx.EVT_MOTION, self.onGridMotion)
+
         if showModFunc:
             insizer = wx.BoxSizer(wx.VERTICAL)
             insizer.Add(self.pg, 1, wx.EXPAND)
@@ -476,6 +484,29 @@ class PropGridPanel(wx.Panel):
     def Clear(self):
         self.pg.Clear()
         self.parameters = {}
+    def onGridMotion(self, event):
+        """Show the hovered property's help string as a tooltip.
+
+        SetHelpString is the only hint channel this panel has, and without a
+        description box nothing rendered it. Tooltips are only touched when the
+        text actually changes, otherwise the popup restarts on every mouse move
+        and never settles.
+        """
+        event.Skip()
+        try:
+            hit = self.pg.HitTest(event.GetPosition())
+            prop = hit.GetProperty() if hit is not None else None
+            txt = prop.GetHelpString() if prop is not None else ''
+        except Exception:
+            txt = ''
+        if txt == self.lastTip:
+            return
+        self.lastTip = txt
+        if txt:
+            self.pg.SetToolTip(txt)
+        else:
+            self.pg.UnsetToolTip()
+
     def SetFromParClean(self, par):
         self.Clear()
         self.parameters = par
