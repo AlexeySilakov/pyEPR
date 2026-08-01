@@ -51,12 +51,16 @@ class optHYSCORE():
         'OriSelType': ['g_eff', ['g_eff', 'g_eff+HFC', 'brute force', 'precalculated']]
         }
     def getToolTips(self, param=None):
-        dc = {'nKnots':'number of Knots in the orientation grid',
+        dc = {'nKnots': ("Orientation grid resolution. Each Grid method reads this\n"+
+                         "in its own units, so the knot count is NOT comparable:\n"+
+                         " 'fibonacci' : int(nKnots**1.5) knots   (20 ->   89) \n"+
+                         " 'sphgrid'   : knots per quarter meridian (20 ->  761) \n"+
+                         " 'spiral'    : ring parameter krid       (20 -> 1010)"),
               'Grid': ("Orientation grid construction.\n"+
                        " 'fibonacci' = golden-angle spiral, equal-area, uniform weights \n"+
                        " 'sphgrid' = SOPHE/triangular grid (EasySpin Ci), non-uniform weights \n"+
                        " 'spiral' = latitude-ring spiral over the full sphere \n"+
-                       "nKnots is rescaled per method so the knot count stays comparable"),
+                       "nKnots means a different thing in each -- see its tooltip"),
               'OriSelInp': 'Input matrix of orientations. Must have three columns [phi, theta, weights]',
               'AmpRatios': 'Modify relative absolute amplitudes of crosspeaks from different nuclei',
               'OriSelType': ("Orientation selection algorithm.\n"+
@@ -323,6 +327,13 @@ class HYSCOREsim():
     def make_grid(self, grid='fibonacci', nKnots=20,
                   Symmetry=None, phiDeg=None, thetaDeg=None, weights=None,
                   epsilon=0.33):
+        # nKnots keeps each method's own native meaning rather than being
+        # rescaled to a common knot count, so the same nKnots gives very
+        # different grid sizes (and run times):
+        #   'fibonacci'  int(nKnots**1.5) knots            nKnots=20 ->   89
+        #   'sphgrid'    knots along a quarter meridian,
+        #                1+2*K*(K-1) in total (EasySpin)   nKnots=20 ->  761
+        #   'spiral'     krid, ~8*krid**2/pi in total      nKnots=20 -> 1010
         # 1.  Exp contains both 'phi' and 'theta'
         phi=None
         theta=None
@@ -368,11 +379,12 @@ class HYSCOREsim():
             tri, triareas = self.grid_triangulation(phi, theta)
         elif grid=='spiral':
             # Curtesy of Ed Reijerse /MAGRES.. currently not working well
-            # Rescaled like the 'sphgrid' branch so nKnots means a comparable
-            # cost in every method. This grid holds about
-            #   sum_i floor(sin(i*pi/K)*4K) ~ 4K*cot(pi/2K) ~ 8K^2/pi
-            # knots, so invert that against what 'fibonacci' would produce.
-            krid   = max(2, int(round(np.sqrt(int(nKnots**1.5)*np.pi/8))))
+            # nKnots is this method's own krid, as originally written: rings are
+            # spaced pi/krid apart and hold floor(sin(theta)*4*krid) knots each,
+            # so the total is about 4*krid*cot(pi/2krid) ~ 8*krid**2/pi. Not
+            # rescaled, so nKnots=20 means ~1010 knots here against 89 for
+            # 'fibonacci'.
+            krid   = max(2, int(nKnots))
             itheta, iphi = krid, 0
             step = np.pi/krid
             phi_l, theta_l = [], []
@@ -426,13 +438,11 @@ class HYSCOREsim():
             #    theta_k = (pi/2)*k/(K-1), nPhi = nOct*k+1, phi = 0..maxPhi
             # Original grid: Wang & Hanson, J.Magn.Reson. A 117, 1-8 (1995).
             #
-            # nKnots is rescaled rather than passed through: EasySpin's GridSize
-            # counts knots along a quarter meridian, so GridSize=20 would give
-            # 761 knots against the 89 that 'fibonacci' produces for nKnots=20.
-            # Inverting the knot count 1+2*K*(K-1) keeps the two branches
-            # interchangeable at equal cost (one diagonalisation per knot).
-            nTarget = int(nKnots**1.5)
-            K = max(2, int(round((1.0+np.sqrt(max(2.0*nTarget-1.0, 1.0)))/2.0)))
+            # nKnots is EasySpin's GridSize as-is: the number of knots along a
+            # quarter meridian, giving 1+2*K*(K-1) knots in total. Not rescaled
+            # to match another method's count, so nKnots=20 means 761 knots here
+            # against 89 for 'fibonacci' -- roughly 8.6x the run time.
+            K = max(2, int(nKnots))
             nOct = 4
             maxPhi = 2*np.pi
             dtheta = (np.pi/2)/(K-1)
