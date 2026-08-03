@@ -720,7 +720,7 @@ class GridSearchFrame(wx.Frame):
         cmap_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.btn_cmap = PillButton(left, "Colormap…", color_key="accent")
         self.cmap_swatch = wx.Panel(left, size=(70, 22), style=wx.BORDER_SIMPLE)
-        self.chk_invert_cmap = wx.CheckBox(left, "Invert")
+        self.chk_invert_cmap = wx.CheckBox(left, label="Invert")
         cmap_sizer.Add(self.btn_cmap, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
         cmap_sizer.Add(self.cmap_swatch, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
         cmap_sizer.Add(self.chk_invert_cmap, 0, wx.ALIGN_CENTER_VERTICAL)
