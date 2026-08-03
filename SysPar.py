@@ -137,6 +137,10 @@ class sysPar():
         if type(self.useFor)==type(None):
             self.useFor = []
             for ii in range(len(Nucs)): self.useFor.append('both')
+        elif len(self.useFor) < len(Nucs):
+            # grow, do not just initialise: useFor is not in getAll(), so
+            # set_All_None() leaves it at the previous nucleus count
+            for ii in range(len(Nucs)-len(self.useFor)): self.useFor.append('both')
 
         if not(self.nNucs) and (not nNucs):
             self.nNucs = np.ones_like(self.gn)
@@ -211,6 +215,20 @@ class sysPar():
 
                 if type(attr)==type(None):
                     attr = [0]*nPars
+
+                # Grow anything still sized for a smaller system. Most
+                # attributes are cleared by set_All_None() above and get their
+                # length from the branch just above, but useFor is absent from
+                # getAll() so set_All_None never touches it: it survived from
+                # the previous call at the old nucleus count, and adding a
+                # nucleus then indexed one past its end.
+                need = max(nPars, inval+1)
+                if len(attr) < need:
+                    pad = need-len(attr)
+                    if type(attr)==np.ndarray:
+                        attr = np.concatenate([attr, np.zeros(pad, dtype=attr.dtype)])
+                    else:
+                        attr = list(attr) + [0]*pad
 
                 if type(inDict[key][sk])==list: ### from control it may come with choices as a second part of the list
                     attr[inval]=inDict[key][sk][0]

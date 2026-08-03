@@ -1307,13 +1307,12 @@ class TabulatedPanel(wx.Panel):
         if selected_idx>=0:
             
             Params = self.Sys_param.parameters
-            nNucs = 0
-            keys = list(Params.keys())
-            for key in keys:
-                if 'nuc' in key:
-                    nNucs+=1
-                    Params[f'nuc({nNucs+1})']=self.getNuc(isotopes_list[selected_idx])
-            
+            # Count first, then append exactly one entry. This assignment used
+            # to sit inside the loop, so with N nuclei it wrote nuc(2)..nuc(N+1)
+            # and overwrote nuclei 2..N with the newly picked isotope.
+            nNucs = sum(1 for key in Params if 'nuc' in key)
+            Params[f'nuc({nNucs+1})']=self.getNuc(isotopes_list[selected_idx])
+
             self.parent.Sys.setFromCtrl(Params)
             self.Sys_param.SetFromParClean(Params)
 
