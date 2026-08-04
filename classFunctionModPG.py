@@ -11,6 +11,9 @@ dependency order (with cycle detection) whenever a custom parameter changes
 or "Recompute All" is pressed; the driven properties become read-only in
 the main grid so it's never ambiguous which value is authoritative.
 """
+import decimal
+import math
+
 import wx
 import wx.lib.scrolledpanel
 import wx.propgrid as wxpg
@@ -18,6 +21,49 @@ import wx.propgrid as wxpg
 import sys_functions as sysfun
 import theme
 from theme import PillButton
+
+
+# wx.SpinCtrlDouble rounds to its own `digits` setting on SetValue, and that
+# setting defaults to 1 -- so a control left at the default silently turns
+# 2.8374512 into 2.8, and 0.000123456 into 0.0 outright. The variable
+# controls below therefore carry as many decimals as the value in them
+# actually needs, rather than a fixed number. This cap keeps the display
+# clear of floating-point noise: at 15+ decimals wx starts showing the
+# binary representation (2.83745119999999984017).
+MAX_VAR_DIGITS = 12
+
+
+def digits_for_value(value, cap=MAX_VAR_DIGITS):
+    """Fewest decimals that still write `value` exactly, up to `cap`.
+
+    Taken from repr(), which is the shortest string that round-trips back
+    to the same float. Formatting to a fixed number of decimals instead
+    would expose the binary representation -- 123456.789 written to 12
+    decimals is '123456.789000000004', which would then be read as needing
+    all 12."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return 1
+    if not math.isfinite(v):
+        return 1
+    exponent = decimal.Decimal(repr(v)).as_tuple().exponent
+    if not isinstance(exponent, int) or exponent >= 0:
+        return 1                      # a whole number; keep one decimal
+    return max(1, min(cap, -exponent))
+
+
+def digits_for_step(step, cap=MAX_VAR_DIGITS):
+    """Decimals needed for `step` to actually move the value. Picking a
+    1e-6 step is pointless if the control only keeps one decimal -- the
+    nudge is rounded straight back off."""
+    try:
+        s = abs(float(step))
+    except (TypeError, ValueError):
+        return 1
+    if not math.isfinite(s) or s <= 0:
+        return 1
+    return max(1, min(cap, int(math.ceil(-math.log10(s))) if s < 1 else 1))
 
 
 class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
@@ -207,7 +253,8 @@ class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
         if 'var' in dct.keys():
             for name, num in dct['var'].items():
                 self.add_variable(name)
-                self.variables[name][self.V_SPIN_ID].SetValue(float(num))
+                self.set_variable_value(
+                    self.variables[name][self.V_SPIN_ID], num)
         self.Layout()
         self.recompute_all()
         self.SetupScrolling()
@@ -389,7 +436,12 @@ class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
         )
         spin.Bind(wx.EVT_CONTEXT_MENU, self.ShowStepMenu)
         spin.Bind(wx.EVT_RIGHT_DOWN, self.ShowStepMenu)
-        spin.Bind(wx.EVT_TEXT_ENTER, lambda e: self.recompute_all())
+        # Widen the control to whatever precision was typed before reading
+        # the value back out, on both ways of committing an edit.
+        spin.Bind(wx.EVT_TEXT_ENTER,
+                  lambda e, sp=spin: self._on_variable_committed(e, sp))
+        spin.Bind(wx.EVT_KILL_FOCUS,
+                  lambda e, sp=spin: self._on_variable_committed(e, sp))
         spin.Bind(wx.EVT_SPINCTRLDOUBLE, lambda e: self.recompute_all())
         theme.theme_control(spin)
 
@@ -404,6 +456,52 @@ class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
         ctrls[self.V_SPIN_ID] = spin
         self.variables[name] = ctrls
         self.Layout()
+
+    # --------------------------------------------------------------
+    # Variable value <-> control, without losing precision
+    # --------------------------------------------------------------
+    @staticmethod
+    def set_variable_value(spin, value):
+        """Store `value` in a variable's spin control at full precision.
+
+        The control is given enough decimals for the value first, because
+        SetValue rounds to whatever `digits` currently is. The step is
+        respected too, so a control nudged in units of 1e-6 keeps at least
+        six decimals even when the value sitting in it is a round number."""
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return
+        need = max(digits_for_value(v), digits_for_step(spin.GetIncrement()))
+        if spin.GetDigits() != need:
+            spin.SetDigits(need)
+        spin.SetValue(v)
+
+    def _on_variable_committed(self, event, spin):
+        event.Skip()          # EVT_KILL_FOCUS must keep propagating
+        self.commit_typed_value(spin)
+        self.recompute_all()
+
+    def commit_typed_value(self, spin):
+        """Accept whatever precision was typed. Read the raw text before wx
+        rounds it to the control's current digits, then widen the control to
+        fit. Without this, typing 2.8374512 into a one-decimal control keeps
+        2.8 -- the same loss as loading did."""
+        try:
+            v = float(spin.GetTextValue())
+        except (TypeError, ValueError):
+            return
+        self.set_variable_value(spin, v)
+
+    def set_variable_step(self, spin, step):
+        """Change the nudge size, keeping at least enough decimals for it to
+        have an effect, and without disturbing the value already there."""
+        current = spin.GetValue()
+        spin.SetIncrement(step)
+        need = max(digits_for_value(current), digits_for_step(step))
+        if spin.GetDigits() != need:
+            spin.SetDigits(need)
+            spin.SetValue(current)
 
     def ShowStepMenu(self, evt):
         menu = wx.Menu()
@@ -424,7 +522,9 @@ class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
                 menu_item.Check(True)  # Checks the item
             else:
                 menu_item.Check(False)  # Checks the item
-            spin.Bind(wx.EVT_MENU, lambda e, s=step: spin.SetIncrement(s), menu_item)
+            spin.Bind(wx.EVT_MENU,
+                      lambda e, s=step, sp=spin: self.set_variable_step(sp, s),
+                      menu_item)
         screen_pos = evt.GetPosition()
         local = spin.ScreenToClient(screen_pos)
         spin.PopupMenu(menu, local)

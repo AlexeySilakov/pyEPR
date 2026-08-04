@@ -1765,10 +1765,21 @@ class MainFrame(wx.Frame):
         # ---- Status bar ----------------------------------------------------
         # Field 0: general status messages
         # Field 1: x, y coordinates when hovering over a matplotlib axis
-        self.statusbar = self.CreateStatusBar(2)
-        self.statusbar.SetStatusWidths([-1, 260])
+        # Field 2: holds the simulation progress gauge (see _position_sim_gauge)
+        self.statusbar = self.CreateStatusBar(3)
+        self.statusbar.SetStatusWidths([-1, 260, 170])
         self.statusbar.SetStatusText("Ready", 0)
         self.statusbar.SetStatusText("", 1)
+
+        # A gauge parented to the status bar and moved into field 2 by hand --
+        # wx has no notion of a widget "in" a status bar field, so its
+        # position has to be recomputed whenever the bar is laid out. Hidden
+        # unless a run is actually in progress.
+        self.sim_gauge = wx.Gauge(self.statusbar, range=100,
+                                   style=wx.GA_HORIZONTAL | wx.GA_SMOOTH)
+        self.sim_gauge.Hide()
+        self.statusbar.Bind(wx.EVT_SIZE, self._on_statusbar_size)
+        wx.CallAfter(self._position_sim_gauge)
 
         # Root splitter:  left | right
         self.splitter_main = wx.SplitterWindow(self, style=wx.SP_3D)
@@ -2229,8 +2240,17 @@ class MainFrame(wx.Frame):
             nyqX = 1/2/(X[2]-X[1])
             nyqY = 1/2/(Y[2]-Y[1])
             
-            fftX = np.linspace(-nyqX, nyqX, fftData.shape[0])
-            fftY = np.linspace(-nyqY, nyqY, fftData.shape[1])
+            # endpoint=False, because the transform's top bin sits one step
+            # *below* +Nyquist and never at it: the bins are spaced
+            # 2*nyq/N, not 2*nyq/(N-1). Including the endpoint stretched the
+            # whole axis by N/(N-1), reading every frequency high by that
+            # factor -- 0.39% at N=256, 0.05% at N=2048. Since the factor
+            # depends on N, changing the zero fill visibly moved the peaks,
+            # and the axis also disagreed with the simulation's own
+            # (HYSCOREsim builds X/Y with endpoint=False already).
+            # This is exactly np.fft.fftshift(np.fft.fftfreq(N, dt)).
+            fftX = np.linspace(-nyqX, nyqX, fftData.shape[0], endpoint=False)
+            fftY = np.linspace(-nyqY, nyqY, fftData.shape[1], endpoint=False)
             self.Data[ii]['fftdata']=fftData
             self.Data[ii]['fftax']={'x':fftX, 'y':fftY, 'xlabel':'Frequency, MHz', 'ylabel':'Frequency, MHz'}
             self.Data[ii]['fftactual'] = True
@@ -2283,6 +2303,49 @@ class MainFrame(wx.Frame):
         hs.Opt = self.Opt
         hs.Exp = self.Exp
 
+    # ------------------------------------------------------------------
+    # Simulation progress gauge (lives in status bar field 2)
+    # ------------------------------------------------------------------
+    def _on_statusbar_size(self, event):
+        event.Skip()
+        self._position_sim_gauge()
+
+    def _position_sim_gauge(self):
+        gauge = getattr(self, 'sim_gauge', None)
+        if gauge is None:
+            return
+        try:
+            rect = self.statusbar.GetFieldRect(2)
+        except Exception:
+            return          # field not there yet during early construction
+        gauge.SetPosition((rect.x + 2, rect.y + 2))
+        gauge.SetSize((max(rect.width - 4, 1), max(rect.height - 4, 1)))
+
+    def _sim_progress_begin(self, total):
+        """Show an empty gauge sized to the number of spectra about to run."""
+        if total <= 0:
+            return
+        self.sim_gauge.SetRange(total)
+        self.sim_gauge.SetValue(0)
+        self._position_sim_gauge()
+        self.sim_gauge.Show()
+        self.statusbar.SetStatusText(f"Simulating 0/{total}...", 0)
+        self.statusbar.Update()
+
+    def _sim_progress_step(self, done, total):
+        """One spectrum finished. Repaint the gauge directly rather than
+        yielding to the event loop: the simulation runs on the main thread,
+        so a Yield here would let the user re-enter Run (or close the
+        window) half way through the series."""
+        self.sim_gauge.SetValue(min(done, total))
+        self.statusbar.SetStatusText(f"Simulating {done}/{total}...", 0)
+        self.sim_gauge.Update()
+        self.statusbar.Update()
+
+    def _sim_progress_end(self):
+        self.sim_gauge.SetValue(0)
+        self.sim_gauge.Hide()
+
     def runSim(self):
         self.Sys.setFromCtrl(self.tabulated_panel.Sys_param.parameters)
         
@@ -2290,6 +2353,28 @@ class MainFrame(wx.Frame):
         hs.preCompute() ## get housekeeping stuff out of the way to speed up computations a bit
 
         failed_titles = []
+        total = len(self.Data)
+        self._sim_progress_begin(total)
+        try:
+            self._runSim_series(hs, failed_titles, total)
+        finally:
+            # However the series ends -- cleanly, or on an exception that got
+            # past the per-dataset handler -- the gauge must not be left
+            # sitting on screen at a stale value.
+            self._sim_progress_end()
+
+        if failed_titles:
+            self.statusbar.SetStatusText(
+                f"Simulation failed for {len(failed_titles)}/{len(self.Data)} dataset(s) "
+                f"(see console for details): {', '.join(failed_titles)}", 0)
+        else:
+            self.statusbar.SetStatusText("Ready", 0)
+
+        self.matplotlib_panel.update_graph()
+
+    def _runSim_series(self, hs, failed_titles, total):
+        """The per-dataset simulation loop, split out of runSim so the
+        progress gauge can be cleaned up in a finally block around it."""
         for ii,dd in enumerate(self.Data):
             self.actuateSimMethod(hs, self.Data[ii])
 
@@ -2319,15 +2404,11 @@ class MainFrame(wx.Frame):
                                         'oriseltri': None}
                 self.Data[ii]['simactual']=True
 
-        if failed_titles:
-            self.statusbar.SetStatusText(
-                f"Simulation failed for {len(failed_titles)}/{len(self.Data)} dataset(s) "
-                f"(see console for details): {', '.join(failed_titles)}", 0)
-        else:
-            self.statusbar.SetStatusText("Ready", 0)
+            # Step whether the spectrum succeeded or failed -- the bar
+            # reports how far through the series we are, not how many
+            # worked, and it must still reach the end if some fail.
+            self._sim_progress_step(ii + 1, total)
 
-        self.matplotlib_panel.update_graph()
-            
     def dumpXML(self):
         # otherwise ask the user what new file to open
         """

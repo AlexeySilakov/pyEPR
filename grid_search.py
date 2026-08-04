@@ -23,6 +23,62 @@ Fitness = pooled RMSD:
   number is the RMSD of the combined residual pool, not an average of
   per-dataset RMSDs.
 
+Normalized RMSD (optional, "Normalized RMSD" checkbox) rescales that into
+an absolute 0-1 score by dividing each dataset's SSE by its own *null*
+SSE -- sum_roi(exp_k^2), the residual left by no simulation at all:
+
+    RMSD_norm = sqrt( sum_k N_k*(SSE_k/null_k) / sum_k N_k )
+
+Because the amplitude fit clamps c_k >= 0, c_k = 0 reproduces the null
+SSE exactly and the fit can never do worse, so each fraction -- and hence
+RMSD_norm -- is bounded in (0, 1]: 0 is a perfect fit, 1 means the
+simulation explains nothing. Equivalently RMSD_norm = sqrt(1 - r^2) with
+r the uncentred correlation between experiment and simulation, so 0.3
+means 91% of the experimental power is accounted for.
+Normalizing per dataset *before* averaging (rather than pooling both sums)
+stops a bright dataset from dominating a multi-dataset fit, but makes this
+a genuinely different statistic: with more than one dataset its minimum
+can sit somewhere other than the raw pooled RMSD's. With one dataset it is
+just the raw RMSD over a constant. Note the normalization is uncentred, so
+a large baseline in the experimental spectrum inflates null_k and flatters
+the score.
+
+Optionally ("Keep simulations in memory") every grid point's simulation
+is retained -- interpolated onto each dataset's ROI only, which is what
+makes this affordable at all -- so that double-clicking any point on the
+finished fitness map can show that point's per-dataset residual maps
+without re-simulating. The predicted cost is
+8 bytes x n1 x n2 x sum_k(ROI points of dataset k); the user is warned and
+offered a no-storage run before the scan starts if that exceeds 0.5 GB.
+
+The "Display:" pulldown chooses what the finished map shows:
+
+  RMSD                         the raw pooled fitness, above.
+  Normalized RMSD              the 0-1 null-model score, above.
+  Probability (credible level) each cell labelled with the smallest
+                               credible region containing it, so the 0.95
+                               contour *is* the 95% region.
+  Probability (density)        the posterior density itself; same contours,
+                               but a sharp posterior leaves most cells at
+                               effectively zero.
+
+The posterior assumes Gaussian residuals with a separate unknown noise
+level per dataset and integrates those levels out, giving
+p(theta) ~ prod_k SSE_k(theta)**(-N_k/2) -- so what is minimized is
+sum_k (N_k/2)*log SSE_k. Marginalizing per dataset makes this immune both
+to dataset brightness and to the RMSD normalization choice above (they
+only shift it by a constant), which is why the probability map does not
+move when the fitness map does. Confidence intervals in these modes come
+from the posterior marginals rather than from the F-test.
+
+Because N sits in an exponent there, the "Points per independent point"
+divisor matters: adjacent spectrum points are correlated by apodization
+and especially by zero-filling, and dividing N by the zero-fill factor is
+the crude correction. Left at 1 the credible regions are optimistically
+narrow. The panel warns when the posterior spills off the edge of the
+scanned box (widen the ranges) or collapses inside a single cell (narrow
+them).
+
 Once a scan finishes, the coarse RMSD grid is interpolated (linear or
 cubic, selectable live without re-scanning -- see _interpolate_grid) onto
 a finer grid for display, and used to estimate a confidence interval for
@@ -142,6 +198,36 @@ def apply_label_value(sys_dict, syspath_map, label, value):
     return True
 
 
+def read_param_value(sys_dict, param):
+    """Current value of a scannable parameter in `sys_dict`, or None if it
+    is no longer there (a nucleus removed, a Function-Modifier variable
+    renamed, ...). The read counterpart of apply_param_value, but it also
+    handles 'funcvar' leaves, which live under 'functions'.'var' rather
+    than as an ordinary Sys leaf."""
+    try:
+        if param.get('kind', 'sysleaf') == 'funcvar':
+            fdict = sys_dict.get('functions')
+            if not isinstance(fdict, dict):
+                return None
+            variables = fdict.get('var')
+            if not isinstance(variables, dict) or param['key'] not in variables:
+                return None
+            return float(variables[param['key']])
+
+        sub = sys_dict.get(param['cat'])
+        if not isinstance(sub, dict) or param['key'] not in sub:
+            return None
+        val = sub[param['key']]
+        if param['idx'] is None:
+            return float(val)
+        arr = np.asarray(val)
+        if arr.ndim != 1 or param['idx'] >= arr.size:
+            return None
+        return float(arr[param['idx']])
+    except (TypeError, ValueError):
+        return None
+
+
 def apply_param_value(sys_dict, param, value):
     if param.get('kind', 'sysleaf') != 'sysleaf':
         raise ValueError(f"apply_param_value only applies to 'sysleaf' params, got {param}")
@@ -159,10 +245,18 @@ def apply_param_value(sys_dict, param, value):
 # --------------------------------------------------------------------------- #
 # Fitness (pooled, amplitude-scaled RMSD)
 # --------------------------------------------------------------------------- #
-def _dataset_sse(dd, simdata, simX, simY):
-    """Amplitude-scale simdata to dd's experimental data (minimizing SSE
-    over the [fmin, fmax] region) and return (sum-of-squared-residuals,
-    n_points) for this one dataset."""
+def dataset_roi(dd):
+    """Extract one dataset's experimental spectrum restricted to its
+    [fmin, fmax] x [fmin, fmax] region, together with the frequency axes
+    of that region. Returns a dict with keys 'exp', 'x', 'y', 'label', or
+    None when the dataset has no usable frequency-domain data or the
+    region selects nothing.
+
+    Split out of _dataset_sse so a scan can build this once per dataset up
+    front instead of re-slicing the same unchanging experimental data at
+    every grid point, and so the region's size is known before the scan
+    starts (needed to predict how much memory keeping every simulation
+    would cost -- see estimate_store_bytes)."""
     if dd['isfft']:
         raw = np.asarray(dd['data'])
         expdata = np.real(raw[:, :, 0]) if raw.ndim > 2 else np.real(raw)
@@ -170,7 +264,7 @@ def _dataset_sse(dd, simdata, simX, simY):
         expY = np.asarray(dd['ax']['y'])
     else:
         if not dd['fftactual'] or dd['fftdata'] is None:
-            return 0.0, 0
+            return None
         expdata = dd['fftdata']
         expX = np.asarray(dd['fftax']['x'])
         expY = np.asarray(dd['fftax']['y'])
@@ -179,15 +273,49 @@ def _dataset_sse(dd, simdata, simX, simY):
     xsel = (expX >= fmin) & (expX <= fmax)
     ysel = (expY >= fmin) & (expY <= fmax)
     if not xsel.any() or not ysel.any():
-        return 0.0, 0
+        return None
 
     # Array axis 0 tracks the 'x' coordinate array and axis 1 tracks 'y'
     # throughout this codebase (see MainFrame.update_FFT, which builds
     # fftX from fftData.shape[0] and fftY from fftData.shape[1]) -- index
     # accordingly rather than assuming the usual imshow row=y convention.
     exp_roi = expdata[np.ix_(xsel, ysel)]
-    sub_x = expX[xsel]
-    sub_y = expY[ysel]
+    # 'null' is this dataset's no-simulation sum of squares -- the residual
+    # you are left with at c = 0. Since the amplitude fit clamps c to be
+    # non-negative it can never do worse than that, so SSE/null is bounded
+    # in (0, 1] and is what the normalized RMSD divides by. 'null_rms' is
+    # the same thing per point (the region's root-mean-square intensity),
+    # used to put residual *maps* into the same normalized units.
+    null = float(np.sum(exp_roi ** 2))
+    return {'exp': exp_roi,
+            'x': expX[xsel],
+            'y': expY[ysel],
+            'null': null,
+            'null_rms': float(np.sqrt(null / exp_roi.size)) if exp_roi.size else 0.0,
+            'label': dd.get('title', dd.get('fname', '?')),
+            'field': dd.get('field')}
+
+
+def _dataset_sse(dd, simdata, simX, simY, roi=None, want_sim=False):
+    """Amplitude-scale simdata to dd's experimental data (minimizing SSE
+    over the [fmin, fmax] region) and return (sum-of-squared-residuals,
+    n_points, scaled_sim) for this one dataset.
+
+    roi: a precomputed dataset_roi(dd) result, to avoid re-slicing the
+    experimental data at every grid point; computed here when omitted.
+
+    want_sim: when True the third element is the simulation interpolated
+    onto the experimental region *and already multiplied by the best-fit
+    amplitude* c, i.e. exactly the array the residual was formed from, so
+    a stored copy can be turned back into a residual map later by
+    subtracting it from the same region's experimental data. It is None
+    otherwise -- callers that only need the fitness number keep the old
+    memory profile, since the scaled array is a temporary either way."""
+    roi = dataset_roi(dd) if roi is None else roi
+    if roi is None:
+        return 0.0, 0, None
+
+    exp_roi, sub_x, sub_y = roi['exp'], roi['x'], roi['y']
 
     interp = RegularGridInterpolator((simX, simY), simdata,
                                       bounds_error=False, fill_value=0.0)
@@ -196,8 +324,32 @@ def _dataset_sse(dd, simdata, simX, simY):
 
     denom = np.sum(sim_on_exp ** 2)
     c = max(np.sum(exp_roi * sim_on_exp) / denom, 0.0) if denom > 1e-30 else 0.0
-    resid = exp_roi - c * sim_on_exp
-    return float(np.sum(resid ** 2)), int(resid.size)
+    scaled = c * sim_on_exp
+    resid = exp_roi - scaled
+    return float(np.sum(resid ** 2)), int(resid.size), (scaled if want_sim else None)
+
+
+# Every stored simulation is one 64-bit float per experimental point in the
+# region of interest (the interpolator output is real -- HYSCOREsim.Spectrum
+# is an np.abs magnitude spectrum).
+STORE_BYTES_PER_POINT = 8
+# Above this predicted total the user is asked whether to keep storing.
+STORE_WARN_BYTES = 0.5 * 1024 ** 3
+
+
+def estimate_store_bytes(roi_cache, n1, n2):
+    """Predicted memory cost of keeping every grid point's interpolated
+    simulation, for a scan of n1 x n2 points over the datasets described
+    by roi_cache (a list of dataset_roi() results, None entries allowed)."""
+    per_point = sum(roi['exp'].size for roi in roi_cache if roi is not None)
+    return per_point * n1 * n2 * STORE_BYTES_PER_POINT
+
+
+def format_bytes(nbytes):
+    for unit in ('bytes', 'kilobytes', 'megabytes', 'gigabytes'):
+        if nbytes < 1024 or unit == 'gigabytes':
+            return f"{nbytes:.0f} {unit}" if unit == 'bytes' else f"{nbytes:.2f} {unit}"
+        nbytes /= 1024.0
 
 
 def _log_gridpoint_error(error_log, where, exc):
@@ -214,26 +366,58 @@ def _log_gridpoint_error(error_log, where, exc):
     error_log[msg] += 1
 
 
-def run_gridpoint(hs, Sys, exp_template, opt_template, active_data, error_log=None):
+def run_gridpoint(hs, Sys, exp_template, opt_template, active_data, error_log=None,
+                   roi_cache=None, sim_store=None, stats_out=None):
     """Run one HYSCORE simulation per active dataset for the given Sys and
-    return (pooled RMSD, pooled N) over all datasets (NaN, 0 if none
-    succeeded). N (the total number of pooled ROI residual points) is
-    returned alongside the RMSD so confidence-interval estimation can later
-    convert RMSD back to a sum-of-squares without re-running anything.
+    return (pooled RMSD, pooled N, normalized RMSD) over all datasets
+    (NaN, 0, NaN if none succeeded). N (the total number of pooled ROI
+    residual points) is returned alongside the RMSD so confidence-interval
+    estimation can later convert RMSD back to a sum-of-squares without
+    re-running anything.
+
+    The normalized RMSD scores each dataset against its own null model
+    (SSE_k / null_k, i.e. how much of that dataset's power the simulation
+    failed to explain -- see dataset_roi) and then takes the N-weighted
+    mean of those fractions before the square root. Normalizing per
+    dataset rather than pooling the sums stops one bright dataset from
+    dominating a multi-dataset fit, at the cost of being a genuinely
+    different statistic: with more than one dataset its landscape (and so
+    its best-fit point) can differ from the raw pooled RMSD's. With a
+    single dataset it is exactly the raw RMSD divided by a constant.
+
     Failures are not fatal to the scan (a single bad grid point/dataset
     combination, e.g. "no resonances", shouldn't abort hundreds of other
     points) but are logged via _log_gridpoint_error so they are never
-    silently invisible."""
+    silently invisible.
+
+    roi_cache: optional list, parallel to active_data, of precomputed
+    dataset_roi() results (None entries for unusable datasets).
+
+    sim_store: optional list, also parallel to active_data, into which
+    each dataset's amplitude-scaled interpolated simulation is written by
+    index -- writing by index rather than appending keeps the slots
+    aligned with active_data even when some datasets fail and are skipped.
+    Left as None (i.e. not requested) this costs nothing.
+
+    stats_out: optional list, parallel to active_data, filled with each
+    dataset's (SSE, N) pair. Two floats per dataset per grid point, which
+    is nothing next to the simulations themselves, and it is what the
+    posterior needs -- the pooled RMSD alone cannot reconstruct the
+    per-dataset terms that noise-level marginalization requires."""
     hs.Sys = Sys
+    if roi_cache is None:
+        roi_cache = [dataset_roi(dd) for dd in active_data]
     try:
         hs.preCompute()
     except Exception as e:
         _log_gridpoint_error(error_log, "preCompute", e)
-        return np.nan
+        return np.nan, 0, np.nan
 
     total_sse = 0.0
     total_n = 0
-    for dd in active_data:
+    norm_acc = 0.0    # sum of N_k * (SSE_k / null_k)
+    norm_n = 0        # sum of N_k over datasets that could be normalized
+    for k, dd in enumerate(active_data):
         Exp = expPar()
         Exp.setDict(copy.deepcopy(exp_template))
         if Exp.tau < 0:
@@ -263,14 +447,26 @@ def run_gridpoint(hs, Sys, exp_template, opt_template, active_data, error_log=No
         if hs.Spectrum is None:
             continue
 
-        sse, n = _dataset_sse(dd, hs.Spectrum, hs.X, hs.Y)
+        roi = roi_cache[k]
+        sse, n, scaled = _dataset_sse(dd, hs.Spectrum, hs.X, hs.Y, roi=roi,
+                                       want_sim=sim_store is not None)
         if n > 0:
             total_sse += sse
             total_n += n
+            if sim_store is not None:
+                sim_store[k] = scaled
+            if stats_out is not None:
+                stats_out[k] = (sse, n)
+            # A region that is identically zero has no power to explain and
+            # cannot be normalized; it still counts towards the raw RMSD.
+            if roi is not None and roi['null'] > 0.0:
+                norm_acc += n * (sse / roi['null'])
+                norm_n += n
 
     if total_n == 0:
-        return np.nan, 0
-    return float(np.sqrt(total_sse / total_n)), total_n
+        return np.nan, 0, np.nan
+    rmsd_norm = float(np.sqrt(norm_acc / norm_n)) if norm_n > 0 else np.nan
+    return float(np.sqrt(total_sse / total_n)), total_n, rmsd_norm
 
 
 def apply_functions_to_sys_dict(sys_dict, func_rows, variable_values, error_log=None):
@@ -486,24 +682,37 @@ class HeatmapPanel(wx.Panel):
         self.grid2 = None
         self.label1 = ''
         self.label2 = ''
+        self.value_label = 'RMSD'
         self.cmap = cm.get_cmap('viridis')
         self.im = None
         self.cbar = None
 
         self.on_hover_callback = None
         self.on_rightclick_callback = None
+        self.on_doubleclick_callback = None
         self.canvas.mpl_connect('motion_notify_event', self.on_move)
         self.canvas.mpl_connect('button_press_event', self.on_click)
 
     def set_colormap(self, cmap):
         self.cmap = cmap
         if self.im is not None:
-            self.im.set_cmap(cmap)
+            # A ContourSet (contour display mode) is a mappable too, but
+            # recolouring it in place does not restyle the already-drawn
+            # line collections -- the frame follows this with a full
+            # redraw whenever a scan's results exist.
+            try:
+                self.im.set_cmap(cmap)
+            except Exception:
+                pass
             self.canvas.draw_idle()
 
     def show_results(self, results, grid1, grid2, label1, label2,
                      contour_levels=None, raw_points=None, subtitle="",
-                     background_levels=None, half_width=None):
+                     background_levels=None, half_width=None,
+                     as_contours=False, rmsd_contour_width=1.2,
+                     value_label="RMSD", best_index=None, map_title=None,
+                     bg_contour_color='white', bg_contour_width=0.5,
+                     grid_lines=True, mark_residual=None, mark_loaded=None):
         """results/grid1/grid2 are whatever should currently be displayed
         and hit-tested (hover/right-click) -- the interpolated fine grid
         once a scan has completed, or the raw coarse grid as a fallback.
@@ -520,6 +729,7 @@ class HeatmapPanel(wx.Panel):
         self.grid2 = grid2
         self.label1 = label1
         self.label2 = label2
+        self.value_label = value_label
 
         # Remove the *old* colorbar before clearing/replacing the old image
         # (self.im) -- Colorbar.remove() needs its mappable's `.axes` to
@@ -539,41 +749,76 @@ class HeatmapPanel(wx.Panel):
         self.ax.clear()
         theme.style_figure(self.figure, [self.ax])
         extent = [grid1[0], grid1[-1], grid2[0], grid2[-1]]
-        self.im = self.ax.imshow(results.T, extent=extent, origin='lower',
-                                  aspect='auto', cmap=self.cmap,
-                                  interpolation='nearest')
+        ax_fg = theme.theme_colors()["ax_fg"]
+        blevels = sorted({lvl for lvl in (background_levels or [])
+                          if np.isfinite(lvl)})
+
+        # Contour display mode replaces the filled image with colormap-
+        # coloured lines. Falling back to the image when there are no
+        # levels to draw (a perfectly flat surface) avoids an empty plot.
+        drew_contours = False
+        if as_contours and blevels:
+            try:
+                self.im = self.ax.contour(grid1, grid2, results.T, levels=blevels,
+                                           cmap=self.cmap,
+                                           linewidths=rmsd_contour_width)
+                self.ax.set_xlim(grid1[0], grid1[-1])
+                self.ax.set_ylim(grid2[0], grid2[-1])
+                drew_contours = True
+            except Exception:
+                drew_contours = False
+        if not drew_contours:
+            self.im = self.ax.imshow(results.T, extent=extent, origin='lower',
+                                      aspect='auto', cmap=self.cmap,
+                                      interpolation='nearest')
+
+        # Overlays are drawn on top of the colormap in image mode (white
+        # reads against any colormap) but on top of the plain axes
+        # background in contour mode, where white would be invisible.
+        overlay_color = ax_fg if drew_contours else 'white'
+
         self.ax.set_xlabel(label1)
         self.ax.set_ylabel(label2)
-        self.ax.set_title('RMSD fitness map' + (f'  ({subtitle})' if subtitle else ''))
+        self.ax.set_title((map_title or f'{value_label} fitness map')
+                          + (f'  ({subtitle})' if subtitle else ''))
 
         self.cbar = self.figure.colorbar(self.im, ax=self.ax)
-        self.cbar.set_label('RMSD')
-        ax_fg = theme.theme_colors()["ax_fg"]
+        self.cbar.set_label(value_label)
         self.cbar.ax.yaxis.label.set_color(ax_fg)
         self.cbar.ax.tick_params(colors=ax_fg)
 
         if raw_points is not None:
             rg1, rg2 = raw_points
+            # Rules through every scanned value: their intersections are
+            # exactly the grid points that were actually simulated, so it is
+            # obvious how coarse the scan underneath the smooth interpolated
+            # surface really is.
+            if grid_lines:
+                self.ax.vlines(rg1, grid2[0], grid2[-1], colors=overlay_color,
+                               linewidths=0.5, alpha=0.4, linestyles=':', zorder=2)
+                self.ax.hlines(rg2, grid1[0], grid1[-1], colors=overlay_color,
+                               linewidths=0.5, alpha=0.4, linestyles=':', zorder=2)
             gx, gy = np.meshgrid(rg1, rg2, indexing='ij')
-            self.ax.plot(gx.ravel(), gy.ravel(), '.', color='white',
+            self.ax.plot(gx.ravel(), gy.ravel(), '.', color=overlay_color,
                          markersize=2, alpha=0.35, zorder=3)
 
-        if background_levels:
-            blevels = sorted({lvl for lvl in background_levels if np.isfinite(lvl)})
-            if blevels:
-                try:
-                    self.ax.contour(grid1, grid2, results.T, levels=blevels,
-                                    colors='white', linewidths=0.5,
-                                    linestyles='-', alpha=0.35, zorder=3)
-                except Exception:
-                    pass
+        # In contour mode these thin reference lines *are* the display, so
+        # drawing them again underneath would only double up.
+        if blevels and not drew_contours:
+            try:
+                self.ax.contour(grid1, grid2, results.T, levels=blevels,
+                                colors=bg_contour_color,
+                                linewidths=bg_contour_width,
+                                linestyles='-', alpha=0.35, zorder=3)
+            except Exception:
+                pass
 
         if contour_levels:
             levels = sorted({lvl for lvl, _lbl in contour_levels if np.isfinite(lvl)})
             if levels:
                 try:
                     cs = self.ax.contour(grid1, grid2, results.T, levels=levels,
-                                         colors='white', linewidths=1.6,
+                                         colors=overlay_color, linewidths=1.6,
                                          linestyles='--', alpha=0.95, zorder=4)
 
                     def _fmt(v, _pairs=contour_levels):
@@ -581,14 +826,22 @@ class HeatmapPanel(wx.Panel):
                             if abs(v - lvl) < 1e-9 * max(1.0, abs(lvl)):
                                 return lbl
                         return f"{v:.3g}"
-                    self.ax.clabel(cs, fmt=_fmt, fontsize='x-small', colors='white')
+                    self.ax.clabel(cs, fmt=_fmt, fontsize='x-small',
+                                   colors=overlay_color)
                 except Exception:
                     pass
 
         if np.any(np.isfinite(results)):
-            bi, bj = np.unravel_index(np.nanargmin(results), results.shape)
+            # best_index is supplied when "best" is not the minimum of the
+            # displayed surface -- the posterior-density map peaks at the
+            # best fit rather than dipping to it.
+            if best_index is not None:
+                bi, bj = best_index
+            else:
+                bi, bj = np.unravel_index(np.nanargmin(results), results.shape)
             self.ax.plot(grid1[bi], grid2[bj], marker='*', markersize=16,
-                         markeredgecolor='k', markerfacecolor='white', zorder=5)
+                         markeredgecolor='k', markerfacecolor='white',
+                         linestyle='none', label='best fit', zorder=5)
 
             text = (f"Best: ")
             best_ci1 = (f"")
@@ -604,10 +857,43 @@ class HeatmapPanel(wx.Panel):
             text += best_ci1
             text += best_ci2
             self.ax.annotate(
-                f"{text}RMSD={results[bi, bj]:.4g}",xy=(grid1[bi], grid2[bj]), 
+                f"{text}{value_label}={results[bi, bj]:.4g}",xy=(grid1[bi], grid2[bj]),
                 textcoords='offset points',
                 xytext=(8, 8), fontsize='small', color='white',
                 bbox=dict(boxstyle='round', fc='black', alpha=0.6))
+
+        # Two more places worth finding again: the grid point whose
+        # residuals are on screen, and where the main window's Sys currently
+        # sits. Deliberately different shapes as well as different colours,
+        # so they stay distinguishable against any colormap and for anyone
+        # who reads the two colours as similar.
+        marked = False
+        if mark_residual is not None:
+            self.ax.plot(mark_residual[0], mark_residual[1], marker='o',
+                         markersize=11, markerfacecolor='none',
+                         markeredgecolor='#00e5ff', markeredgewidth=2.0,
+                         linestyle='none', label='residuals shown', zorder=6)
+            marked = True
+        if mark_loaded is not None:
+            self.ax.plot(mark_loaded[0], mark_loaded[1], marker='D',
+                         markersize=10, markerfacecolor='none',
+                         markeredgecolor='#ff9800', markeredgewidth=2.0,
+                         linestyle='none', label='current Sys', zorder=6)
+            marked = True
+        if marked:
+            leg = self.ax.legend(loc='upper left', fontsize='xx-small',
+                                 framealpha=0.65, handlelength=1.2,
+                                 borderpad=0.4, labelspacing=0.3)
+            leg.set_zorder(7)
+            for text in leg.get_texts():
+                text.set_color('black')
+
+        # Pin the view to the scanned range. Everything overlaid above --
+        # markers, the coarse-point dots, the grid rules -- goes through
+        # ax.plot and so feeds the autoscaler; without this a single stray
+        # point anywhere off-grid silently rescales the whole map.
+        self.ax.set_xlim(grid1[0], grid1[-1])
+        self.ax.set_ylim(grid2[0], grid2[-1])
 
         self.figure.tight_layout()
         self.canvas.draw_idle()
@@ -630,7 +916,18 @@ class HeatmapPanel(wx.Panel):
             self.on_hover_callback(self.grid1[i], self.grid2[j], self.results[i, j])
 
     def on_click(self, event):
-        if event.button != 3 or event.inaxes != self.ax or self.results is None:
+        if event.inaxes != self.ax or self.results is None:
+            return
+        # Double-click reports the raw data coordinates rather than a
+        # snapped grid1/grid2 pair: what is displayed here is the *fine*
+        # interpolated grid, but stored simulations only exist at the
+        # original coarse scan points, so the frame does its own snapping
+        # against the coarse axes it kept.
+        if event.button == 1 and event.dblclick:
+            if self.on_doubleclick_callback:
+                self.on_doubleclick_callback(event.xdata, event.ydata)
+            return
+        if event.button != 3:
             return
         idx = self._nearest_index(event.xdata, event.ydata)
         if idx is None:
@@ -638,6 +935,386 @@ class HeatmapPanel(wx.Panel):
         i, j = idx
         if self.on_rightclick_callback:
             self.on_rightclick_callback(self.grid1[i], self.grid2[j], self.results[i, j])
+
+
+# --------------------------------------------------------------------------- #
+# Posterior probability over the scanned grid
+# --------------------------------------------------------------------------- #
+# Display statistics offered by the "Display:" pulldown, in menu order.
+DISPLAY_RMSD = 0
+DISPLAY_NORMALIZED = 1
+DISPLAY_CREDIBLE = 2
+DISPLAY_DENSITY = 3
+DISPLAY_LABELS = ["RMSD", "Normalized RMSD",
+                  "Probability (credible level)", "Probability (density)"]
+DISPLAY_VALUE_LABELS = ["RMSD", "Normalized RMSD",
+                        "Credible level", "Posterior density"]
+PROBABILITY_MODES = (DISPLAY_CREDIBLE, DISPLAY_DENSITY)
+
+# Fixed full scale for the residual maps: +-2 is twice a dataset's typical
+# experimental intensity, since residual maps are always drawn normalized
+# (they are a display, not the statistic -- see _render_residuals). Fixed
+# rather than autoscaled so maps stay comparable between datasets and
+# between grid points.
+RESIDUAL_SCALE_MIN = -2.0
+RESIDUAL_SCALE_MAX = 2.0
+
+
+
+def neg_log_posterior(results_sse, results_nk, divisor=1.0):
+    """Negative log posterior (up to an additive constant) on the coarse
+    grid, from the per-dataset sums of squared residuals.
+
+    Assuming Gaussian residuals with a noise level that is *unknown and
+    separate for each dataset*, and integrating each of those unknown
+    levels out under the usual scale-invariant prior, the posterior over
+    the scanned parameters comes out as a product of per-dataset terms,
+
+        p(theta) ~ prod_k SSE_k(theta) ** (-N_k/2)
+
+    so the quantity to minimize is sum_k (N_k/2)*log SSE_k. Two things
+    follow that are worth knowing. First, it is automatically invariant to
+    each dataset's overall brightness: rescaling a dataset changes
+    log SSE_k by a constant, which shifts the whole surface without moving
+    anything -- so unlike the fitness map, this does not care whether the
+    RMSD was normalized. Second, it is the *logarithm* of each dataset's
+    residual that gets averaged, not the residual itself, which is what
+    makes the noise-level marginalization show up as a plain reweighting.
+
+    divisor: how many raw points make up one independent one. Adjacent
+    points in a zero-filled/apodized spectrum are not independent, and N
+    sits in an exponent here, so overstating it drives the posterior
+    towards a delta function. Dividing N_k by this before use is the
+    crude but visible correction.
+
+    Returns a (n1, n2) array, offset so its minimum is 0, with NaN where
+    no dataset produced a usable residual -- or None if that is everywhere.
+    """
+    sse = np.asarray(results_sse, dtype=float)
+    nk = np.asarray(results_nk, dtype=float)
+    div = max(float(divisor), 1e-9)
+
+    usable = np.isfinite(sse) & (nk > 0)
+    # A dataset that fits perfectly would send log SSE to -inf; floor it
+    # rather than dropping the dataset, which would silently change the
+    # weighting at that one grid point.
+    safe = np.where(usable & (sse > 0), sse, 1.0)
+    safe = np.maximum(safe, 1e-300)
+
+    contrib = np.where(usable, (nk / (2.0 * div)) * np.log(safe), 0.0)
+    any_ok = usable.any(axis=2)
+    if not any_ok.any():
+        return None
+    nlp = np.where(any_ok, contrib.sum(axis=2), np.nan)
+    return nlp - np.nanmin(nlp)
+
+
+def posterior_grid(nlp):
+    """exp(-nlp) normalized to sum to 1 over the grid. Failed points get
+    exactly zero probability. Returns None if nothing is finite.
+
+    Note this makes the scanned box the prior: the result is only
+    meaningful if the posterior has decayed to negligible before the edges,
+    which is worth checking by eye on the map itself."""
+    nlp = np.asarray(nlp, dtype=float)
+    good = np.isfinite(nlp)
+    if not good.any():
+        return None
+    p = np.zeros(nlp.shape, dtype=float)
+    p[good] = np.exp(-(nlp[good] - nlp[good].min()))
+    total = p.sum()
+    if not np.isfinite(total) or total <= 0:
+        return None
+    return p / total
+
+
+def _sorted_levels(p):
+    """(densities sorted high to low, credible level of each). Cells of
+    equal density share one level -- the cumulative mass through the end of
+    their tied block. Without that, an arbitrary sort order splits a ring of
+    equal-probability cells across the contour, and the credible-level and
+    density displays disagree about where the boundary is."""
+    flat = np.asarray(p, dtype=float).ravel()
+    order = np.argsort(flat)[::-1]
+    s = flat[order]
+    cum = np.cumsum(s)
+    # index of the last cell in each run of equal density
+    last = np.searchsorted(-s, -s, side='right') - 1
+    return order, s, cum[last]
+
+
+def credible_level_map(p):
+    """Label every cell with the smallest credible region that contains
+    it: near 0 at the most probable cell, 1 at the least. Contouring the
+    result at 0.68 / 0.95 draws the credible regions, and cells of zero
+    probability (failed points) land at 1."""
+    order, _s, lvl_sorted = _sorted_levels(p)
+    level = np.empty(order.size, dtype=float)
+    level[order] = lvl_sorted
+    return level.reshape(np.shape(p))
+
+
+def density_threshold(p, conf):
+    """The density value whose credible level is `conf` -- i.e. the contour
+    level that draws the same boundary on a plot of the density as
+    contouring the credible-level map at `conf` does. Interpolated between
+    adjacent cells so the two displays agree to better than one cell."""
+    _order, s, lvl_sorted = _sorted_levels(p)
+    # lvl_sorted is non-decreasing, s non-increasing, so this reads off the
+    # density at which the credible level passes conf.
+    return float(np.interp(conf, lvl_sorted, s))
+
+
+def marginal_interval(axis_vals, marg, conf):
+    """Highest-density interval of a 1-D marginal, returned as the span of
+    the selected cells. As with the existing confidence bounds, a
+    multimodal marginal is reported as the range that brackets every
+    included mode rather than as disjoint pieces -- conservative, and
+    consistent with what the F-test path reports."""
+    m = np.asarray(marg, dtype=float)
+    total = m.sum()
+    if not np.isfinite(total) or total <= 0:
+        return None
+    m = m / total
+    order = np.argsort(m)[::-1]
+    cum = np.cumsum(m[order])
+    k = min(int(np.searchsorted(cum, conf)) + 1, m.size)
+    sel = np.sort(order[:k])
+    return float(axis_vals[sel[0]]), float(axis_vals[sel[-1]])
+
+
+# --------------------------------------------------------------------------- #
+# Residual maps (one per active dataset, for a single grid point)
+# --------------------------------------------------------------------------- #
+class ContourSettingsDialog(wx.Dialog):
+    """Appearance of a set of contour lines: on/off, colour, how many
+    levels, how thick. Shared by the simulation contours over the residual
+    maps (right-click the row) and the reference contours over the fitness
+    map (the "Contours..." button), so the two behave identically.
+
+    Seeded from the caller's current settings so re-opening it always shows
+    what is actually on screen."""
+
+    def __init__(self, parent, title, enabled, color, levels, width,
+                 enable_label="Draw contours"):
+        super().__init__(parent, title=title, style=wx.DEFAULT_DIALOG_STYLE)
+
+        self.chk_on = wx.CheckBox(self, label=enable_label)
+        self.chk_on.SetValue(bool(enabled))
+
+        self.colour = wx.ColourPickerCtrl(self, colour=wx.Colour(color))
+        self.levels = wx.SpinCtrl(self, min=1, max=40, initial=int(levels))
+        self.width = wx.SpinCtrlDouble(self, min=0.1, max=6.0, inc=0.1,
+                                        initial=float(width))
+        self.width.SetDigits(1)
+        for ctrl in (self.levels, self.width):
+            theme.theme_control(ctrl)
+
+        grid = wx.FlexGridSizer(cols=2, vgap=6, hgap=8)
+        grid.AddGrowableCol(1)
+        for label, ctrl in (("Colour:", self.colour),
+                            ("Number of levels:", self.levels),
+                            ("Line thickness:", self.width)):
+            grid.Add(wx.StaticText(self, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
+            grid.Add(ctrl, 0, wx.EXPAND)
+
+        outer = wx.BoxSizer(wx.VERTICAL)
+        outer.Add(self.chk_on, 0, wx.ALL, 10)
+        outer.Add(grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
+        btns = self.CreateButtonSizer(wx.OK | wx.CANCEL)
+        if btns is not None:
+            outer.Add(btns, 0, wx.EXPAND | wx.ALL, 10)
+        self.SetSizerAndFit(outer)
+
+        self.chk_on.Bind(wx.EVT_CHECKBOX, self._on_toggle)
+        self._on_toggle(None)
+        theme.apply_theme_to_window(self, theme.get_theme())
+
+    def _on_toggle(self, event):
+        """The three appearance controls mean nothing while the contours
+        are switched off -- grey them out rather than letting the user set
+        values that will not be used."""
+        on = self.chk_on.GetValue()
+        for ctrl in (self.colour, self.levels, self.width):
+            ctrl.Enable(on)
+
+    def get_enabled(self):
+        return self.chk_on.GetValue()
+
+    def get_color(self):
+        return self.colour.GetColour().GetAsString(wx.C2S_HTML_SYNTAX)
+
+    def get_levels(self):
+        return int(self.levels.GetValue())
+
+    def get_width(self):
+        return float(self.width.GetValue())
+
+
+class ResidualPanel(wx.Panel):
+    """A single row of residual maps -- experiment minus amplitude-scaled
+    simulation, over each active dataset's [fmin, fmax] region -- for one
+    grid point. Sits above the fitness heatmap, hidden until the user
+    toggles it on, and is repopulated by double-clicking the heatmap.
+
+    Residuals are signed (positive = the simulation under-predicts that
+    peak, negative = it puts intensity where the experiment has none), so
+    these are drawn with a diverging colormap on limits made symmetric
+    about zero rather than with the heatmap's own colormap -- otherwise
+    zero residual would land at an arbitrary colour and the sign, which is
+    the whole diagnostic value of a residual map, would be unreadable.
+    """
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.figure = Figure(figsize=(6, 3.0), dpi=100)
+        self.canvas = FigureCanvasWxAgg(self, -1, self.figure)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(self.canvas, 1, wx.EXPAND)
+        self.SetSizer(sizer)
+        self.SetMinSize((-1, 300))
+
+        self.cmap = cm.get_cmap('RdBu_r')
+
+        # Simulation-contour overlay settings, edited by right-clicking the
+        # row (see _on_click). Kept here rather than in the frame because
+        # they are purely a property of this display.
+        self.contour_on = True
+        self.contour_color = '#000000'
+        self.contour_n = 6
+        self.contour_width = 0.8
+
+        # Last drawn content, so a settings change can redraw without the
+        # user having to double-click the same grid point again.
+        self._last_entries = []
+        self._last_subtitle = ""
+        self._last_value_label = "RMSD"
+
+        self._redraw_debouncer = theme.CanvasRedrawDebouncer(self.canvas)
+        self.Bind(wx.EVT_SIZE, self._redraw_debouncer.on_size)
+        self.canvas.mpl_connect('button_press_event', self._on_click)
+        self.show_message("Double-click a point on the fitness map to show "
+                          "its residual maps.\n"
+                          "Right-click here for simulation-contour settings.")
+
+    # -- simulation contour settings ---------------------------------------
+    def _on_click(self, event):
+        if event.button == 3:
+            self.edit_contour_settings()
+
+    def edit_contour_settings(self):
+        with ContourSettingsDialog(
+                self, "Simulation Contours", self.contour_on,
+                self.contour_color, self.contour_n, self.contour_width,
+                enable_label="Draw simulation contours") as dlg:
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            self.contour_on = dlg.get_enabled()
+            self.contour_color = dlg.get_color()
+            self.contour_n = dlg.get_levels()
+            self.contour_width = dlg.get_width()
+        if self._last_entries:
+            self.show_maps(self._last_entries, self._last_subtitle,
+                           self._last_value_label)
+
+    # -- drawing ------------------------------------------------------------
+    @staticmethod
+    def _layout_margins(has_subtitle):
+        """Constant subplot margins. Chosen once, by eye, to clear two-line
+        titles above and tick labels below at this row's height, with
+        wspace wide enough for each map's colorbar and its labels."""
+        return {'left': 0.055, 'right': 0.935, 'bottom': 0.17,
+                'top': 0.78 if has_subtitle else 0.86, 'wspace': 0.55}
+
+    def show_message(self, text):
+        """Blank the row and print a single centred note (no stored data,
+        nothing selected yet, ...)."""
+        self._last_entries = []
+        self._last_subtitle = ""
+        self.figure.clear()
+        theme.style_figure(self.figure, [])
+        self.figure.text(0.5, 0.5, text, ha='center', va='center',
+                         fontsize='small',
+                         color=theme.theme_colors()["ax_fg"], wrap=True)
+        self.canvas.draw_idle()
+
+    def _draw_sim_contours(self, ax, entry):
+        """Overlay the amplitude-scaled simulation as contour lines, so the
+        residual underneath can be read against where the simulation
+        actually put intensity. Levels are evenly spaced across the
+        simulation's own range rather than left to matplotlib's automatic
+        choice, so the requested number of lines is what gets drawn."""
+        sim = entry.get('sim')
+        if sim is None or sim.size == 0:
+            return
+        lo, hi = float(np.nanmin(sim)), float(np.nanmax(sim))
+        if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
+            return
+        levels = np.linspace(lo, hi, self.contour_n + 2)[1:-1]
+        ax.contour(entry['x'], entry['y'], sim.T, levels=levels,
+                   colors=self.contour_color, linewidths=self.contour_width,
+                   alpha=0.9, zorder=3)
+
+    def show_maps(self, entries, subtitle="", value_label="RMSD"):
+        """entries: list of dicts with 'title' (what to head the map with --
+        the field value, matching the main window's own B0 titles), 'resid'
+        and 'sim' (2-D arrays, axis 0 = x as everywhere else in this
+        codebase), 'x'/'y' (the region's frequency axes), 'extent'
+        ([x0, x1, y0, y1]) and 'rmsd' (that dataset's own RMSD here)."""
+        if not entries:
+            self.show_message("This grid point has no successful simulation "
+                              "for any active dataset.")
+            return
+
+        self._last_entries = entries
+        self._last_subtitle = subtitle
+        self._last_value_label = value_label
+        self.figure.clear()
+        axes = self.figure.subplots(1, len(entries), squeeze=False)[0]
+        for ax, entry in zip(axes, entries):
+            resid = entry['resid']
+            # Fixed colour limits rather than per-map autoscaling, so the
+            # maps are directly comparable with each other and from one
+            # grid point to the next. Residuals always arrive normalized,
+            # so +-2 means "twice the typical experimental intensity of
+            # this dataset" for every map regardless of display mode.
+            im = ax.imshow(resid.T, extent=entry['extent'], origin='lower',
+                           aspect='auto', cmap=self.cmap,
+                           interpolation='nearest',
+                           vmin=RESIDUAL_SCALE_MIN, vmax=RESIDUAL_SCALE_MAX)
+            if self.contour_on:
+                self._draw_sim_contours(ax, entry)
+            # Square the axes box explicitly rather than via aspect='equal':
+            # both frequency axes span the same [fmin, fmax] here, so the
+            # two agree in practice, but set_box_aspect keeps the panel
+            # square even if a dataset's x and y sampling differ slightly.
+            ax.set_box_aspect(1)
+            ax.set_title(f"{entry['title']}\n{value_label}={entry['rmsd']:.4g}",
+                         fontsize='x-small')
+            ax.tick_params(labelsize='xx-small')
+            cbar = self.figure.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            cbar.ax.tick_params(labelsize='xx-small',
+                                colors=theme.theme_colors()["ax_fg"])
+            # Attaching a colorbar anchors its parent east so the two stay
+            # together; combined with the square box that pins each map to
+            # the right of its column and leaves a lopsided gap (glaring
+            # with one dataset). Re-centre it in its own column.
+            ax.set_anchor('C')
+        theme.style_figure(self.figure, list(axes))
+        if subtitle:
+            self.figure.suptitle(subtitle, fontsize='small',
+                                 color=theme.theme_colors()["ax_fg"])
+
+        # Deliberately NOT tight_layout: it re-measures the tick labels and
+        # titles on every draw, so switching units (say "RMSD" to
+        # "Normalized RMSD", or 250.0 to 1.2e-4 on a colorbar) changed the
+        # reserved text width, which changed each slot, which shifted the
+        # squared axes sideways -- the row appeared to creep every time
+        # anything was touched. Fixed margins make the geometry depend only
+        # on the number of datasets, so a redraw with different numbers in
+        # it lands in exactly the same place.
+        self.figure.subplots_adjust(**self._layout_margins(bool(subtitle)))
+        self.canvas.draw_idle()
 
 
 # --------------------------------------------------------------------------- #
@@ -663,9 +1340,37 @@ class GridSearchFrame(wx.Frame):
         # around so the interpolation method / CI method dropdowns can
         # redraw and recompute instantly without re-running anything.
         self._last_results = None
+        self._last_results_norm = None
+        self._last_results_n = None
+        self._last_results_sse = None
+        self._last_results_nk = None
+        self._last_n_datasets = 0
         self._last_grid1 = None
         self._last_grid2 = None
         self._last_N = 0
+        # coarse (i, j) of the grid point whose residuals are on screen, so
+        # switching RMSD units can redraw it in the new units
+        self._last_click_ij = None
+
+        # Interpolated simulations kept from the last scan, when the user
+        # asked for them: {(i, j): [scaled_sim_or_None per active dataset]},
+        # indexed by *coarse* grid indices. _roi_cache holds the matching
+        # experimental regions (one per dataset, constant across the scan),
+        # so a residual map is just roi['exp'] - stored_sim. Both are
+        # dropped at the start of every new scan so the old scan's arrays
+        # are freed before the new one starts allocating.
+        self._sim_store = {}
+        self._roi_cache = None
+        self._show_residuals = False
+
+        # Reference contours drawn over the fitness map; edited through the
+        # same dialog the residual row uses. Defaults reproduce what the
+        # map drew before this was configurable.
+        self.map_contour_on = True
+        self.map_contour_color = '#ffffff'
+        self.map_contour_n = 9
+        self.map_contour_width = 0.5
+
 
         # remembers min/max/points the user set for each scannable
         # parameter, keyed by its stable param_name() -- so toggling a
@@ -686,13 +1391,33 @@ class GridSearchFrame(wx.Frame):
 
         splitter = wx.SplitterWindow(self, style=wx.SP_3D)
         left = wx.Panel(splitter)
-        self.heatmap = HeatmapPanel(splitter)
+
+        # Right-hand side is a column: the (initially hidden) row of
+        # residual maps on top, the fitness heatmap filling the rest.
+        right = wx.Panel(splitter)
+        self.residuals = ResidualPanel(right)
+        self.heatmap = HeatmapPanel(right)
         self.heatmap.set_colormap(self.cmap)
         self.heatmap.on_hover_callback = self._on_hover
         self.heatmap.on_rightclick_callback = self._on_rightclick
+        self.heatmap.on_doubleclick_callback = self._on_doubleclick
 
-        splitter.SplitVertically(left, self.heatmap, sashPosition=440)
+        rightsizer = wx.BoxSizer(wx.VERTICAL)
+        rightsizer.Add(self.residuals, 0, wx.EXPAND)
+        rightsizer.Add(self.heatmap, 1, wx.EXPAND)
+        right.SetSizer(rightsizer)
+        self.residuals.Hide()
+        self.right_panel = right
+
+        splitter.SplitVertically(left, right, sashPosition=440)
         splitter.SetMinimumPaneSize(260)
+        # Give the left pane a share of any extra width, so the parameter
+        # range boxes grow with the window instead of staying pinned at
+        # their starting size, and relayout live while the sash is dragged.
+        splitter.SetSashGravity(0.2)
+        splitter.Bind(wx.EVT_SPLITTER_SASH_POS_CHANGED, self._on_sash_moved)
+        splitter.Bind(wx.EVT_SPLITTER_SASH_POS_CHANGING, self._on_sash_moved)
+        self.splitter = splitter
 
         leftsizer = wx.BoxSizer(wx.VERTICAL)
 
@@ -718,9 +1443,18 @@ class GridSearchFrame(wx.Frame):
         leftsizer.Add(self.range_panel, 0, wx.EXPAND | wx.ALL, 4)
 
         cmap_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.btn_map_contours = PillButton(left, "Contours…", color_key="pill_calm")
+        self.btn_map_contours.SetToolTip(
+            "Colour, number of levels and line thickness of the reference "
+            "contours drawn over the fitness map, and whether to draw them "
+            "at all -- the same controls the residual row offers on "
+            "right-click.\n"
+            "The level count also sets how many lines the \"RMSD as "
+            "contours\" display mode draws.")
         self.btn_cmap = PillButton(left, "Colormap…", color_key="accent")
         self.cmap_swatch = wx.Panel(left, size=(70, 22), style=wx.BORDER_SIMPLE)
         self.chk_invert_cmap = wx.CheckBox(left, label="Invert")
+        cmap_sizer.Add(self.btn_map_contours, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
         cmap_sizer.Add(self.btn_cmap, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 6)
         cmap_sizer.Add(self.cmap_swatch, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
         cmap_sizer.Add(self.chk_invert_cmap, 0, wx.ALIGN_CENTER_VERTICAL)
@@ -751,9 +1485,93 @@ class GridSearchFrame(wx.Frame):
         analysis_sizer.Add(self.ci_method_choice, 0, wx.ALIGN_CENTER_VERTICAL)
         leftsizer.Add(analysis_sizer, 0, wx.ALL, 4)
 
+        display_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        display_sizer.Add(wx.StaticText(left, label="Display:"),
+                          0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        self.display_choice = wx.Choice(left, choices=DISPLAY_LABELS)
+        self.display_choice.SetSelection(DISPLAY_RMSD)
+        self.display_choice.SetToolTip(
+            "RMSD: the raw pooled fitness, in experimental intensity units.\n"
+            "Normalized RMSD: each dataset scored against its own null model "
+            "(the residual left by no simulation at all, which the "
+            "non-negative amplitude fit can never do worse than), averaged by "
+            "point count. 0 = perfect, 1 = explains nothing; 0.3 means 91% of "
+            "the experimental power is accounted for.\n"
+            "Probability (credible level): each cell labelled with the "
+            "smallest credible region containing it, so 0.95 is the boundary "
+            "of the 95% region. Built by marginalizing an unknown noise level "
+            "per dataset, which makes it independent of dataset brightness "
+            "and of the normalization choice above.\n"
+            "Probability (density): the posterior density itself. The primary "
+            "object, but a sharp posterior puts nearly every cell at "
+            "effectively zero.\n"
+            "This chooses the fitness map only -- residual maps are always "
+            "drawn in normalized units on a fixed -2 to +2 scale, so they "
+            "stay comparable between datasets and between grid points.")
+        display_sizer.Add(self.display_choice, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
+
+        self.lbl_divisor = wx.StaticText(left, label="Points per independent point:")
+        display_sizer.Add(self.lbl_divisor, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        self.neff_divisor = wx.SpinCtrlDouble(left, min=1.0, max=100000.0,
+                                               inc=1.0, initial=1.0)
+        self.neff_divisor.SetDigits(2)
+        self.neff_divisor.SetToolTip(
+            "How many raw spectrum points make up one *independent* "
+            "measurement. Adjacent points are correlated by apodization and, "
+            "far more severely, by zero-filling -- zero-filling 2x in both "
+            "dimensions manufactures 4x the points with no new information.\n"
+            "The point count sits in an exponent in the posterior, so leaving "
+            "this at 1 makes the credible regions optimistically narrow. Set "
+            "it to your total zero-fill factor (e.g. 4 for 2x in each "
+            "dimension) as a first correction.\n"
+            "Only affects the two probability modes.")
+        theme.theme_control(self.neff_divisor)
+        display_sizer.Add(self.neff_divisor, 0, wx.ALIGN_CENTER_VERTICAL)
+        leftsizer.Add(display_sizer, 0, wx.ALL, 4)
+
+        rmsd_contour_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.chk_rmsd_contours = wx.CheckBox(left, label="RMSD as contours")
+        self.chk_rmsd_contours.SetToolTip(
+            "Draw the fitness surface as contour lines coloured by the "
+            "colormap instead of as a filled density plot. Uses the same "
+            "10%-step levels the density plot draws as thin reference "
+            "lines.")
+        rmsd_contour_sizer.Add(self.chk_rmsd_contours, 0,
+                               wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+        rmsd_contour_sizer.Add(wx.StaticText(left, label="Line thickness:"),
+                               0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        self.rmsd_contour_width = wx.SpinCtrlDouble(
+            left, min=0.1, max=6.0, inc=0.1, initial=1.2)
+        self.rmsd_contour_width.SetDigits(1)
+        theme.theme_control(self.rmsd_contour_width)
+        rmsd_contour_sizer.Add(self.rmsd_contour_width, 0, wx.ALIGN_CENTER_VERTICAL)
+        leftsizer.Add(rmsd_contour_sizer, 0, wx.ALL, 4)
+
+        resid_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.chk_store_sims = wx.CheckBox(
+            left, label="Keep simulations in memory")
+        self.chk_store_sims.SetValue(True)
+        self.chk_store_sims.SetToolTip(
+            "Keep every grid point's simulation (interpolated onto each "
+            "dataset's [fmin, fmax] region only) so residual maps can be "
+            "shown afterwards without re-simulating.\n"
+            "You are warned before the scan starts if this would need more "
+            f"than {format_bytes(STORE_WARN_BYTES)}.")
+        resid_sizer.Add(self.chk_store_sims, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
+        self.btn_residuals = PillButton(left, "Show Residual Maps",
+                                         color_key="pill_calm")
+        self.btn_residuals.SetToolTip(
+            "Show/hide the row of per-dataset residual maps above the "
+            "fitness map. While shown, double-click anywhere on the "
+            "fitness map to load that grid point's residuals.")
+        resid_sizer.Add(self.btn_residuals, 0, wx.ALIGN_CENTER_VERTICAL)
+        leftsizer.Add(resid_sizer, 0, wx.ALL, 4)
+
         self.lbl_ci = wx.StaticText(left, label="")
-        self.lbl_ci.SetFont(wx.Font(9, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL,
-                                     wx.FONTWEIGHT_NORMAL))
+        # Same face and size as every other label in this panel, just bold --
+        # it used to be a fixed-pitch face that sat oddly against the rest.
+        self.lbl_ci.SetFont(
+            wx.SystemSettings.GetFont(wx.SYS_DEFAULT_GUI_FONT).Bold())
         leftsizer.Add(self.lbl_ci, 0, wx.EXPAND | wx.ALL, 4)
 
         note = wx.StaticText(left, label=(
@@ -776,9 +1594,20 @@ class GridSearchFrame(wx.Frame):
 
         self.btn_refresh.Bind(wx.EVT_BUTTON, self.on_refresh)
         self.btn_cmap.Bind(wx.EVT_BUTTON, self.on_choose_cmap)
+        self.btn_map_contours.Bind(wx.EVT_BUTTON, self.on_edit_map_contours)
         self.chk_invert_cmap.Bind(wx.EVT_CHECKBOX, self.on_invert_cmap_toggle)
         self.interp_choice.Bind(wx.EVT_CHOICE, self.on_analysis_choice_changed)
         self.ci_method_choice.Bind(wx.EVT_CHOICE, self.on_analysis_choice_changed)
+        self.btn_residuals.Bind(wx.EVT_BUTTON, self.on_toggle_residuals)
+        self.chk_rmsd_contours.Bind(wx.EVT_CHECKBOX, self.on_analysis_choice_changed)
+        self.display_choice.Bind(wx.EVT_CHOICE, self.on_display_mode_changed)
+        self.neff_divisor.Bind(wx.EVT_SPINCTRLDOUBLE, self.on_display_mode_changed)
+        self.neff_divisor.Bind(wx.EVT_KILL_FOCUS, self.on_display_mode_changed)
+        self.rmsd_contour_width.Bind(wx.EVT_SPINCTRLDOUBLE, self.on_analysis_choice_changed)
+        # SpinCtrlDouble only fires EVT_SPINCTRLDOUBLE for the arrows; typing
+        # a value and tabbing/entering away emits a plain text event.
+        self.rmsd_contour_width.Bind(wx.EVT_TEXT_ENTER, self.on_analysis_choice_changed)
+        self.rmsd_contour_width.Bind(wx.EVT_KILL_FOCUS, self.on_analysis_choice_changed)
         self.btn_run.Bind(wx.EVT_BUTTON, self.on_run_or_cancel)
         self.param_pg.Bind(wxpg.EVT_PG_CHANGED, self.on_param_toggle)
         self.Bind(wx.EVT_CLOSE, self.on_close)
@@ -786,6 +1615,7 @@ class GridSearchFrame(wx.Frame):
         self._load_sys_snapshot()
         self._build_param_grid()
         self._paint_swatch()
+        self._sync_display_controls()
         self.Centre()
 
         # Inherit whichever theme the main window currently has active.
@@ -826,6 +1656,28 @@ class GridSearchFrame(wx.Frame):
                     self.cmap_stops = dlg.get_stops()
                     self._apply_effective_cmap()
 
+    def on_edit_map_contours(self, event):
+        """Same dialog the residual row uses, applied to the fitness map's
+        reference contours."""
+        with ContourSettingsDialog(
+                self, "Fitness Map Contours", self.map_contour_on,
+                self.map_contour_color, self.map_contour_n,
+                self.map_contour_width,
+                enable_label="Draw contours on the fitness map") as dlg:
+            if dlg.ShowModal() != wx.ID_OK:
+                return
+            self.map_contour_on = dlg.get_enabled()
+            self.map_contour_color = dlg.get_color()
+            self.map_contour_n = dlg.get_levels()
+            self.map_contour_width = dlg.get_width()
+        self._refresh_display()
+
+    def _on_sash_moved(self, event):
+        """Keep the parameter range boxes tracking the left panel's width
+        as the sash is dragged, rather than only once the drag ends."""
+        event.Skip()
+        self._relayout_left()
+
     def on_invert_cmap_toggle(self, event):
         self.cmap_inverted = self.chk_invert_cmap.GetValue()
         self._apply_effective_cmap()
@@ -834,6 +1686,11 @@ class GridSearchFrame(wx.Frame):
         self.cmap = self.cmap_base.reversed() if self.cmap_inverted else self.cmap_base
         self.heatmap.set_colormap(self.cmap)
         self._paint_swatch()
+        # In contour display mode recolouring the mappable in place does not
+        # restyle the drawn lines, so redraw from the cached results (cheap
+        # -- no re-scanning; see _refresh_display).
+        if self._last_results is not None and self.chk_rmsd_contours.GetValue():
+            self._refresh_display()
 
     # ------------------------------------------------------------------
     # Parameter selection grid
@@ -887,6 +1744,9 @@ class GridSearchFrame(wx.Frame):
             return
         self._load_sys_snapshot()
         self._build_param_grid()
+        # The Sys marker is read from the main window, so re-pulling the
+        # parameters is exactly when it may have moved.
+        self._refresh_display()
 
     def on_param_toggle(self, event):
         prop = event.GetProperty()
@@ -1026,6 +1886,44 @@ class GridSearchFrame(wx.Frame):
         grid2 = np.linspace(ranges[1][0], ranges[1][1], ranges[1][2])
         self._last_param1, self._last_param2 = param1, param2
 
+        # Slice each dataset's experimental region once, up front: the scan
+        # reuses it at every grid point instead of re-slicing, and its size
+        # is what determines the cost of keeping simulations.
+        roi_cache = [dataset_roi(dd) for dd in active_data]
+
+        store_sims = self.chk_store_sims.GetValue()
+        if store_sims:
+            est = estimate_store_bytes(roi_cache, len(grid1), len(grid2))
+            if est > STORE_WARN_BYTES:
+                answer = wx.MessageBox(
+                    f"Keeping every simulation from this scan would need about "
+                    f"{format_bytes(est)} of memory\n"
+                    f"({len(grid1)} x {len(grid2)} grid points x "
+                    f"{len(active_data)} dataset(s), interpolated onto the "
+                    f"[fmin, fmax] region only).\n\n"
+                    f"Yes  - store anyway (residual maps available)\n"
+                    f"No   - run without storing (residual maps unavailable)\n"
+                    f"Cancel - don't run at all",
+                    "Grid Search - large memory requirement",
+                    wx.YES_NO | wx.CANCEL | wx.ICON_WARNING)
+                if answer == wx.CANCEL:
+                    return
+                store_sims = (answer == wx.YES)
+
+        # Release the previous scan's stored arrays *before* the new scan
+        # starts allocating, so the two sets never coexist.
+        self._sim_store = {}
+        self._roi_cache = roi_cache if store_sims else None
+        # The residual marker indexes a grid that is about to change; the
+        # Sys marker needs no clearing, being read live at draw time.
+        self._last_click_ij = None
+        # Reset the row even while it is hidden, so toggling it on later
+        # can never surface the previous scan's residuals.
+        self.residuals.show_message(
+            "Scan running -- double-click a grid point when it finishes."
+            if store_sims else
+            "Simulations are not being stored for this scan.")
+
         sys_template = copy.deepcopy(self.main.tabulated_panel.Sys_param.parameters)
         exp_template = copy.deepcopy(self.main.tabulated_panel.Exp_param.parameters)
         opt_template = copy.deepcopy(self.main.tabulated_panel.Opt_param.parameters)
@@ -1040,6 +1938,7 @@ class GridSearchFrame(wx.Frame):
         self.btn_refresh.Disable()
         self.range_panel.Enable(False)
         self.btn_cmap.Disable()
+        self.chk_store_sims.Enable(False)
         total = len(grid1) * len(grid2)
         self.gauge.SetRange(total)
         self.gauge.SetValue(0)
@@ -1050,16 +1949,22 @@ class GridSearchFrame(wx.Frame):
             target=self._worker_run,
             args=(param1, param2, grid1, grid2, sys_template, exp_template,
                   opt_template, active_data, self._cancel_event,
-                  func_rows, base_variable_values),
+                  func_rows, base_variable_values, roi_cache, store_sims),
             daemon=True)
         self._worker_thread.start()
 
     def _worker_run(self, param1, param2, grid1, grid2, sys_template,
                      exp_template, opt_template, active_data, cancel_event,
-                     func_rows, base_variable_values):
+                     func_rows, base_variable_values, roi_cache, store_sims):
         n1, n2 = len(grid1), len(grid2)
+        n_ds = len(active_data)
         results = np.full((n1, n2), np.nan)
+        results_norm = np.full((n1, n2), np.nan)
         results_n = np.zeros((n1, n2), dtype=int)
+        # Per-dataset residuals, needed by the posterior. Two floats per
+        # dataset per grid point -- negligible next to anything else here.
+        results_sse = np.full((n1, n2, n_ds), np.nan)
+        results_nk = np.zeros((n1, n2, n_ds), dtype=int)
         hs = HYSCOREsim(errorFunc=_silent_error_func)
         hs.verbose = False
         start = time.perf_counter()
@@ -1067,6 +1972,7 @@ class GridSearchFrame(wx.Frame):
         total = n1 * n2
         n_failed_points = 0
         error_log = {}   # unique error message -> occurrence count; also printed live
+        sim_store = {} if store_sims else None
 
         for i, v1 in enumerate(grid1):
             if cancel_event.is_set():
@@ -1081,29 +1987,44 @@ class GridSearchFrame(wx.Frame):
                         variable_values[p['key']] = v
                     else:
                         apply_param_value(sys_dict, p, v)
+                slot = [None] * len(active_data) if store_sims else None
+                stats = [None] * len(active_data)
                 try:
                     func_ok = apply_functions_to_sys_dict(
                         sys_dict, func_rows, variable_values, error_log=error_log)
                     if not func_ok:
-                        rmsd, n_pts = np.nan, 0
+                        rmsd, n_pts, rmsd_norm = np.nan, 0, np.nan
                     else:
                         Sys = sysPar()
                         Sys.setFromCtrl(sys_dict)
-                        rmsd, n_pts = run_gridpoint(hs, Sys, exp_template, opt_template,
-                                                     active_data, error_log=error_log)
+                        rmsd, n_pts, rmsd_norm = run_gridpoint(
+                            hs, Sys, exp_template, opt_template,
+                            active_data, error_log=error_log,
+                            roi_cache=roi_cache, sim_store=slot,
+                            stats_out=stats)
                 except Exception as e:
                     _log_gridpoint_error(error_log, "Sys.setFromCtrl", e)
-                    rmsd, n_pts = np.nan, 0
+                    rmsd, n_pts, rmsd_norm = np.nan, 0, np.nan
+                # Only points that actually produced a simulation are worth
+                # a dict entry -- a failed point would otherwise cost a
+                # list of Nones for nothing.
+                if slot is not None and any(s is not None for s in slot):
+                    sim_store[(i, j)] = slot
                 if np.isnan(rmsd):
                     n_failed_points += 1
                 results[i, j] = rmsd
+                results_norm[i, j] = rmsd_norm
                 results_n[i, j] = n_pts
+                for k, st in enumerate(stats):
+                    if st is not None:
+                        results_sse[i, j, k], results_nk[i, j, k] = st
                 count += 1
                 elapsed = time.perf_counter() - start
                 wx.CallAfter(self._on_progress, count, total, elapsed)
 
         wx.CallAfter(self._on_finished, results, results_n, grid1, grid2, param1, param2,
-                     cancel_event.is_set(), n_failed_points, total, error_log)
+                     cancel_event.is_set(), n_failed_points, total, error_log, sim_store,
+                     results_norm, len(active_data), results_sse, results_nk)
 
     def _on_progress(self, count, total, elapsed):
         if self._closing:
@@ -1115,8 +2036,12 @@ class GridSearchFrame(wx.Frame):
             f"{count} / {total}   elapsed {elapsed:.0f}s   ETA {remaining:.0f}s")
 
     def _on_finished(self, results, results_n, grid1, grid2, param1, param2, cancelled,
-                      n_failed, total, error_log=None):
+                      n_failed, total, error_log=None, sim_store=None,
+                      results_norm=None, n_datasets=0,
+                      results_sse=None, results_nk=None):
         if self._closing:
+            # The frame is going away; don't take a reference to the
+            # worker's stored arrays, just let them be collected.
             return
         self._running = False
         self.btn_run.SetLabel("Run Grid Search")
@@ -1126,23 +2051,38 @@ class GridSearchFrame(wx.Frame):
         self.btn_refresh.Enable()
         self.range_panel.Enable(True)
         self.btn_cmap.Enable()
+        self.chk_store_sims.Enable(True)
         self._sync_param_lock_state()
 
+        self._sim_store = sim_store if sim_store else {}
+        if not self._sim_store:
+            self._roi_cache = None
+        self._last_click_ij = None
+        self.residuals.show_message(
+            "Double-click a point on the fitness map to show its "
+            "residual maps." if self._sim_store else
+            "No simulations were stored for this scan.")
+
         self._last_results = results
+        self._last_results_norm = results_norm
+        self._last_results_n = results_n
+        self._last_results_sse = results_sse
+        self._last_results_nk = results_nk
+        self._last_n_datasets = n_datasets
         self._last_grid1 = grid1
         self._last_grid2 = grid2
         self._last_param1 = param1
         self._last_param2 = param2
-        if np.any(np.isfinite(results)):
-            bi, bj = np.unravel_index(np.nanargmin(results), results.shape)
-            self._last_N = int(results_n[bi, bj])
-        else:
-            self._last_N = 0
         self._refresh_display()
 
         msg = "Grid search cancelled." if cancelled else "Grid search finished."
         if n_failed:
             msg += f" {n_failed}/{total} grid points had no successful simulation (see console)."
+        if self._sim_store:
+            held = sum(s.nbytes for slot in self._sim_store.values()
+                       for s in slot if s is not None)
+            msg += (f" Simulations kept for {len(self._sim_store)} grid points "
+                    f"({format_bytes(held)}).")
         self.statusbar.SetStatusText(msg)
 
         if error_log:
@@ -1158,29 +2098,119 @@ class GridSearchFrame(wx.Frame):
     # Interpolation / confidence intervals
     # ------------------------------------------------------------------
     def on_analysis_choice_changed(self, event):
+        # EVT_KILL_FOCUS is one of the sources here and must keep
+        # propagating, or focus handling for the control breaks.
+        if event is not None:
+            event.Skip()
         self._refresh_display()
 
     def _refresh_display(self):
-        """(Re)draw the heatmap from the coarse results cached in
-        self._last_results using the currently-selected interpolation
-        method, and (re)compute the confidence-interval display using the
-        currently-selected CI method. Cheap enough to call on every
-        dropdown change -- no re-scanning involved."""
+        """(Re)draw the heatmap from the coarse results cached by the last
+        scan, in whichever statistic the Display pulldown selects, and
+        recompute the interval readout to match. Cheap enough to call on
+        every control change -- no re-scanning involved."""
         if self._last_results is None:
             return
+        mode = self.display_mode()
+        drew = False
+        if mode in PROBABILITY_MODES:
+            drew = self._display_probability(mode)
+        if not drew:
+            # Probability needs per-dataset residuals; fall back to the raw
+            # fitness map if they are missing or the posterior degenerates.
+            self._display_fitness(DISPLAY_RMSD if mode in PROBABILITY_MODES else mode)
+        self.left_panel.Layout()
+        self.Layout()
+
+    def _background_levels(self, vmin, vmax):
+        """Evenly spaced reference contour levels across the displayed
+        surface's range, as many as the contour dialog asks for. Empty when
+        the surface is flat, or when the overlay is switched off *and* the
+        map is not itself drawn as contours -- in contour display mode
+        these levels are the plot, so they are always needed."""
+        if not (vmax > vmin):
+            return []
+        if not self.map_contour_on and not self.chk_rmsd_contours.GetValue():
+            return []
+        return list(np.linspace(vmin, vmax, self.map_contour_n + 2)[1:-1])
+
+    def _current_sys_point(self):
+        """Where the main window's Sys currently sits, in the plane of the
+        two scanned parameters -- read live rather than remembered, so it
+        follows whatever the main grid holds now, however it got there
+        (loaded from this window, typed in by hand, driven by a Function
+        Modifier). Returns None if either parameter no longer exists."""
+        if self._last_param1 is None or self._last_param2 is None:
+            return None
+        try:
+            params = self.main.tabulated_panel.Sys_param.parameters
+        except AttributeError:
+            return None
+        v1 = read_param_value(params, self._last_param1)
+        v2 = read_param_value(params, self._last_param2)
+        if v1 is None or v2 is None:
+            return None
+        return (v1, v2)
+
+    def _marker_points(self):
+        """(residual-shown point, current-Sys point) in data coordinates,
+        either possibly None.
+
+        Both are dropped when they fall outside the axes currently being
+        drawn. Markers are plotted with ax.plot, which feeds the autoscaler,
+        so a point outside the scanned range -- the Sys sitting somewhere
+        this scan never visited, say -- would otherwise drag the axis limits
+        out to reach it and wreck the scale."""
+        if self._last_grid1 is None or self._last_grid2 is None:
+            return None, None
+        lo1, hi1 = self._last_grid1[0], self._last_grid1[-1]
+        lo2, hi2 = self._last_grid2[0], self._last_grid2[-1]
+
+        def in_range(pt):
+            if pt is None:
+                return None
+            x, y = pt
+            if min(lo1, hi1) <= x <= max(lo1, hi1) and \
+               min(lo2, hi2) <= y <= max(lo2, hi2):
+                return (x, y)
+            return None
+
+        resid_pt = None
+        if self._last_click_ij is not None:
+            i, j = self._last_click_ij
+            if i < len(self._last_grid1) and j < len(self._last_grid2):
+                resid_pt = (self._last_grid1[i], self._last_grid2[j])
+        return in_range(resid_pt), in_range(self._current_sys_point())
+
+    def _display_fitness(self, mode):
+        """Draw the RMSD or normalized-RMSD map, with the F-test or
+        chi-square confidence region."""
         grid1, grid2 = self._last_grid1, self._last_grid2
-        results = self._last_results
         param1, param2 = self._last_param1, self._last_param2
         label1, label2 = param_full_label(param1), param_full_label(param2)
+
+        # Everything downstream -- interpolation, the minimum, the
+        # confidence region, the contours -- runs on whichever statistic is
+        # selected, so the whole display stays self-consistent.
+        normalized = (mode == DISPLAY_NORMALIZED)
+        results = self._last_results_norm if normalized else self._last_results
+        if results is None:
+            results = self._last_results
+            normalized = False
+        value_label = "Normalized RMSD" if normalized else "RMSD"
+
+        as_contours = self.chk_rmsd_contours.GetValue()
+        rmsd_cw = float(self.rmsd_contour_width.GetValue())
 
         method = 'cubic' if self.interp_choice.GetSelection() == 1 else 'linear'
         out = _interpolate_grid(method, grid1, grid2, results)
         if out is None:
-            self.heatmap.show_results(results, grid1, grid2, label1, label2)
+            self.heatmap.show_results(results, grid1, grid2, label1, label2,
+                                      as_contours=as_contours,
+                                      rmsd_contour_width=rmsd_cw,
+                                      value_label=value_label)
             self.lbl_ci.SetLabel(
                 "No successful grid points -- cannot interpolate or estimate confidence intervals.")
-            self.left_panel.Layout()
-            self.Layout()
             return
         fine1, fine2, fine_vals, used_method = out
 
@@ -1191,10 +2221,18 @@ class GridSearchFrame(wx.Frame):
         # own range -- purely a visual aid for reading the landscape, drawn
         # under the (bold) confidence-interval contour.
         vmin, vmax = float(np.nanmin(fine_vals)), float(np.nanmax(fine_vals))
-        background_levels = list(np.linspace(vmin, vmax, 11)[1:-1]) if vmax > vmin else []
+        background_levels = self._background_levels(vmin, vmax)
 
         ci_method = 'fstat' if self.ci_method_choice.GetSelection() == 0 else 'chi2'
-        N = self._last_N
+        # Degrees of freedom come from the coarse point that is best under
+        # the *displayed* statistic -- with per-dataset normalization the
+        # two statistics can put their minimum in different places.
+        if np.any(np.isfinite(results)) and self._last_results_n is not None:
+            ci, cj = np.unravel_index(np.nanargmin(results), results.shape)
+            N = int(self._last_results_n[ci, cj])
+        else:
+            N = 0
+        self._last_N = N
         CONF = 0.95
         factor = _rmsd_threshold_factor(ci_method, CONF, N, p=2)
         contour_levels = []
@@ -1223,17 +2261,150 @@ class GridSearchFrame(wx.Frame):
         if N <= 2:
             lines.append(f"(only N={N} pooled residual points at the best fit -- "
                          f"too few for a meaningful confidence interval)")
+        if normalized:
+            lines.append("Normalized: 0 = perfect fit, "
+                         "1 = no better than no simulation at all.")
+            if self._last_n_datasets > 1:
+                # Worth stating plainly: this is not the raw statistic with a
+                # different label, and the F-test/chi-square factors assume a
+                # plain sum-of-squares ratio, which a dataset-reweighted mean
+                # only approximates.
+                lines.append("(each dataset normalized to its own null model, then "
+                             "averaged -- best fit and interval can differ from raw RMSD)")
         lines.append("± is half the width of the joint 2-parameter 95% region's bounding "
                      "box on each axis (conservative vs. a true 1D profile interval).")
         self.lbl_ci.SetLabel("\n".join(lines))
 
+        mark_resid, mark_loaded = self._marker_points()
         subtitle = f"{used_method} interp, N={N}"
         self.heatmap.show_results(fine_vals, fine1, fine2, label1, label2,
                                   contour_levels=contour_levels,
                                   background_levels=background_levels,
-                                  raw_points=(grid1, grid2), subtitle=subtitle, half_width=half_width)
-        self.left_panel.Layout()
-        self.Layout()
+                                  raw_points=(grid1, grid2), subtitle=subtitle,
+                                  half_width=half_width,
+                                  as_contours=as_contours,
+                                  rmsd_contour_width=rmsd_cw,
+                                  value_label=value_label,
+                                  bg_contour_color=self.map_contour_color,
+                                  bg_contour_width=self.map_contour_width,
+                                  mark_residual=mark_resid, mark_loaded=mark_loaded)
+
+    def _display_probability(self, mode):
+        """Draw the posterior over the scanned box, either as the credible
+        level of each cell or as the density itself, with marginal credible
+        intervals. Returns False if the posterior could not be formed, so
+        the caller can fall back to the fitness map."""
+        if self._last_results_sse is None or self._last_results_nk is None:
+            return False
+        grid1, grid2 = self._last_grid1, self._last_grid2
+        label1 = param_full_label(self._last_param1)
+        label2 = param_full_label(self._last_param2)
+
+        divisor = float(self.neff_divisor.GetValue())
+        nlp = neg_log_posterior(self._last_results_sse, self._last_results_nk, divisor)
+        if nlp is None:
+            return False
+
+        # Interpolate the *negative log* posterior, not the posterior:
+        # it is smooth and roughly quadratic near the peak, whereas the
+        # probability itself spans many orders of magnitude and would
+        # interpolate atrociously. It also keeps the min-is-best convention
+        # that _interpolate_grid's failed-point sentinel assumes.
+        method = 'cubic' if self.interp_choice.GetSelection() == 1 else 'linear'
+        out = _interpolate_grid(method, grid1, grid2, nlp)
+        if out is None:
+            return False
+        fine1, fine2, nlp_fine, used_method = out
+
+        p = posterior_grid(nlp_fine)
+        if p is None:
+            return False
+        level = credible_level_map(p)
+        bi, bj = np.unravel_index(np.argmax(p), p.shape)
+        best1, best2 = fine1[bi], fine2[bj]
+
+        CONF_INNER, CONF_OUTER = 0.68, 0.95
+        if mode == DISPLAY_CREDIBLE:
+            displayed = level
+            contour_levels = [(CONF_INNER, "68%"), (CONF_OUTER, "95%")]
+        else:
+            displayed = p
+            contour_levels = [(density_threshold(p, CONF_INNER), "68%"),
+                              (density_threshold(p, CONF_OUTER), "95%")]
+        value_label = DISPLAY_VALUE_LABELS[mode]
+
+        vmin, vmax = float(np.nanmin(displayed)), float(np.nanmax(displayed))
+        background_levels = self._background_levels(vmin, vmax)
+
+        bounds1 = marginal_interval(fine1, p.sum(axis=1), CONF_OUTER)
+        bounds2 = marginal_interval(fine2, p.sum(axis=0), CONF_OUTER)
+        half_width = {1: None, 2: None}
+        if bounds1 is not None:
+            half_width[1] = (bounds1[1] - bounds1[0]) / 2.0
+        if bounds2 is not None:
+            half_width[2] = (bounds2[1] - bounds2[0]) / 2.0
+
+        # Pooled point count at the best coarse point, and what the divisor
+        # leaves of it -- the exponent that actually set the width above.
+        if self._last_results_n is not None and np.any(np.isfinite(nlp)):
+            ci, cj = np.unravel_index(np.nanargmin(nlp), nlp.shape)
+            N = int(self._last_results_n[ci, cj])
+        else:
+            N = 0
+        self._last_N = N
+        n_eff = N / max(divisor, 1e-9)
+
+        def fmt_line(label, best, bounds):
+            if bounds is None:
+                return f"{label} = {best:.5g}  (95% credible: n/a)"
+            return (f"{label} = {best:.5g}  "
+                    f"(95% credible: {bounds[0]:.5g} to {bounds[1]:.5g})")
+
+        lines = [fmt_line(label1, best1, bounds1), fmt_line(label2, best2, bounds2)]
+        if used_method != method:
+            lines.append("(cubic needs >=4 points/axis and no failed grid points -- "
+                         "used linear instead)")
+        lines.append(f"Posterior with each dataset's noise level marginalized out; "
+                     f"unaffected by dataset brightness or by the RMSD normalization.")
+        lines.append(f"Effective points: {N} / {divisor:g} = {n_eff:.0f} "
+                     f"(sets how sharp the posterior is).")
+        if divisor <= 1.0:
+            lines.append("(divisor is 1 -- if the spectra were zero-filled, these "
+                         "regions are optimistically narrow)")
+
+        # If the posterior has not decayed by the edges, normalizing over
+        # the box is meaningless and the region is an artifact of where the
+        # scan happened to stop.
+        edge = float(p[0, :].sum() + p[-1, :].sum() + p[:, 0].sum() + p[:, -1].sum())
+        if edge > 0.01:
+            lines.append(f"WARNING: {edge*100:.0f}% of the posterior mass sits on the "
+                         f"edge of the scanned box -- widen the ranges.")
+        # The opposite failure: with a few hundred points in the exponent the
+        # posterior can collapse below one cell, which renders as a single
+        # dot and tells the user nothing. Say why rather than drawing a blank.
+        peak_mass = float(p.max())
+        if peak_mass > 0.5:
+            lines.append(f"WARNING: {peak_mass*100:.0f}% of the posterior sits in one "
+                         f"grid cell -- scan a narrower range around the best fit, or "
+                         f"raise the divisor, to resolve it.")
+        self.lbl_ci.SetLabel("\n".join(lines))
+
+        mark_resid, mark_loaded = self._marker_points()
+        subtitle = f"{used_method} interp, N={N}, eff {n_eff:.0f}"
+        self.heatmap.show_results(displayed, fine1, fine2, label1, label2,
+                                  contour_levels=contour_levels,
+                                  background_levels=background_levels,
+                                  raw_points=(grid1, grid2), subtitle=subtitle,
+                                  half_width=half_width,
+                                  as_contours=self.chk_rmsd_contours.GetValue(),
+                                  rmsd_contour_width=float(self.rmsd_contour_width.GetValue()),
+                                  value_label=value_label,
+                                  best_index=(int(bi), int(bj)),
+                                  map_title=f'Posterior: {value_label.lower()}',
+                                  bg_contour_color=self.map_contour_color,
+                                  bg_contour_width=self.map_contour_width,
+                                  mark_residual=mark_resid, mark_loaded=mark_loaded)
+        return True
 
     # ------------------------------------------------------------------
     # Heatmap interaction
@@ -1241,7 +2412,131 @@ class GridSearchFrame(wx.Frame):
     def _on_hover(self, x, y, val):
         vtxt = "n/a" if np.isnan(val) else f"{val:.5g}"
         self.statusbar.SetStatusText(
-            f"{self.heatmap.label1} = {x:.5g},  {self.heatmap.label2} = {y:.5g},  RMSD = {vtxt}")
+            f"{self.heatmap.label1} = {x:.5g},  {self.heatmap.label2} = {y:.5g}, f"{self.heatmap.value_label} = {vtxt}")
+
+    def on_toggle_residuals(self, event):
+        """Show/hide the residual-map row. While hidden it is not merely
+        invisible -- double-clicking the fitness map does nothing at all,
+        so the (potentially expensive) redraw never happens unless the row
+        is actually on screen."""
+        self._show_residuals = not self._show_residuals
+        self.residuals.Show(self._show_residuals)
+        self.btn_residuals.SetLabel(
+            "Hide Residual Maps" if self._show_residuals else "Show Residual Maps")
+        self.btn_residuals.SetColorKey(
+            "pill_warn" if self._show_residuals else "pill_calm")
+        if self._show_residuals and not self._sim_store:
+            self.residuals.show_message(
+                "No stored simulations. Run a scan with "
+                "\"Keep simulations in memory\" enabled to get residual maps.")
+        self.right_panel.Layout()
+        self.Layout()
+
+    def display_mode(self):
+        sel = self.display_choice.GetSelection()
+        return DISPLAY_RMSD if sel == wx.NOT_FOUND else sel
+
+    def on_display_mode_changed(self, event):
+        """Switching statistic redraws the fitness map and, if a grid
+        point's residuals are on screen, re-renders those in the new units
+        too. The divisor and the confidence-interval method only apply to
+        some modes, so their controls follow the selection."""
+        if event is not None:
+            event.Skip()      # EVT_KILL_FOCUS must keep propagating
+        self._sync_display_controls()
+        self._refresh_display()
+        if self._last_click_ij is not None:
+            self._render_residuals(*self._last_click_ij)
+
+    def _sync_display_controls(self):
+        probability = self.display_mode() in PROBABILITY_MODES
+        self.neff_divisor.Enable(probability)
+        self.lbl_divisor.Enable(probability)
+        # Credible intervals come from the posterior itself in probability
+        # mode, so the F-test/chi-square choice has nothing to act on.
+        self.ci_method_choice.Enable(not probability)
+
+    def _on_doubleclick(self, x, y):
+        """Rebuild the residual row for whichever *coarse* grid point the
+        double-click landed nearest. The heatmap shows the interpolated
+        fine surface, but simulations only exist where they were actually
+        run, so the click is snapped back onto the coarse axes."""
+        if not self._show_residuals:
+            return
+        if self._last_grid1 is None or self._last_grid2 is None:
+            return
+        if not self._sim_store or self._roi_cache is None:
+            self.residuals.show_message(
+                "No stored simulations for this scan.")
+            return
+        if x is None or y is None:
+            return
+        i = int(np.argmin(np.abs(self._last_grid1 - x)))
+        j = int(np.argmin(np.abs(self._last_grid2 - y)))
+        self._render_residuals(i, j)
+        # Move the "residuals shown" marker to the point just picked.
+        self._refresh_display()
+
+    def _render_residuals(self, i, j):
+        """Draw the residual row for coarse grid point (i, j).
+
+        These are always drawn in normalized units, whatever the fitness
+        map is showing: each dataset's residual is divided by its own null
+        root-mean-square (the region's experimental root-mean-square
+        intensity), so a displayed residual of 1 is as large as the typical
+        experimental intensity there and every map shares the fixed +-2
+        scale. They are a display, not the statistic -- raw intensity units
+        would differ by orders of magnitude between datasets and make the
+        maps incomparable and mostly saturated.
+
+        The simulation contours are scaled by the same factor; that leaves
+        the lines exactly where they were (levels are taken from the
+        simulation's own range) but keeps their values in the same units as
+        the map underneath."""
+        if self._last_grid1 is None or not self._sim_store or self._roi_cache is None:
+            return
+        slot = self._sim_store.get((i, j))
+        v1, v2 = self._last_grid1[i], self._last_grid2[j]
+        label1 = param_full_label(self._last_param1)
+        label2 = param_full_label(self._last_param2)
+        header = f"{label1} = {v1:.5g},  {label2} = {v2:.5g}"
+        self._last_click_ij = (i, j)
+
+        if slot is None:
+            self.residuals.show_message(
+                f"{header}\nNo successful simulation was stored at this grid point.")
+            self.statusbar.SetStatusText(f"No stored simulation at {header}.")
+            return
+
+        entries = []
+        for roi, sim in zip(self._roi_cache, slot):
+            if roi is None or sim is None:
+                continue
+            resid = roi['exp'] - sim
+            if roi['null_rms'] > 0.0:
+                scale = 1.0 / roi['null_rms']
+                resid = resid * scale
+                sim = sim * scale
+            # Head each map with the field, matching how the main window
+            # titles its spectra (see MainFrame's 'B$_0$={field} mT'),
+            # rather than with the file name -- which of several tau/field
+            # measurements this is, is the useful identity here.
+            field = roi.get('field')
+            title = (f"B$_0$={field:g} mT" if isinstance(field, (int, float))
+                     else str(roi['label']))
+            entries.append({
+                'title': title,
+                'resid': resid,
+                'sim': sim,
+                'x': roi['x'],
+                'y': roi['y'],
+                'extent': [roi['x'][0], roi['x'][-1], roi['y'][0], roi['y'][-1]],
+                'rmsd': float(np.sqrt(np.mean(resid ** 2))),
+            })
+        self.residuals.show_maps(
+            entries, subtitle=f"Residuals at {header} (normalized)",
+            value_label="Normalized RMSD")
+        self.statusbar.SetStatusText(f"Residual maps at {header} (normalized).")
 
     def _on_rightclick(self, x, y, val):
         if self._last_param1 is None or self._last_param2 is None:
@@ -1288,6 +2583,7 @@ class GridSearchFrame(wx.Frame):
         # leaves are Function-Modifier-driven) reflect the new baseline,
         # same as clicking "Refresh Parameters from Main Window".
         self.on_refresh(None)
+        self._refresh_display()
         self.statusbar.SetStatusText(msg)
 
     # ------------------------------------------------------------------
@@ -1295,4 +2591,8 @@ class GridSearchFrame(wx.Frame):
         self._closing = True
         if self._running:
             self._cancel_event.set()
+        # Drop the stored simulations now rather than waiting for the frame
+        # itself to be collected -- this can be hundreds of megabytes.
+        self._sim_store = {}
+        self._roi_cache = None
         event.Skip()
