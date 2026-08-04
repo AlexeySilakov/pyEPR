@@ -71,13 +71,14 @@ only shift it by a constant), which is why the probability map does not
 move when the fitness map does. Confidence intervals in these modes come
 from the posterior marginals rather than from the F-test.
 
-Because N sits in an exponent there, the "Points per independent point"
-divisor matters: adjacent spectrum points are correlated by apodization
-and especially by zero-filling, and dividing N by the zero-fill factor is
-the crude correction. Left at 1 the credible regions are optimistically
-narrow. The panel warns when the posterior spills off the edge of the
-scanned box (widen the ranges) or collapses inside a single cell (narrow
-them).
+Because N sits in an exponent there, the "Oversampling" divisor matters:
+adjacent spectrum points are correlated by apodization and especially by
+zero-filling, so N is divided by the number of points per independent
+measurement. It defaults to 4**zfill from the main window's zero-fill
+setting (2**zfill per axis, squared for the 2-D point count). Left at 1
+the credible regions are optimistically narrow. The panel warns when the
+posterior spills off the edge of the scanned box (widen the ranges) or
+collapses inside a single cell (narrow them).
 
 Once a scan finishes, the coarse RMSD grid is interpolated (linear or
 cubic, selectable live without re-scanning -- see _interpolate_grid) onto
@@ -1510,21 +1511,16 @@ class GridSearchFrame(wx.Frame):
             "stay comparable between datasets and between grid points.")
         display_sizer.Add(self.display_choice, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
 
-        self.lbl_divisor = wx.StaticText(left, label="Points per independent point:")
+        self.lbl_divisor = wx.StaticText(left, label="Oversampling:")
         display_sizer.Add(self.lbl_divisor, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
         self.neff_divisor = wx.SpinCtrlDouble(left, min=1.0, max=100000.0,
                                                inc=1.0, initial=1.0)
         self.neff_divisor.SetDigits(2)
         self.neff_divisor.SetToolTip(
-            "How many raw spectrum points make up one *independent* "
-            "measurement. Adjacent points are correlated by apodization and, "
-            "far more severely, by zero-filling -- zero-filling 2x in both "
-            "dimensions manufactures 4x the points with no new information.\n"
-            "The point count sits in an exponent in the posterior, so leaving "
-            "this at 1 makes the credible regions optimistically narrow. Set "
-            "it to your total zero-fill factor (e.g. 4 for 2x in each "
-            "dimension) as a first correction.\n"
-            "Only affects the two probability modes.")
+            "Spectrum points per independent measurement.\n"
+            "Oversampling = 4^(zero fill), i.e. 2^n per axis, squared.\n"
+            "At 1 the credible regions come out too narrow.")
+        self.neff_divisor.SetValue(self._default_oversampling())
         theme.theme_control(self.neff_divisor)
         display_sizer.Add(self.neff_divisor, 0, wx.ALIGN_CENTER_VERTICAL)
         leftsizer.Add(display_sizer, 0, wx.ALL, 4)
@@ -2411,8 +2407,13 @@ class GridSearchFrame(wx.Frame):
     # ------------------------------------------------------------------
     def _on_hover(self, x, y, val):
         vtxt = "n/a" if np.isnan(val) else f"{val:.5g}"
+        # One string, built by implicit concatenation across the two lines --
+        # note there is deliberately no comma between them. SetStatusText's
+        # second argument is the field *index* (an int), so a comma here
+        # makes wx read the second piece of text as a field number.
         self.statusbar.SetStatusText(
-            f"{self.heatmap.label1} = {x:.5g},  {self.heatmap.label2} = {y:.5g}, f"{self.heatmap.value_label} = {vtxt}")
+            f"{self.heatmap.label1} = {x:.5g},  {self.heatmap.label2} = {y:.5g},  "
+            f"{self.heatmap.value_label} = {vtxt}")
 
     def on_toggle_residuals(self, event):
         """Show/hide the residual-map row. While hidden it is not merely
@@ -2431,6 +2432,37 @@ class GridSearchFrame(wx.Frame):
                 "\"Keep simulations in memory\" enabled to get residual maps.")
         self.right_panel.Layout()
         self.Layout()
+
+    def _default_oversampling(self):
+        """Oversampling implied by the main window's zero-fill setting.
+
+        update_FFT pads to 2**(ceil(log2 N) + zfill), so each axis gains a
+        factor 2**zfill in points and the 2-D count gains that squared --
+        4**zfill. Taken from the datasets that are shown (each carries its
+        own fftmethod once it has been transformed), falling back to the
+        FFT parameter grid, and using the largest if they disagree.
+
+        Assumes the acquired size is a power of two, as asked. When it is
+        not, the true factor is (2**(ceil(log2 N) + zfill) / N)**2, which is
+        larger -- so this is a floor, and the credible regions it gives are
+        the optimistic ones."""
+        zfill = None
+        try:
+            for dd in self.main.Data:
+                if not dd.get('show'):
+                    continue
+                method = dd.get('fftmethod')
+                z = method.get('zfill') if isinstance(method, dict) else None
+                if z is None:
+                    prop = self.main.tabulated_panel.ffttree.GetProperty('zfill')
+                    z = None if prop is None else prop.GetValue()
+                if z is not None:
+                    zfill = int(z) if zfill is None else max(zfill, int(z))
+        except Exception:
+            return 1.0
+        if not zfill or zfill <= 0:
+            return 1.0
+        return float(min(4 ** zfill, 100000.0))
 
     def display_mode(self):
         sel = self.display_choice.GetSelection()

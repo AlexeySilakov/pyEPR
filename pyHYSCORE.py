@@ -30,7 +30,7 @@ from colormap_editor import (ColormapEditorDialog, stops_to_cmap,
                               colormap_to_stops)
 import grid_search
 # import wx.lib.agw.customtreectrl as CT
-VERSION=0.6
+VERSION=0.9
 
 # pip install wxPython numpy matplotlib scipy
 """

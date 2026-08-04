@@ -431,7 +431,7 @@ class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
             self,
             min=-1e12,
             max=1e12,
-            inc=0.1,
+            inc=0.001,
             initial=0.0
         )
         spin.Bind(wx.EVT_CONTEXT_MENU, self.ShowStepMenu)
@@ -499,6 +499,7 @@ class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
         current = spin.GetValue()
         spin.SetIncrement(step)
         need = max(digits_for_value(current), digits_for_step(step))
+        
         if spin.GetDigits() != need:
             spin.SetDigits(need)
             spin.SetValue(current)
