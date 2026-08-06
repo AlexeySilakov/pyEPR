@@ -1,0 +1,613 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.4cm]{geometry}
+\usepackage{amsmath,amssymb}
+% Deliberately no hyperref / parskip / booktabs: they are not installed here
+% and would trigger a package-installer prompt on every build. DOIs are
+% therefore plain text.
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{6pt}
+
+\title{Grid Search: the four display statistics}
+\author{pyHYSCORE / \texttt{grid\_search.py}}
+\date{}
+
+\newcommand{\SSE}{\mathrm{SSE}}
+\newcommand{\RMSD}{\mathrm{RMSD}}
+
+\begin{document}
+\maketitle
+
+The grid search scans two spin-Hamiltonian parameters and, at every grid
+point, simulates each active dataset and compares it with experiment. The
+\textbf{Display} pulldown chooses which of four statistics is mapped. This
+note defines each one, explains what it does and does not tell you, and
+gives references for the last three.
+
+\tableofcontents
+
+\section{Notation}
+
+\subsection*{Indices and per-dataset quantities}
+
+\begin{tabular}{@{}l p{12.6cm}@{}}
+\hline
+Symbol & Meaning \\
+\hline
+$\theta=(\theta_1,\theta_2)$ & the pair of scanned spin-Hamiltonian parameters; one grid point \\
+$k$ & index over active (shown) datasets \\
+$D$ & the data: all active datasets taken together \\
+$e_k$ & experimental spectrum of dataset $k$, restricted to its region of interest, as a vector \\
+$s_k(\theta)$ & simulation for dataset $k$ at $\theta$, interpolated onto the same points, as a vector \\
+$N_k$ & number of spectrum points in dataset $k$'s region of interest \\
+$f_{\min},f_{\max}$ & frequency limits of that region, the same on both axes \\
+$c_k(\theta)$ & best-fit non-negative amplitude applied to $s_k$, Eq.\ \eqref{eq:amp} \\
+$\SSE_k(\theta)$ & residual sum of squares for dataset $k$, Eq.\ \eqref{eq:sse} \\
+$\mathrm{null}_k$ & null-model sum of squares $\lVert e_k\rVert^2$: the residual left by no simulation \\
+$r_k$ & uncentred correlation between $e_k$ and $s_k$, Eq.\ \eqref{eq:sin} \\
+$\sigma_k$ & unknown noise level of dataset $k$; a nuisance parameter, marginalized away \\
+$N_k^{\text{eff}}$ & effective (independent) point count, $N_k/F$ \\
+$a$ & an arbitrary rescaling factor applied to a dataset, used only in invariance arguments \\
+\hline
+\end{tabular}
+
+\subsection*{Aggregate and displayed quantities}
+
+\begin{tabular}{@{}l p{12.6cm}@{}}
+\hline
+Symbol & Meaning \\
+\hline
+$N$ & pooled point count $\sum_k N_k$ \\
+$\RMSD(\theta)$ & display 1: pooled root-mean-square residual, Eq.\ \eqref{eq:rmsd} \\
+$\RMSD_{\text{norm}}(\theta)$ & display 2: null-normalized score in $(0,1]$, Eq.\ \eqref{eq:norm} \\
+$p(\theta\mid D)$ & posterior probability density over the scanned parameters, Eq.\ \eqref{eq:post} \\
+$\Phi(\theta)$ & negative log posterior, the quantity actually minimized, Eq.\ \eqref{eq:nlp} \\
+$i,j$ & indices of a cell on the interpolated (fine) display grid \\
+$a,b$ & dummy cell indices inside sums over the grid \\
+$p_{ij}$ & display 4: posterior normalized over the grid, $\sum_{ij}p_{ij}=1$, Eq.\ \eqref{eq:grid} \\
+$L_{ij}$ & display 3: credible level of a cell, Eq.\ \eqref{eq:level} \\
+$p^{(1)}_i,\;p^{(2)}_j$ & marginal distributions along each scanned axis \\
+$F$ & oversampling: spectrum points per independent measurement, $F=4^{z}$ \\
+$z$ & zero-fill setting from the main window \\
+$\SSE_{\min},\;\RMSD_{\min}$ & smallest value of that quantity over the scanned grid \\
+$\Delta$ & fractional rise in $\SSE$ above its minimum that bounds a confidence region, Eq.\ \eqref{eq:thresh}; $\Delta_F$ and $\Delta_{\chi^2}$ are its two prescriptions, Eqs.\ \eqref{eq:ftest} and \eqref{eq:chi2} \\
+$\hat{\sigma}$ & noise level estimated from the fit itself, as opposed to known independently \\
+$\nu$ & denominator degrees of freedom of the $F$ distribution, $\nu=N-p$ \\
+$F_{p,\,N-p}(\text{conf})$ & quantile of the $F$ distribution with $p$ and $N-p$ degrees of freedom \\
+$\chi^2_p(\text{conf})$ & quantile of the chi-square distribution with $p$ degrees of freedom \\
+$\text{conf}$ & the confidence or credible fraction, here $0.68$ or $0.95$ \\
+\hline
+\end{tabular}
+
+\textbf{One collision to be aware of.} $p$ carries two standard meanings in
+this document, kept because both are conventional in their own literature:
+as a function of arguments, $p(\cdot)$ is always a probability density; as a
+bare symbol in Section \ref{sec:ftest} it is the number of jointly scanned parameters,
+which here is always $2$. The subscripted $p_{ij}$, $p^{(1)}_i$, $p^{(2)}_j$
+are probabilities.
+
+\subsection*{Operators and abbreviations}
+
+\begin{tabular}{@{}l p{12.6cm}@{}}
+\hline
+Symbol & Meaning \\
+\hline
+$\langle x,y\rangle$ & Euclidean inner product $\sum_n x_n y_n$ over the region of interest \\
+$\lVert x\rVert$ & Euclidean norm, $\lVert x\rVert^2=\langle x,x\rangle$ \\
+$\lceil x\rceil$ & ceiling: the smallest integer not less than $x$ \\
+$\max(x,0)$ & clamp to zero: $x$ if positive, otherwise $0$ \\
+\hline
+RMSD & root-mean-square deviation \\
+SSE & sum of squared residuals \\
+roi & region of interest: the $[f_{\min},f_{\max}]^2$ window a fit is evaluated over \\
+HPD & highest posterior density; a credible region containing the most probable values \\
+FFT & fast Fourier transform \\
+HYSCORE & hyperfine sublevel correlation spectroscopy \\
+\hline
+\end{tabular}
+
+\section{What one grid point produces}
+
+Write $\theta=(\theta_1,\theta_2)$ for the pair of scanned parameters. For
+each active dataset $k$ let $e_k$ be the experimental spectrum restricted to
+that dataset's region of interest $[f_{\min},f_{\max}]^2$, containing $N_k$
+points, and let $s_k(\theta)$ be the simulation interpolated onto the same
+grid. Both are treated as vectors in $\mathbb{R}^{N_k}$.
+
+A simulated HYSCORE spectrum carries no meaningful absolute intensity, so
+each dataset is given its own amplitude, fitted in closed form by least
+squares and clamped to be non-negative:
+\begin{equation}
+c_k(\theta) \;=\; \max\!\left(\frac{\langle e_k,\,s_k(\theta)\rangle}
+{\lVert s_k(\theta)\rVert^{2}},\; 0\right).
+\label{eq:amp}
+\end{equation}
+The clamp matters later: a negative amplitude would mean an inverted
+simulation fits best, which is unphysical here.
+
+The residual sum of squares for that dataset is then
+\begin{equation}
+\SSE_k(\theta) \;=\; \bigl\lVert e_k - c_k(\theta)\,s_k(\theta)\bigr\rVert^{2}
+\;=\;\sum_{\text{roi}} \bigl(e_k - c_k s_k\bigr)^2 .
+\label{eq:sse}
+\end{equation}
+Everything below is a different way of combining the set
+$\{\SSE_k, N_k\}$ into one number per grid point.
+
+\section{Display 1 --- RMSD}
+
+\begin{equation}
+\RMSD(\theta) \;=\; \sqrt{\frac{\sum_k \SSE_k(\theta)}{\sum_k N_k}} .
+\label{eq:rmsd}
+\end{equation}
+
+This is the pooled root-mean-square residual: all residuals from all
+datasets are thrown into one pool and the root mean square is taken. It is
+the original fitness measure and remains the default.
+
+\textbf{What it means.} A distance in experimental intensity units.
+Because those units are arbitrary (spectrometer gain, number of scans), the
+absolute value carries no information --- only comparisons between grid
+points within one scan are meaningful.
+
+\textbf{The property to be aware of.} Equation \eqref{eq:rmsd} weights
+datasets by their absolute intensity. If dataset $B$ is $250\times$ brighter
+than dataset $A$, its residuals are $250\times$ larger and its contribution
+to the sum is about $62\,500\times$ larger: $B$ effectively decides the fit
+alone. This is a modelling choice, not a defect, but it is rarely the
+intended one when several measurements of comparable quality are combined.
+
+\section{Display 2 --- Normalized RMSD}
+\label{sec:norm}
+
+Define each dataset's \emph{null model}: the residual left by no simulation
+at all,
+\begin{equation}
+\mathrm{null}_k \;=\; \lVert e_k \rVert^{2} \;=\; \sum_{\text{roi}} e_k^2 .
+\end{equation}
+The displayed statistic is the point-count-weighted mean of the per-dataset
+unexplained fractions:
+\begin{equation}
+\RMSD_{\text{norm}}(\theta) \;=\;
+\sqrt{\frac{\sum_k N_k \bigl(\SSE_k(\theta)/\mathrm{null}_k\bigr)}
+{\sum_k N_k}} .
+\label{eq:norm}
+\end{equation}
+
+\subsection{Why it is bounded}
+
+Setting $c_k=0$ in \eqref{eq:sse} gives $\SSE_k=\lVert e_k\rVert^2 =
+\mathrm{null}_k$ exactly. Since \eqref{eq:amp} clamps $c_k\ge 0$, the fitted
+amplitude can never do \emph{worse} than $c_k=0$, so
+\begin{equation}
+0 \;<\; \frac{\SSE_k}{\mathrm{null}_k} \;\le\; 1
+\qquad\Longrightarrow\qquad
+0 \;<\; \RMSD_{\text{norm}} \;\le\; 1 .
+\end{equation}
+This is a hard bound, not an empirical observation. The interpretation is
+absolute: $0$ is a perfect fit, $1$ means the simulation explains nothing.
+
+\subsection{Geometric reading}
+
+When $\langle e_k,s_k\rangle>0$, substituting the optimum \eqref{eq:amp}
+into \eqref{eq:sse} gives
+$\SSE_k = \lVert e_k\rVert^2 - \langle e_k,s_k\rangle^2/\lVert s_k\rVert^2$,
+hence
+\begin{equation}
+\sqrt{\frac{\SSE_k}{\mathrm{null}_k}} \;=\; \sqrt{1-r_k^{2}},
+\qquad
+r_k \;=\; \frac{\langle e_k, s_k\rangle}
+{\lVert e_k\rVert\,\lVert s_k\rVert},
+\label{eq:sin}
+\end{equation}
+where $r_k$ is the uncentred correlation coefficient. The normalized value
+is therefore the sine of the angle between experiment and simulation viewed
+as vectors, and $r_k^2$ is the fraction of experimental power the simulation
+accounts for. A displayed value of $0.3$ means $1-0.3^2 = 91\,\%$ of the
+power is explained.
+
+\subsection{Brightness invariance, and its cost}
+\label{sec:brightness}
+
+Rescaling a dataset, $e_k \to a\,e_k$, multiplies both $\SSE_k$ and
+$\mathrm{null}_k$ by $a^2$, leaving the ratio unchanged. Every dataset
+therefore contributes on equal terms regardless of signal strength.
+
+The cost is that \eqref{eq:norm} is a genuinely different statistic from
+\eqref{eq:rmsd}: it is a weighted sum of $\SSE_k$ with weights
+$N_k/\mathrm{null}_k$ rather than uniform weights. With datasets of unequal
+brightness the two surfaces have different shapes, and the best-fit point
+can move between them. Neither is the display being wrong --- they answer
+different questions about how much a faint dataset should count.
+
+\subsection{Caveat}
+
+The normalization is uncentred: no baseline is subtracted. Magnitude
+spectra have a positive noise floor, which inflates $\mathrm{null}_k$ and
+flatters the score. Two datasets with different baselines are therefore not
+strictly comparable on this scale.
+
+\section{Displays 3 and 4 --- posterior probability}
+
+\subsection{From residuals to a probability}
+
+Assume the residuals of dataset $k$ are Gaussian with an unknown noise
+level $\sigma_k$, independently for each dataset. The likelihood is
+\begin{equation}
+p\bigl(D \mid \theta, \{\sigma_k\}\bigr) \;\propto\;
+\prod_k \sigma_k^{-N_k}
+\exp\!\left(-\frac{\SSE_k(\theta)}{2\sigma_k^{2}}\right).
+\end{equation}
+The noise levels are nuisance parameters. Assigning each the
+scale-invariant Jeffreys prior $p(\sigma_k)\propto 1/\sigma_k$ and
+integrating,
+\begin{equation}
+\int_0^{\infty}\!\sigma^{-N-1}
+\exp\!\left(-\frac{\SSE}{2\sigma^{2}}\right)\mathrm{d}\sigma
+\;\propto\; \SSE^{-N/2},
+\end{equation}
+which leaves a posterior over the scanned parameters alone:
+\begin{equation}
+\boxed{\;
+p(\theta \mid D) \;\propto\; \prod_k \SSE_k(\theta)^{-N_k/2}\;}
+\label{eq:post}
+\end{equation}
+(times a prior on $\theta$, taken flat over the scanned box). Equivalently,
+the quantity minimized is
+\begin{equation}
+\Phi(\theta) \;=\; -\log p(\theta\mid D)
+\;=\; \sum_k \frac{N_k}{2}\,\log \SSE_k(\theta) \;+\; \text{const}.
+\label{eq:nlp}
+\end{equation}
+
+\subsection{Two consequences}
+
+\textbf{It is the logarithm of each dataset's residual that gets averaged},
+not the residual itself. That is what marginalizing an unknown per-dataset
+noise level produces, and it is the principled answer to the weighting
+question raised in Section \ref{sec:brightness} --- the weights are inferred rather than
+chosen.
+
+\textbf{It is automatically invariant to brightness and to the
+normalization of Section \ref{sec:norm}.} Rescaling $e_k\to a\,e_k$ sends
+$\log \SSE_k \to \log \SSE_k + 2\log a$, a constant shift of $\Phi$ that
+cancels on normalization. Likewise
+$\log(\SSE_k/\mathrm{null}_k) = \log \SSE_k - \log \mathrm{null}_k$ differs
+by a constant. The probability map is therefore identical whether or not
+the RMSD is normalized --- the question that makes displays 1 and 2 disagree
+simply does not arise here.
+
+\subsection{Effective number of points}
+\label{sec:neff}
+
+$N_k$ enters \eqref{eq:post} as an exponent, so it controls how sharp the
+posterior is; the width of a credible region scales as $N^{-1/2}$.
+Adjacent points of a processed spectrum are not independent: apodization
+correlates neighbours, and zero-filling manufactures points carrying no new
+information at all. The \textbf{Oversampling} control divides the point
+count accordingly,
+\begin{equation}
+N_k^{\text{eff}} \;=\; \frac{N_k}{F},
+\qquad
+F \;=\; 4^{\,z} \;=\; \bigl(2^{\,z}\bigr)^2 ,
+\end{equation}
+where $z$ is the zero-fill setting: \texttt{update\_FFT} pads to
+$2^{\lceil \log_2 N\rceil + z}$, so each axis gains $2^{z}$ points and the
+two-dimensional count gains that squared. Leaving $F=1$ overstates the
+information content and yields credible regions too narrow by a factor
+$\sqrt{F}$.
+
+\subsection{On the grid}
+
+$\Phi$ is evaluated at the coarse scan points, interpolated (the negative
+log posterior is smooth and roughly quadratic near its minimum, whereas the
+probability itself spans many orders of magnitude and interpolates badly),
+then exponentiated and normalized over the fine grid:
+\begin{equation}
+p_{ij} \;=\;
+\frac{\exp\bigl(-[\Phi_{ij}-\min \Phi]\bigr)}
+{\sum_{ab}\exp\bigl(-[\Phi_{ab}-\min \Phi]\bigr)},
+\qquad \sum_{ij} p_{ij}=1 .
+\label{eq:grid}
+\end{equation}
+Failed grid points get $p_{ij}=0$. Note that \eqref{eq:grid} makes the
+scanned box the prior: the result is only meaningful if the posterior has
+decayed to negligible before the edges, which the panel checks and warns
+about.
+
+\subsection{Display 3 --- credible level}
+
+Each cell is labelled with the total probability mass of all cells at least
+as probable as it:
+\begin{equation}
+L_{ij} \;=\!\!\sum_{\{ab\,:\; p_{ab}\,\ge\, p_{ij}\}}\!\! p_{ab}
+\;\in\;(0,\,1].
+\label{eq:level}
+\end{equation}
+This is the smallest highest-posterior-density region that contains the
+cell. It runs from near $0$ at the most probable point to $1$ at the least,
+so contouring at $0.68$ and $0.95$ draws exactly the $68\,\%$ and $95\,\%$
+credible regions. Cells of equal density share one level, so a ring of
+equally probable cells is never split across a contour.
+
+This is the recommended view: it is readable everywhere, and its contours
+are credible regions by construction rather than by a threshold rule.
+
+\subsection{Display 4 --- posterior density}
+
+The same object before the cumulative step: $p_{ij}$ from \eqref{eq:grid}
+itself, the probability mass per grid cell. It is the primary quantity, and
+$L$ is a monotone function of it, so both produce identical contours. Its
+drawback is visual: a sharp posterior puts nearly every cell at effectively
+zero and only a few pixels light up. It is most useful when the posterior
+is broad.
+
+\subsection{Uncertainty reported in these modes}
+
+Instead of the F-test region used for displays 1 and 2, the interval comes
+from the marginal distributions
+\begin{equation}
+p^{(1)}_i = \sum_j p_{ij},
+\qquad
+p^{(2)}_j = \sum_i p_{ij},
+\end{equation}
+reported as the highest-density interval containing $95\,\%$ of the marginal
+mass. Marginalizing is the principled version of what the bounding box of a
+joint region approximates, and it is generally tighter.
+
+\section{Confidence intervals for displays 1 and 2}
+\label{sec:ftest}
+
+Displays 1 and 2 carry no noise model, so an interval cannot come from a
+posterior. It comes instead from the shape of the residual surface around
+its minimum, and the \textbf{CI method} dropdown offers two ways of turning
+that shape into a region. This section derives both, shows how they are
+related, and quantifies the difference --- which turns out to be negligible.
+
+\subsection{What is being tested}
+
+By construction $\SSE(\theta)\ge \SSE_{\min}$ everywhere. The question is
+how much worse than the best fit a parameter pair may be while remaining
+consistent with the data. Both methods answer it with a multiplicative
+threshold,
+\begin{equation}
+\SSE(\theta) \;\le\; \SSE_{\min}\,\bigl[1+\Delta\bigr]
+\qquad\Longleftrightarrow\qquad
+\RMSD(\theta) \;\le\; \RMSD_{\min}\sqrt{1+\Delta},
+\label{eq:thresh}
+\end{equation}
+and differ only in what they use for $\Delta$. The square root appears
+because RMSD is the square root of a mean of $\SSE$; the code applies the
+threshold in RMSD units directly.
+
+\subsection{F-test: the noise level is unknown}
+
+Since $\sigma$ is not known independently, it has to be estimated from the
+fit itself, as $\hat{\sigma}^2 = \SSE_{\min}/(N-p)$. The excess sum of
+squares is then compared against that estimate,
+\begin{equation}
+\frac{\bigl[\SSE(\theta)-\SSE_{\min}\bigr]/p}
+{\SSE_{\min}/(N-p)} \;\sim\; F_{p,\,N-p},
+\end{equation}
+which is exact for a linear model and asymptotically valid otherwise.
+Rearranging into the form of \eqref{eq:thresh},
+\begin{equation}
+\Delta_{F} \;=\; \frac{p}{N-p}\,F_{p,\,N-p}(\text{conf}).
+\label{eq:ftest}
+\end{equation}
+The essential feature is the \emph{denominator} degrees of freedom $N-p$:
+they encode the fact that $\hat{\sigma}$ is itself uncertain, having been
+estimated from the same finite dataset. This is why the F-test is the
+appropriate choice when the noise level is not known independently, which
+is the situation here.
+
+\subsection{Delta chi-square: the noise level is treated as known}
+
+If $\sigma$ really were known, the excess sum of squares would be
+$\chi^2$-distributed and the region would be
+$\SSE(\theta)-\SSE_{\min}\le \sigma^2\chi^2_p(\text{conf})$. Substituting
+the fit's own variance estimate $\hat{\sigma}^2=\SSE_{\min}/N$ in place of
+$\sigma^2$ gives
+\begin{equation}
+\Delta_{\chi^2} \;=\; \frac{\chi^2_p(\text{conf})}{N}.
+\label{eq:chi2}
+\end{equation}
+The substitution is the weak point: $\hat{\sigma}$ is treated as if it were
+exact, so the uncertainty in the noise estimate is not propagated. The
+result is therefore optimistic --- the region is always at least slightly
+too small.
+
+\subsection{How the two are related}
+
+The connection is the limiting behaviour of the $F$ distribution. As the
+denominator degrees of freedom grow,
+\begin{equation}
+p\,F_{p,\,\nu}(\text{conf}) \;\xrightarrow[\nu\to\infty]{}\; \chi^2_p(\text{conf}),
+\end{equation}
+which for $p=2$ and $\text{conf}=0.95$ reads
+$2\times 2.9958 = 5.9915 = \chi^2_2(0.95)$. Substituting this limit into
+\eqref{eq:ftest} gives $\Delta_{F}\approx \chi^2_p/(N-p)$, so the two
+prescriptions differ in two small ways:
+\begin{equation}
+\Delta_{F}-\Delta_{\chi^2}
+\;\approx\;
+\chi^2_p\left(\frac{1}{N-p}-\frac{1}{N}\right)
+\;=\;\frac{p\,\chi^2_p}{N(N-p)}
+\;=\;\mathcal{O}\!\left(N^{-2}\right),
+\end{equation}
+plus the (also $\mathcal{O}(N^{-1})$) excess of $F_{p,\nu}$ over its own
+limit at finite $\nu$. Both corrections have the same sign, so
+\begin{equation}
+\Delta_{F} \;>\; \Delta_{\chi^2} \quad\text{always},
+\end{equation}
+and the F-test is invariably the more conservative of the two. They agree
+in the limit of infinite data.
+
+\subsection{How much this actually matters}
+
+For a residual surface that is locally quadratic, the half-width of the
+interval scales as $\sqrt{\Delta}$, so the ratio
+$\sqrt{\Delta_F/\Delta_{\chi^2}}$ is the factor by which choosing the
+F-test widens the reported interval. At $\text{conf}=0.95$, $p=2$:
+
+\begin{center}
+\begin{tabular}{rrrrrr}
+\hline
+$N$ & $F_{p,N-p}$ & $1+\Delta_F$ & $1+\Delta_{\chi^2}$
+& RMSD threshold (F / $\chi^2$) & width ratio \\
+\hline
+50      & 3.1907 & 1.132947 & 1.119829 & 1.064400 / 1.058220 & $1.053\times$ \\
+100     & 3.0892 & 1.063045 & 1.059915 & 1.031041 / 1.029522 & $1.026\times$ \\
+400     & 3.0184 & 1.015168 & 1.014979 & 1.007555 / 1.007461 & $1.006\times$ \\
+1000    & 3.0047 & 1.006022 & 1.005991 & 1.003006 / 1.002991 & $1.003\times$ \\
+2400    & 2.9995 & 1.002502 & 1.002496 & 1.001250 / 1.001247 & $1.001\times$ \\
+10000   & 2.9966 & 1.000599 & 1.000599 & 1.000300 / 1.000300 & $1.000\times$ \\
+\hline
+\end{tabular}
+\end{center}
+
+At the point counts this program actually works with --- a region of
+interest holds thousands of points --- the two methods differ by about one
+part in a thousand in the reported interval. That is far below the
+resolution of the scan grid, and well below the width of a single contour
+line on the map. The distinction only becomes visible below $N\approx 100$,
+which does not occur here.
+
+\subsection{What to worry about instead}
+
+The choice of test is swamped by two other effects.
+
+\textbf{The effective point count.} $N$ appears directly in both
+\eqref{eq:ftest} and \eqref{eq:chi2}, and the interval width scales roughly
+as $N^{-1/2}$. Using the oversampling divisor $F$ of
+Section \ref{sec:neff} at $\text{conf}=0.95$ and a raw $N=2400$:
+
+\begin{center}
+\begin{tabular}{rrr}
+\hline
+Oversampling $F$ & $N^{\text{eff}}$ & interval width, relative to $F=1$ \\
+\hline
+1  & 2400 & $1.00\times$ \\
+4  & 600  & $2.01\times$ \\
+16 & 150  & $4.06\times$ \\
+64 & 38   & $8.57\times$ \\
+\hline
+\end{tabular}
+\end{center}
+
+A realistic zero-fill setting changes the interval by a factor of several,
+against the one-part-in-a-thousand from the choice of test. Getting the
+effective point count roughly right matters some three orders of magnitude
+more than choosing between F and $\chi^2$.
+
+\textbf{The shared assumptions.} Both methods assume independent, Gaussian,
+zero-mean residuals, a correctly specified model, and a surface that is
+approximately quadratic near the minimum. Real spectra violate all three to
+some degree --- systematic error from orientation selection, blind spots and
+baseline artifacts is not noise, and magnitude spectra have Rayleigh- rather
+than Gaussian-distributed noise near the floor. Those violations affect the
+interval far more than the difference between \eqref{eq:ftest} and
+\eqref{eq:chi2}.
+
+\textbf{Practical recommendation.} Leave the setting on F-test. It is the
+correct one for an unknown noise level, it is the conservative one, and it
+costs nothing. Then spend the attention on the oversampling factor and on
+whether the residual maps show structure the model is failing to reproduce.
+
+\subsection{Relation to the posterior displays}
+
+The two frameworks are not in opposition. For a linear model with a
+Jeffreys prior on $\sigma$, the marginal posterior over the parameters is a
+multivariate $t$ distribution whose highest-density regions coincide exactly
+with the F-test confidence regions. Displays 3 and 4 are therefore the same
+statement as \eqref{eq:ftest} in the linear-Gaussian limit; where they
+differ in practice is that the posterior uses the actual shape of
+$\Phi(\theta)$ rather than assuming it is quadratic, and that it handles
+several datasets with separate unknown noise levels correctly, which the
+dataset-reweighted mean \eqref{eq:norm} only approximates.
+
+\section{Summary}
+
+\begin{center}
+\begin{tabular}{llll}
+\hline
+Display & Range & Units & Weighting of datasets \\
+\hline
+RMSD                & $(0,\infty)$ & experimental intensity & by absolute intensity \\
+Normalized RMSD     & $(0,1]$      & dimensionless          & equal (arithmetic) \\
+Credible level      & $(0,1]$      & probability mass       & inferred (logarithmic) \\
+Posterior density   & $(0,1]$      & mass per cell          & inferred (logarithmic) \\
+\hline
+\end{tabular}
+\end{center}
+
+\section{References}
+
+The last three displays have close analogues in the structural-biology and
+Bayesian-inference literature.
+
+\subsection*{Normalized RMSD}
+
+G. Cornilescu, J. L. Marquardt, M. Ottiger, A. Bax,
+\emph{Validation of protein structure from anisotropic carbonyl chemical
+shifts in a dilute liquid crystalline phase}, J. Am. Chem. Soc.
+\textbf{120}, 6836--6837 (1998). \\
+\texttt{doi:10.1021/ja9812610} \quad \texttt{https://doi.org/10.1021/ja9812610}
+
+Introduces the quality factor
+$Q=\mathrm{rms}(D_{\mathrm{obs}}-D_{\mathrm{calc}})/\mathrm{rms}(D_{\mathrm{obs}})$,
+algebraically the same construction as \eqref{eq:norm}: residual divided by
+the intrinsic scale of the data. Arrived at for the same reason --- the raw
+number is in arbitrary units and means nothing on its own.
+
+A. T. Br\"unger, \emph{Free R value: a novel statistical quantity for
+assessing the accuracy of crystal structures}, Nature \textbf{355},
+472--475 (1992). \\
+\texttt{doi:10.1038/355472a0} \quad \texttt{https://doi.org/10.1038/355472a0}
+
+The canonical treatment of normalized residual factors, and of why a fit
+statistic evaluated on the data used to fit it is optimistic. The
+cross-validation remedy transfers directly: hold out one $\tau$ value and
+test the parameters found from the others.
+
+\subsection*{Posterior probability (credible level and density)}
+
+G. L. Bretthorst, \emph{Bayesian Spectrum Analysis and Parameter
+Estimation}, Lecture Notes in Statistics \textbf{48}, Springer (1988). \\
+\texttt{doi:10.1007/978-1-4684-9399-3} \quad
+\texttt{https://doi.org/10.1007/978-1-4684-9399-3}
+
+The closest reference of all. Derives \eqref{eq:post} for spectral data:
+amplitude parameters that enter linearly are marginalized analytically, an
+unknown noise level is integrated out under a Jeffreys prior, and what
+remains is a posterior over the nonlinear parameters proportional to a
+negative power of the residual sum of squares. Equations \eqref{eq:amp} and
+\eqref{eq:post} are that scheme applied to a two-dimensional spectrum.
+
+E. T. Jaynes (ed. G. L. Bretthorst), \emph{Probability Theory: The Logic of
+Science}, Cambridge University Press (2003). \\
+\texttt{doi:10.1017/CBO9780511790423} \quad
+\texttt{https://doi.org/10.1017/CBO9780511790423}
+
+The foundational treatment of nuisance-parameter marginalization and of
+Jeffreys priors for scale parameters, which is what turns an unknown
+$\sigma_k$ into the exponent $-N_k/2$.
+
+W. Rieping, M. Habeck, M. Nilges, \emph{Inferential structure
+determination}, Science \textbf{309}, 303--306 (2005). \\
+\texttt{doi:10.1126/science.1110428} \quad
+\texttt{https://doi.org/10.1126/science.1110428}
+
+Applies exactly this idea to structure determination: rather than choosing
+weights for heterogeneous data by hand, treat the error scale of each data
+set as an unknown and marginalize it. This is the argument for why
+\eqref{eq:nlp} is preferable to \eqref{eq:norm} when combining datasets.
+
+M. Habeck, M. Nilges, W. Rieping, \emph{Replica-exchange Monte Carlo scheme
+for Bayesian data analysis}, Phys. Rev. Lett. \textbf{94}, 018105 (2005). \\
+\texttt{doi:10.1103/PhysRevLett.94.018105} \quad
+\texttt{https://doi.org/10.1103/PhysRevLett.94.018105}
+
+The sampling counterpart, for when a two-parameter grid is no longer
+enough; also discusses inferring the weight of each data source.
+
+\end{document}

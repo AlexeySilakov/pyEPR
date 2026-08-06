@@ -50,23 +50,28 @@ class SpinCtrlDoubleEditor(wxpg.PGEditor):
 
     def CreateControls(self, propGrid, prop, pos, size):
         self.propGrid = propGrid
-        
-        if propGrid.GetParent().__class__.__name__=='PropGridPanel':
-            self.parent = propGrid.GetParent() 
-        elif propGrid.GetParent().GetParent().GetParent().__class__.__name__=='PropGridPanel':
-            # the propgrid can be in a panel or in a splitwindow that has a parent that is PropGridPanel
-            self.parent = propGrid.GetParent().GetParent().GetParent()
-            #print('there')
-        else:
-            print('cannot find my biological parent')
-            return False
+
+        # The grid may sit directly on a PropGridPanel or a couple of levels
+        # down inside its splitter; walk up until one turns up. A grid that
+        # belongs to no PropGridPanel at all (e.g. the Data tab's file tree)
+        # is fine too -- edits are then routed back through the grid itself,
+        # see CommitValue below.
+        self.parent = None
+        win = propGrid.GetParent()
+        while win is not None:
+            if win.__class__.__name__ == 'PropGridPanel':
+                self.parent = win
+                break
+            win = win.GetParent()
         self.property = prop
 
         self.spin = wx.SpinCtrlDouble(propGrid,
                                       style=wx.TE_PROCESS_ENTER|wx.TE_CENTER|wx.SP_ARROW_KEYS)
-       
+
         self.spin.SetRange(-1e12, 1e12)
         inc = prop.GetAttribute(wxpg.PG_ATTR_SPINCTRL_STEP)
+        if inc is None:
+            inc = 0.001
         self.spin.SetIncrement(inc)
         self.spin.SetDigits(6)
         self.spin.SetValue(str(prop.GetValue()))
@@ -86,7 +91,10 @@ class SpinCtrlDoubleEditor(wxpg.PGEditor):
         
         self.spin.Bind(wx.EVT_TEXT, self.OnText)
         self.spin.Bind(wx.EVT_SPINCTRLDOUBLE, self.OnSpin)
-        self.spin.Bind(wx.EVT_TEXT_ENTER, self.OnTextEnter)
+        # Enter goes through theme.bind_spin_enter, not wx.EVT_TEXT_ENTER:
+        # inside a PropertyGrid the grid's own key handling swallows Return
+        # before the embedded text field ever emits that event.
+        theme.bind_spin_enter(self.spin, self.OnTextEnter)
         self.spin.Bind(wx.EVT_KILL_FOCUS, self.OnLostFocus)
         theme.theme_control(self.spin)
 
@@ -102,6 +110,20 @@ class SpinCtrlDoubleEditor(wxpg.PGEditor):
             #print('kill me')
         event.Skip()
         
+    def CommitValue(self, val, event=None):
+        """Store `val` on the property and tell whoever owns this grid.
+
+        A grid inside a PropGridPanel is notified directly, since that panel
+        also mirrors the value into its own `parameters` dict. A bare
+        PropertyGrid has no such owner, so the edit is pushed through the
+        grid itself instead, which is what raises the ordinary
+        wxpg.EVT_PG_CHANGED its handlers are already bound to."""
+        if self.parent is not None:
+            self.property.SetValue(val)
+            self.parent.OnValueChanged(event, self.property)
+        else:
+            self.propGrid.ChangePropertyValue(self.property, val)
+
     def OnKeyDown(self, event):
         key_code = event.GetKeyCode()
         current_value = self.spin.GetValue()
@@ -116,21 +138,16 @@ class SpinCtrlDoubleEditor(wxpg.PGEditor):
         if key_code == wx.WXK_UP:
             new_value = current_float + increment
             self.spin.SetValue(str(new_value))
-            self.property.SetValue(new_value)
-            self.parent.OnValueChanged(event, self.property)
+            self.CommitValue(new_value, event)
         elif key_code == wx.WXK_DOWN:
             new_value = current_float - increment
             self.spin.SetValue(str(new_value))
-            self.property.SetValue(new_value)
-            self.parent.OnValueChanged(event, self.property)
+            self.CommitValue(new_value, event)
         else:
             event.Skip()
 
     def OnSpin(self, event):
-        val = float(self.spin.GetValue())
-        prop = self.property
-        prop.SetValue(val)
-        self.parent.OnValueChanged(event, prop)
+        self.CommitValue(float(self.spin.GetValue()), event)
         #event.Skip()
 
     def OnText(self, event):
@@ -145,17 +162,16 @@ class SpinCtrlDoubleEditor(wxpg.PGEditor):
         prop.SetValue(val)
         #self.parent.OnValueChanged(event, prop)
         event.Skip()
-    def OnTextEnter(self, event):
+    def OnTextEnter(self, event=None):
         txt = self.spin.GetValue()
         try:
             val = float(txt)
         except ValueError:
             return   # allow user to keep typing incomplete values
-        prop = self.property
-        prop.SetValue(val)
-        self.parent.OnValueChanged(event, prop)
-        event.Skip()
-        
+        self.CommitValue(val, event)
+        if event is not None:
+            event.Skip()
+
     def ShowStepMenu(self, evt):
         menu = wx.Menu()
         STEP_VALUES = [

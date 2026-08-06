@@ -97,7 +97,6 @@ import wx.propgrid as wxpg
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_wxagg import FigureCanvasWxAgg
-from matplotlib.backends.backend_wxagg import NavigationToolbar2WxAgg
 import matplotlib.cm as cm
 
 from scipy.interpolate import RegularGridInterpolator, RectBivariateSpline
@@ -118,519 +117,6 @@ class _SilentSimError(Exception):
     pass
 
 
-def _silent_error_func(message):
-    raise _SilentSimError(message)
-
-
-# --------------------------------------------------------------------------- #
-# Sys-dict flattening helpers
-# --------------------------------------------------------------------------- #
-def flatten_sys_params(sys_dict):
-    """
-    Flatten a Sys parameter dict (as stored in PropGridPanel.parameters,
-    i.e. {'spin(1)': {...}, 'nuc(1)': {...}, ...}) into scannable scalar
-    leaves. Only plain float/int values and elements of 1-D np.ndarray
-    values are included; bools, strings and [value, choices] entries
-    (e.g. 'Nucs', 'useFor') are skipped since a numeric grid scan over
-    them isn't meaningful. The 'functions' entry (Function Modifiers state)
-    is a dict too but contains no float/int/ndarray leaves at this level,
-    so it's naturally skipped here -- see flatten_func_vars() for scanning
-    the custom parameters (r, a, ...) defined there instead.
-    """
-    out = []
-    for cat, sub in sys_dict.items():
-        if not isinstance(sub, dict):
-            continue
-        for key, val in sub.items():
-            if isinstance(val, bool):
-                continue
-            if isinstance(val, (int, float, np.floating, np.integer)):
-                out.append({'kind': 'sysleaf', 'cat': cat, 'key': key, 'idx': None, 'value': float(val)})
-            elif isinstance(val, np.ndarray) and val.ndim == 1:
-                for ii in range(val.size):
-                    out.append({'kind': 'sysleaf', 'cat': cat, 'key': key, 'idx': ii, 'value': float(val[ii])})
-    return out
-
-
-# Qualified label used by both this file and classFunctionModPG.py to name a
-# property leaf inside a function's expression, e.g. "nuc(1).A(1)".
-def qualified_label(p):
-    return f"{p['cat']}.{param_leaf_label(p)}"
-
-
-def flatten_func_vars(variable_values):
-    """
-    Flatten a {name: value} dict of Function-Modifier custom parameters
-    (e.g. {'r': 3.0, 'a': 1.5}) into scannable leaves, grouped under a
-    pseudo-category so they show up as their own section in the grid-search
-    parameter picker.
-    """
-    out = []
-    for name, val in variable_values.items():
-        out.append({'kind': 'funcvar', 'cat': 'Functions', 'key': name, 'idx': None, 'value': float(val)})
-    return out
-
-
-def param_name(p):
-    kind = p.get('kind', 'sysleaf')
-    return f"{kind}:{p['cat']}:{p['key']}:{-1 if p['idx'] is None else p['idx']}"
-
-
-def param_leaf_label(p):
-    return p['key'] if p['idx'] is None else f"{p['key']}({p['idx'] + 1})"
-
-
-def param_full_label(p):
-    return f"{p['cat']} {param_leaf_label(p)}"
-
-
-def label_to_syspath_map(sys_dict):
-    """qualified 'cat.leaf' label (e.g. 'nuc(1).A(1)') -> sysleaf param
-    descriptor, for patching Function-Modifier results back into a plain
-    sys_dict via apply_param_value()."""
-    return {qualified_label(p): p for p in flatten_sys_params(sys_dict)}
-
-
-def apply_label_value(sys_dict, syspath_map, label, value):
-    p = syspath_map.get(label)
-    if p is None:
-        return False
-    apply_param_value(sys_dict, p, value)
-    return True
-
-
-def read_param_value(sys_dict, param):
-    """Current value of a scannable parameter in `sys_dict`, or None if it
-    is no longer there (a nucleus removed, a Function-Modifier variable
-    renamed, ...). The read counterpart of apply_param_value, but it also
-    handles 'funcvar' leaves, which live under 'functions'.'var' rather
-    than as an ordinary Sys leaf."""
-    try:
-        if param.get('kind', 'sysleaf') == 'funcvar':
-            fdict = sys_dict.get('functions')
-            if not isinstance(fdict, dict):
-                return None
-            variables = fdict.get('var')
-            if not isinstance(variables, dict) or param['key'] not in variables:
-                return None
-            return float(variables[param['key']])
-
-        sub = sys_dict.get(param['cat'])
-        if not isinstance(sub, dict) or param['key'] not in sub:
-            return None
-        val = sub[param['key']]
-        if param['idx'] is None:
-            return float(val)
-        arr = np.asarray(val)
-        if arr.ndim != 1 or param['idx'] >= arr.size:
-            return None
-        return float(arr[param['idx']])
-    except (TypeError, ValueError):
-        return None
-
-
-def apply_param_value(sys_dict, param, value):
-    if param.get('kind', 'sysleaf') != 'sysleaf':
-        raise ValueError(f"apply_param_value only applies to 'sysleaf' params, got {param}")
-    sub = sys_dict[param['cat']]
-    if param['idx'] is None:
-        sub[param['key']] = float(value)
-    else:
-        arr = sub[param['key']]
-        if not isinstance(arr, np.ndarray):
-            arr = np.array(arr, dtype=float)
-            sub[param['key']] = arr
-        arr[param['idx']] = float(value)
-
-
-# --------------------------------------------------------------------------- #
-# Fitness (pooled, amplitude-scaled RMSD)
-# --------------------------------------------------------------------------- #
-def dataset_roi(dd):
-    """Extract one dataset's experimental spectrum restricted to its
-    [fmin, fmax] x [fmin, fmax] region, together with the frequency axes
-    of that region. Returns a dict with keys 'exp', 'x', 'y', 'label', or
-    None when the dataset has no usable frequency-domain data or the
-    region selects nothing.
-
-    Split out of _dataset_sse so a scan can build this once per dataset up
-    front instead of re-slicing the same unchanging experimental data at
-    every grid point, and so the region's size is known before the scan
-    starts (needed to predict how much memory keeping every simulation
-    would cost -- see estimate_store_bytes)."""
-    if dd['isfft']:
-        raw = np.asarray(dd['data'])
-        expdata = np.real(raw[:, :, 0]) if raw.ndim > 2 else np.real(raw)
-        expX = np.asarray(dd['ax']['x'])
-        expY = np.asarray(dd['ax']['y'])
-    else:
-        if not dd['fftactual'] or dd['fftdata'] is None:
-            return None
-        expdata = dd['fftdata']
-        expX = np.asarray(dd['fftax']['x'])
-        expY = np.asarray(dd['fftax']['y'])
-
-    fmin, fmax = dd['fmin'], dd['fmax']
-    xsel = (expX >= fmin) & (expX <= fmax)
-    ysel = (expY >= fmin) & (expY <= fmax)
-    if not xsel.any() or not ysel.any():
-        return None
-
-    # Array axis 0 tracks the 'x' coordinate array and axis 1 tracks 'y'
-    # throughout this codebase (see MainFrame.update_FFT, which builds
-    # fftX from fftData.shape[0] and fftY from fftData.shape[1]) -- index
-    # accordingly rather than assuming the usual imshow row=y convention.
-    exp_roi = expdata[np.ix_(xsel, ysel)]
-    # 'null' is this dataset's no-simulation sum of squares -- the residual
-    # you are left with at c = 0. Since the amplitude fit clamps c to be
-    # non-negative it can never do worse than that, so SSE/null is bounded
-    # in (0, 1] and is what the normalized RMSD divides by. 'null_rms' is
-    # the same thing per point (the region's root-mean-square intensity),
-    # used to put residual *maps* into the same normalized units.
-    null = float(np.sum(exp_roi ** 2))
-    return {'exp': exp_roi,
-            'x': expX[xsel],
-            'y': expY[ysel],
-            'null': null,
-            'null_rms': float(np.sqrt(null / exp_roi.size)) if exp_roi.size else 0.0,
-            'label': dd.get('title', dd.get('fname', '?')),
-            'field': dd.get('field')}
-
-
-def _dataset_sse(dd, simdata, simX, simY, roi=None, want_sim=False):
-    """Amplitude-scale simdata to dd's experimental data (minimizing SSE
-    over the [fmin, fmax] region) and return (sum-of-squared-residuals,
-    n_points, scaled_sim) for this one dataset.
-
-    roi: a precomputed dataset_roi(dd) result, to avoid re-slicing the
-    experimental data at every grid point; computed here when omitted.
-
-    want_sim: when True the third element is the simulation interpolated
-    onto the experimental region *and already multiplied by the best-fit
-    amplitude* c, i.e. exactly the array the residual was formed from, so
-    a stored copy can be turned back into a residual map later by
-    subtracting it from the same region's experimental data. It is None
-    otherwise -- callers that only need the fitness number keep the old
-    memory profile, since the scaled array is a temporary either way."""
-    roi = dataset_roi(dd) if roi is None else roi
-    if roi is None:
-        return 0.0, 0, None
-
-    exp_roi, sub_x, sub_y = roi['exp'], roi['x'], roi['y']
-
-    interp = RegularGridInterpolator((simX, simY), simdata,
-                                      bounds_error=False, fill_value=0.0)
-    gx, gy = np.meshgrid(sub_x, sub_y, indexing='ij')
-    sim_on_exp = interp(np.stack([gx.ravel(), gy.ravel()], axis=-1)).reshape(gx.shape)
-
-    denom = np.sum(sim_on_exp ** 2)
-    c = max(np.sum(exp_roi * sim_on_exp) / denom, 0.0) if denom > 1e-30 else 0.0
-    scaled = c * sim_on_exp
-    resid = exp_roi - scaled
-    return float(np.sum(resid ** 2)), int(resid.size), (scaled if want_sim else None)
-
-
-# Every stored simulation is one 64-bit float per experimental point in the
-# region of interest (the interpolator output is real -- HYSCOREsim.Spectrum
-# is an np.abs magnitude spectrum).
-STORE_BYTES_PER_POINT = 8
-# Above this predicted total the user is asked whether to keep storing.
-STORE_WARN_BYTES = 0.5 * 1024 ** 3
-
-
-def estimate_store_bytes(roi_cache, n1, n2):
-    """Predicted memory cost of keeping every grid point's interpolated
-    simulation, for a scan of n1 x n2 points over the datasets described
-    by roi_cache (a list of dataset_roi() results, None entries allowed)."""
-    per_point = sum(roi['exp'].size for roi in roi_cache if roi is not None)
-    return per_point * n1 * n2 * STORE_BYTES_PER_POINT
-
-
-def format_bytes(nbytes):
-    for unit in ('bytes', 'kilobytes', 'megabytes', 'gigabytes'):
-        if nbytes < 1024 or unit == 'gigabytes':
-            return f"{nbytes:.0f} {unit}" if unit == 'bytes' else f"{nbytes:.2f} {unit}"
-        nbytes /= 1024.0
-
-
-def _log_gridpoint_error(error_log, where, exc):
-    """Print each distinct failure once (grid scans can hit the same
-    condition, e.g. 'no resonances', at hundreds of points; printing every
-    occurrence would just flood the console) and keep a count for the
-    end-of-scan summary shown to the user."""
-    msg = f"{where}: {type(exc).__name__}: {exc}"
-    if error_log is None:
-        return
-    if msg not in error_log:
-        print(f"[GridSearch] {msg}")
-        error_log[msg] = 0
-    error_log[msg] += 1
-
-
-def run_gridpoint(hs, Sys, exp_template, opt_template, active_data, error_log=None,
-                   roi_cache=None, sim_store=None, stats_out=None):
-    """Run one HYSCORE simulation per active dataset for the given Sys and
-    return (pooled RMSD, pooled N, normalized RMSD) over all datasets
-    (NaN, 0, NaN if none succeeded). N (the total number of pooled ROI
-    residual points) is returned alongside the RMSD so confidence-interval
-    estimation can later convert RMSD back to a sum-of-squares without
-    re-running anything.
-
-    The normalized RMSD scores each dataset against its own null model
-    (SSE_k / null_k, i.e. how much of that dataset's power the simulation
-    failed to explain -- see dataset_roi) and then takes the N-weighted
-    mean of those fractions before the square root. Normalizing per
-    dataset rather than pooling the sums stops one bright dataset from
-    dominating a multi-dataset fit, at the cost of being a genuinely
-    different statistic: with more than one dataset its landscape (and so
-    its best-fit point) can differ from the raw pooled RMSD's. With a
-    single dataset it is exactly the raw RMSD divided by a constant.
-
-    Failures are not fatal to the scan (a single bad grid point/dataset
-    combination, e.g. "no resonances", shouldn't abort hundreds of other
-    points) but are logged via _log_gridpoint_error so they are never
-    silently invisible.
-
-    roi_cache: optional list, parallel to active_data, of precomputed
-    dataset_roi() results (None entries for unusable datasets).
-
-    sim_store: optional list, also parallel to active_data, into which
-    each dataset's amplitude-scaled interpolated simulation is written by
-    index -- writing by index rather than appending keeps the slots
-    aligned with active_data even when some datasets fail and are skipped.
-    Left as None (i.e. not requested) this costs nothing.
-
-    stats_out: optional list, parallel to active_data, filled with each
-    dataset's (SSE, N) pair. Two floats per dataset per grid point, which
-    is nothing next to the simulations themselves, and it is what the
-    posterior needs -- the pooled RMSD alone cannot reconstruct the
-    per-dataset terms that noise-level marginalization requires."""
-    hs.Sys = Sys
-    if roi_cache is None:
-        roi_cache = [dataset_roi(dd) for dd in active_data]
-    try:
-        hs.preCompute()
-    except Exception as e:
-        _log_gridpoint_error(error_log, "preCompute", e)
-        return np.nan, 0, np.nan
-
-    total_sse = 0.0
-    total_n = 0
-    norm_acc = 0.0    # sum of N_k * (SSE_k / null_k)
-    norm_n = 0        # sum of N_k over datasets that could be normalized
-    for k, dd in enumerate(active_data):
-        Exp = expPar()
-        Exp.setDict(copy.deepcopy(exp_template))
-        if Exp.tau < 0:
-            Exp.tau = dd['tau']
-        if Exp.Field < 0:
-            Exp.Field = dd['field']
-        if Exp.mwFreq < 0:
-            Exp.mwFreq = dd['freq']
-        if Exp.MaxFreq < 0:
-            Exp.MaxFreq = dd['fmax']
-        if Exp.nPoints < 0:
-            Exp.nPoints = (len(dd['fftax']['x']) if not dd['isfft']
-                            else len(dd['ax']['x']))
-
-        Opt = optHYSCORE()
-        Opt.setFromCtrl(copy.deepcopy(opt_template))
-        if dd.get('orisel') is not None:
-            Opt.OriSelInp = dd['orisel']
-
-        hs.Exp = Exp
-        hs.Opt = Opt
-        try:
-            hs.reRun()
-        except Exception as e:
-            _log_gridpoint_error(error_log, f"reRun ({dd.get('title', dd.get('fname', '?'))})", e)
-            continue
-        if hs.Spectrum is None:
-            continue
-
-        roi = roi_cache[k]
-        sse, n, scaled = _dataset_sse(dd, hs.Spectrum, hs.X, hs.Y, roi=roi,
-                                       want_sim=sim_store is not None)
-        if n > 0:
-            total_sse += sse
-            total_n += n
-            if sim_store is not None:
-                sim_store[k] = scaled
-            if stats_out is not None:
-                stats_out[k] = (sse, n)
-            # A region that is identically zero has no power to explain and
-            # cannot be normalized; it still counts towards the raw RMSD.
-            if roi is not None and roi['null'] > 0.0:
-                norm_acc += n * (sse / roi['null'])
-                norm_n += n
-
-    if total_n == 0:
-        return np.nan, 0, np.nan
-    rmsd_norm = float(np.sqrt(norm_acc / norm_n)) if norm_n > 0 else np.nan
-    return float(np.sqrt(total_sse / total_n)), total_n, rmsd_norm
-
-
-def apply_functions_to_sys_dict(sys_dict, func_rows, variable_values, error_log=None):
-    """
-    If Function Modifiers are defined (func_rows non-empty), evaluate them
-    -- using sys_functions.evaluate_functions(), the same UI-free engine
-    classFunctionModPG.py uses -- and patch the results into `sys_dict` in
-    place, resolving any "other property" references directly against
-    `sys_dict` itself (so e.g. a formula referencing "spin(1).S" picks up
-    whatever value a scanned sysleaf parameter already patched into
-    sys_dict for this grid point).
-
-    Returns True on success. Returns False (sys_dict left only partially
-    patched) if any row failed to evaluate -- callers should treat that
-    grid point as a failure (NaN) rather than silently simulating with
-    stale/wrong values for the properties that were supposed to be driven.
-    """
-    if not func_rows:
-        return True
-
-    syspath_map = label_to_syspath_map(sys_dict)
-    known_labels = list(syspath_map.keys())
-
-    def lookup(label):
-        p = syspath_map.get(label)
-        if p is None:
-            raise sysfun.UnresolvedReference(label)
-        sub = sys_dict[p['cat']]
-        return float(sub[p['key']]) if p['idx'] is None else float(sub[p['key']][p['idx']])
-
-    result = sysfun.evaluate_functions(func_rows, variable_values, lookup, known_labels=known_labels)
-
-    if result['errors']:
-        for idx, msg in result['errors'].items():
-            lbl, expr = func_rows[idx]
-            _log_gridpoint_error(error_log, f'function "{lbl} = {expr}"', RuntimeError(msg))
-        return False
-
-    for label, value in result['label_values'].items():
-        apply_label_value(sys_dict, syspath_map, label, value)
-    return True
-
-
-# --------------------------------------------------------------------------- #
-# Interpolation of the (coarse) scanned grid, and confidence intervals
-# derived from the interpolated surface.
-# --------------------------------------------------------------------------- #
-def _interpolate_grid(method, grid1, grid2, results, n_out=160):
-    """Interpolate a (possibly NaN-containing) coarse RMSD grid onto a
-    finer regular grid, for a smoother heatmap and for locating the
-    minimum/confidence contours more precisely than the coarse sampling
-    allows. Returns (fine1, fine2, fine_results, used_method) or None if
-    there is no finite data at all.
-
-    NaN entries (grid points where every dataset's simulation failed) are
-    replaced with a value worse than the worst finite point before
-    interpolating -- treating a failed point as "confirmed bad fit" rather
-    than "unknown" keeps the interpolators (which don't accept NaN) well
-    defined without silently ignoring the failure. Bilinear interpolation
-    of a sentinel value stays safely bounded to its local grid cell, but a
-    global bicubic spline does not -- a single sentinel outlier can ring
-    across the *entire* surface and fabricate a spurious dip well below
-    every real sampled value (verified: on an 11x6 test grid, one bad
-    point turned a true minimum of 0 into an interpolated minimum of -24).
-    So 'cubic' silently falls back to 'linear' whenever the coarse grid
-    contains any failed point at all, not only when an axis is too short.
-
-    method='cubic' uses a bicubic spline (RectBivariateSpline, kx=ky=3):
-    smooth and best for locating the minimum/contours when every grid
-    point succeeded, but needs >=4 points along each scanned axis and can
-    still overshoot between very noisy (but all-finite) samples.
-    """
-    finite = results[np.isfinite(results)]
-    if finite.size == 0:
-        return None
-    has_failures = finite.size < results.size
-    sentinel = float(finite.max()) * 2.0 + 1e-9
-    filled = np.where(np.isfinite(results), results, sentinel)
-
-    n1, n2 = len(grid1), len(grid2)
-    fine1 = np.linspace(grid1[0], grid1[-1], max(n_out, n1))
-    fine2 = np.linspace(grid2[0], grid2[-1], max(n_out, n2))
-
-    used_method = method
-    if method == 'cubic' and n1 >= 4 and n2 >= 4 and not has_failures:
-        spline = RectBivariateSpline(grid1, grid2, filled, kx=3, ky=3)
-        fine_vals = spline(fine1, fine2)
-    else:
-        used_method = 'linear'
-        interp = RegularGridInterpolator((grid1, grid2), filled, method='linear',
-                                          bounds_error=False, fill_value=None)
-        g1, g2 = np.meshgrid(fine1, fine2, indexing='ij')
-        fine_vals = interp(np.stack([g1.ravel(), g2.ravel()], axis=-1)).reshape(g1.shape)
-    return fine1, fine2, fine_vals, used_method
-
-
-def _rmsd_threshold_factor(method, conf, N, p=2):
-    """sqrt of the SSE-inflation factor that bounds the `conf` (e.g. 0.68,
-    0.95) confidence region: any grid point with rmsd <= rmsd_min*factor
-    lies inside it. p is the number of jointly-scanned parameters (always
-    2 here).
-
-    'fstat' (recommended): Draper & Smith's F-test region for nonlinear
-    least squares when the noise variance isn't independently known --
-    SSE(theta) <= SSE_min * [1 + (p/(N-p))*F_p,(N-p)(conf)]. This is what
-    the "F-test (unknown noise)" UI option uses.
-
-    'chi2': textbook Delta-chi^2 = chi2.ppf(conf, df=p), but since there is
-    no independently calibrated noise level for these spectra either, the
-    fit's own rmsd_min is (ab)used as sigma -- which makes chi^2_min equal
-    to N by construction and gives SSE(theta) <= SSE_min*(1 + chi2/N). This
-    is simpler but under-corrects for finite N, so it tends to be more
-    optimistic (narrower) than the F-test region; the two converge as
-    N -> infinity.
-    """
-    if N is None or N <= p:
-        return None
-    if method == 'fstat':
-        Fval = stats.f.ppf(conf, p, N - p)
-        factor = 1.0 + (p / (N - p)) * Fval
-    else:
-        chi2val = stats.chi2.ppf(conf, df=p)
-        factor = 1.0 + chi2val / N
-    return float(np.sqrt(factor))
-
-
-def _axis_confidence_bounds(axis_vals, profile, thresh):
-    """Where a 1D profile (the interpolated surface minimized over the
-    *other* scanned axis, so profile[i] = min_j fine_vals[i, j] or
-    min_i fine_vals[i, j]) first drops to/below `thresh` and last rises
-    back above it -- i.e. the projection of the 2D confidence region onto
-    this axis. The crossing points are linearly interpolated between the
-    bracketing samples rather than snapped to the nearest one, so the
-    reported interval responds continuously to small changes in `thresh`
-    (e.g. from switching CI method) instead of only changing once the
-    threshold crosses an entire fine-grid cell -- at typical N the F-test
-    vs. chi-square factors can differ by 10-25% while still landing in the
-    same grid cell, which made the two methods look identical otherwise.
-    Returns (lo, hi) or None if the profile never reaches thresh.
-    """
-    below = profile <= thresh
-    if not np.any(below):
-        return None
-    idx = np.where(below)[0]
-    i0, i1 = int(idx[0]), int(idx[-1])
-
-    if i0 == 0:
-        lo = axis_vals[0]
-    else:
-        x0, x1 = axis_vals[i0 - 1], axis_vals[i0]
-        y0, y1 = profile[i0 - 1], profile[i0]
-        lo = x1 if y1 == y0 else x0 + (thresh - y0) * (x1 - x0) / (y1 - y0)
-
-    if i1 == len(axis_vals) - 1:
-        hi = axis_vals[-1]
-    else:
-        x0, x1 = axis_vals[i1], axis_vals[i1 + 1]
-        y0, y1 = profile[i1], profile[i1 + 1]
-        hi = x0 if y1 == y0 else x0 + (thresh - y0) * (x1 - x0) / (y1 - y0)
-
-    return float(lo), float(hi)
-
-
 # --------------------------------------------------------------------------- #
 # Heatmap display panel
 # --------------------------------------------------------------------------- #
@@ -649,13 +135,6 @@ class HeatmapPanel(wx.Panel):
         # self.ax.set_facecolor(
         #     theme.theme_colors()["ctrl_bg"]
         # )
-
-
-
-
-
-
-
         # figure.colorbar(im, ax=self.ax) shrinks self.ax's position to make
         # room for the colorbar, and that shrink sticks around after
         # ax.clear() (clear() wipes content, not geometry) -- so redrawing
@@ -665,7 +144,7 @@ class HeatmapPanel(wx.Panel):
         self._ax_home_position = self.ax.get_position().frozen()
         theme.style_figure(self.figure, [self.ax])
         self.canvas = FigureCanvasWxAgg(self, -1, self.figure)
-        self.toolbar = NavigationToolbar2WxAgg(self.canvas)
+        self.toolbar = theme.ThemedNavigationToolbar(self.canvas)
         self.toolbar.Realize()
 
         sizer = wx.BoxSizer(wx.VERTICAL)
@@ -939,152 +418,6 @@ class HeatmapPanel(wx.Panel):
 
 
 # --------------------------------------------------------------------------- #
-# Posterior probability over the scanned grid
-# --------------------------------------------------------------------------- #
-# Display statistics offered by the "Display:" pulldown, in menu order.
-DISPLAY_RMSD = 0
-DISPLAY_NORMALIZED = 1
-DISPLAY_CREDIBLE = 2
-DISPLAY_DENSITY = 3
-DISPLAY_LABELS = ["RMSD", "Normalized RMSD",
-                  "Probability (credible level)", "Probability (density)"]
-DISPLAY_VALUE_LABELS = ["RMSD", "Normalized RMSD",
-                        "Credible level", "Posterior density"]
-PROBABILITY_MODES = (DISPLAY_CREDIBLE, DISPLAY_DENSITY)
-
-# Fixed full scale for the residual maps: +-2 is twice a dataset's typical
-# experimental intensity, since residual maps are always drawn normalized
-# (they are a display, not the statistic -- see _render_residuals). Fixed
-# rather than autoscaled so maps stay comparable between datasets and
-# between grid points.
-RESIDUAL_SCALE_MIN = -2.0
-RESIDUAL_SCALE_MAX = 2.0
-
-
-
-def neg_log_posterior(results_sse, results_nk, divisor=1.0):
-    """Negative log posterior (up to an additive constant) on the coarse
-    grid, from the per-dataset sums of squared residuals.
-
-    Assuming Gaussian residuals with a noise level that is *unknown and
-    separate for each dataset*, and integrating each of those unknown
-    levels out under the usual scale-invariant prior, the posterior over
-    the scanned parameters comes out as a product of per-dataset terms,
-
-        p(theta) ~ prod_k SSE_k(theta) ** (-N_k/2)
-
-    so the quantity to minimize is sum_k (N_k/2)*log SSE_k. Two things
-    follow that are worth knowing. First, it is automatically invariant to
-    each dataset's overall brightness: rescaling a dataset changes
-    log SSE_k by a constant, which shifts the whole surface without moving
-    anything -- so unlike the fitness map, this does not care whether the
-    RMSD was normalized. Second, it is the *logarithm* of each dataset's
-    residual that gets averaged, not the residual itself, which is what
-    makes the noise-level marginalization show up as a plain reweighting.
-
-    divisor: how many raw points make up one independent one. Adjacent
-    points in a zero-filled/apodized spectrum are not independent, and N
-    sits in an exponent here, so overstating it drives the posterior
-    towards a delta function. Dividing N_k by this before use is the
-    crude but visible correction.
-
-    Returns a (n1, n2) array, offset so its minimum is 0, with NaN where
-    no dataset produced a usable residual -- or None if that is everywhere.
-    """
-    sse = np.asarray(results_sse, dtype=float)
-    nk = np.asarray(results_nk, dtype=float)
-    div = max(float(divisor), 1e-9)
-
-    usable = np.isfinite(sse) & (nk > 0)
-    # A dataset that fits perfectly would send log SSE to -inf; floor it
-    # rather than dropping the dataset, which would silently change the
-    # weighting at that one grid point.
-    safe = np.where(usable & (sse > 0), sse, 1.0)
-    safe = np.maximum(safe, 1e-300)
-
-    contrib = np.where(usable, (nk / (2.0 * div)) * np.log(safe), 0.0)
-    any_ok = usable.any(axis=2)
-    if not any_ok.any():
-        return None
-    nlp = np.where(any_ok, contrib.sum(axis=2), np.nan)
-    return nlp - np.nanmin(nlp)
-
-
-def posterior_grid(nlp):
-    """exp(-nlp) normalized to sum to 1 over the grid. Failed points get
-    exactly zero probability. Returns None if nothing is finite.
-
-    Note this makes the scanned box the prior: the result is only
-    meaningful if the posterior has decayed to negligible before the edges,
-    which is worth checking by eye on the map itself."""
-    nlp = np.asarray(nlp, dtype=float)
-    good = np.isfinite(nlp)
-    if not good.any():
-        return None
-    p = np.zeros(nlp.shape, dtype=float)
-    p[good] = np.exp(-(nlp[good] - nlp[good].min()))
-    total = p.sum()
-    if not np.isfinite(total) or total <= 0:
-        return None
-    return p / total
-
-
-def _sorted_levels(p):
-    """(densities sorted high to low, credible level of each). Cells of
-    equal density share one level -- the cumulative mass through the end of
-    their tied block. Without that, an arbitrary sort order splits a ring of
-    equal-probability cells across the contour, and the credible-level and
-    density displays disagree about where the boundary is."""
-    flat = np.asarray(p, dtype=float).ravel()
-    order = np.argsort(flat)[::-1]
-    s = flat[order]
-    cum = np.cumsum(s)
-    # index of the last cell in each run of equal density
-    last = np.searchsorted(-s, -s, side='right') - 1
-    return order, s, cum[last]
-
-
-def credible_level_map(p):
-    """Label every cell with the smallest credible region that contains
-    it: near 0 at the most probable cell, 1 at the least. Contouring the
-    result at 0.68 / 0.95 draws the credible regions, and cells of zero
-    probability (failed points) land at 1."""
-    order, _s, lvl_sorted = _sorted_levels(p)
-    level = np.empty(order.size, dtype=float)
-    level[order] = lvl_sorted
-    return level.reshape(np.shape(p))
-
-
-def density_threshold(p, conf):
-    """The density value whose credible level is `conf` -- i.e. the contour
-    level that draws the same boundary on a plot of the density as
-    contouring the credible-level map at `conf` does. Interpolated between
-    adjacent cells so the two displays agree to better than one cell."""
-    _order, s, lvl_sorted = _sorted_levels(p)
-    # lvl_sorted is non-decreasing, s non-increasing, so this reads off the
-    # density at which the credible level passes conf.
-    return float(np.interp(conf, lvl_sorted, s))
-
-
-def marginal_interval(axis_vals, marg, conf):
-    """Highest-density interval of a 1-D marginal, returned as the span of
-    the selected cells. As with the existing confidence bounds, a
-    multimodal marginal is reported as the range that brackets every
-    included mode rather than as disjoint pieces -- conservative, and
-    consistent with what the F-test path reports."""
-    m = np.asarray(marg, dtype=float)
-    total = m.sum()
-    if not np.isfinite(total) or total <= 0:
-        return None
-    m = m / total
-    order = np.argsort(m)[::-1]
-    cum = np.cumsum(m[order])
-    k = min(int(np.searchsorted(cum, conf)) + 1, m.size)
-    sel = np.sort(order[:k])
-    return float(axis_vals[sel[0]]), float(axis_vals[sel[-1]])
-
-
-# --------------------------------------------------------------------------- #
 # Residual maps (one per active dataset, for a single grid point)
 # --------------------------------------------------------------------------- #
 class ContourSettingsDialog(wx.Dialog):
@@ -1106,10 +439,14 @@ class ContourSettingsDialog(wx.Dialog):
         self.colour = wx.ColourPickerCtrl(self, colour=wx.Colour(color))
         self.levels = wx.SpinCtrl(self, min=1, max=40, initial=int(levels))
         self.width = wx.SpinCtrlDouble(self, min=0.1, max=6.0, inc=0.1,
-                                        initial=float(width))
+                                        initial=float(width),
+                                        style=wx.SP_ARROW_KEYS | wx.TE_PROCESS_ENTER)
         self.width.SetDigits(1)
         for ctrl in (self.levels, self.width):
             theme.theme_control(ctrl)
+        # Enter commits the typed number instead of being swallowed (or, in a
+        # dialog, triggering the default button with the old value still set).
+        theme.bind_spin_enter(self.width)
 
         grid = wx.FlexGridSizer(cols=2, vgap=6, hgap=8)
         grid.AddGrowableCol(1)
@@ -1165,6 +502,14 @@ class ResidualPanel(wx.Panel):
     zero residual would land at an arbitrary colour and the sign, which is
     the whole diagnostic value of a residual map, would be unreadable.
     """
+
+    # Fixed full scale: +-2 is twice a dataset's typical experimental
+    # intensity, since residual maps are always drawn normalized (they are a
+    # display, not the statistic -- see GridSearchFrame._render_residuals).
+    # Fixed rather than autoscaled so maps stay comparable between datasets
+    # and between grid points.
+    RESIDUAL_SCALE_MIN = -2.0
+    RESIDUAL_SCALE_MAX = 2.0
 
     def __init__(self, parent):
         super().__init__(parent)
@@ -1282,7 +627,7 @@ class ResidualPanel(wx.Panel):
             im = ax.imshow(resid.T, extent=entry['extent'], origin='lower',
                            aspect='auto', cmap=self.cmap,
                            interpolation='nearest',
-                           vmin=RESIDUAL_SCALE_MIN, vmax=RESIDUAL_SCALE_MAX)
+                           vmin=self.RESIDUAL_SCALE_MIN, vmax=self.RESIDUAL_SCALE_MAX)
             if self.contour_on:
                 self._draw_sim_contours(ax, entry)
             # Square the axes box explicitly rather than via aspect='equal':
@@ -1322,6 +667,25 @@ class ResidualPanel(wx.Panel):
 # Main grid-search window
 # --------------------------------------------------------------------------- #
 class GridSearchFrame(wx.Frame):
+
+    # Display statistics offered by the "Display:" pulldown, in menu order.
+    DISPLAY_RMSD = 0
+    DISPLAY_NORMALIZED = 1
+    DISPLAY_CREDIBLE = 2
+    DISPLAY_DENSITY = 3
+    DISPLAY_LABELS = ["RMSD", "Fit Quality, norm(RMSD)",
+                      "Probability (credible level)", "Probability (density)"]
+    DISPLAY_VALUE_LABELS = ["RMSD", "Fit Quality",
+                            "Credible level", "Posterior density"]
+    PROBABILITY_MODES = (DISPLAY_CREDIBLE, DISPLAY_DENSITY)
+
+    # Every stored simulation is one 64-bit float per experimental point in
+    # the region of interest (the interpolator output is real --
+    # HYSCOREsim.Spectrum is an np.abs magnitude spectrum).
+    STORE_BYTES_PER_POINT = 8
+    # Above this predicted total the user is asked whether to keep storing.
+    STORE_WARN_BYTES = 0.5 * 1024 ** 3
+
     def __init__(self, mainWindow):
         super().__init__(mainWindow, title="Sys 2D Grid Search", size=(1200, 720))
         self.main = mainWindow
@@ -1387,7 +751,9 @@ class GridSearchFrame(wx.Frame):
         self.cmap_inverted = False
         self.cmap = self.cmap_base
 
-        self.statusbar = self.CreateStatusBar(1)
+        # theme.StatusStrip rather than a native wx.StatusBar, whose field
+        # text MSW draws in the system colour regardless of the theme.
+        self.statusbar = theme.StatusStrip(self)
         self.statusbar.SetStatusText("Select two Sys parameters, set their ranges, then Run.")
 
         splitter = wx.SplitterWindow(self, style=wx.SP_3D)
@@ -1489,8 +855,8 @@ class GridSearchFrame(wx.Frame):
         display_sizer = wx.BoxSizer(wx.HORIZONTAL)
         display_sizer.Add(wx.StaticText(left, label="Display:"),
                           0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
-        self.display_choice = wx.Choice(left, choices=DISPLAY_LABELS)
-        self.display_choice.SetSelection(DISPLAY_RMSD)
+        self.display_choice = wx.Choice(left, choices=self.DISPLAY_LABELS)
+        self.display_choice.SetSelection(self.DISPLAY_RMSD)
         self.display_choice.SetToolTip(
             "RMSD: the raw pooled fitness, in experimental intensity units.\n"
             "Normalized RMSD: each dataset scored against its own null model "
@@ -1514,7 +880,8 @@ class GridSearchFrame(wx.Frame):
         self.lbl_divisor = wx.StaticText(left, label="Oversampling:")
         display_sizer.Add(self.lbl_divisor, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
         self.neff_divisor = wx.SpinCtrlDouble(left, min=1.0, max=100000.0,
-                                               inc=1.0, initial=1.0)
+                                               inc=1.0, initial=1.0,
+                                               style=wx.SP_ARROW_KEYS | wx.TE_PROCESS_ENTER)
         self.neff_divisor.SetDigits(2)
         self.neff_divisor.SetToolTip(
             "Spectrum points per independent measurement.\n"
@@ -1537,7 +904,8 @@ class GridSearchFrame(wx.Frame):
         rmsd_contour_sizer.Add(wx.StaticText(left, label="Line thickness:"),
                                0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
         self.rmsd_contour_width = wx.SpinCtrlDouble(
-            left, min=0.1, max=6.0, inc=0.1, initial=1.2)
+            left, min=0.1, max=6.0, inc=0.1, initial=1.2,
+            style=wx.SP_ARROW_KEYS | wx.TE_PROCESS_ENTER)
         self.rmsd_contour_width.SetDigits(1)
         theme.theme_control(self.rmsd_contour_width)
         rmsd_contour_sizer.Add(self.rmsd_contour_width, 0, wx.ALIGN_CENTER_VERTICAL)
@@ -1552,7 +920,7 @@ class GridSearchFrame(wx.Frame):
             "dataset's [fmin, fmax] region only) so residual maps can be "
             "shown afterwards without re-simulating.\n"
             "You are warned before the scan starts if this would need more "
-            f"than {format_bytes(STORE_WARN_BYTES)}.")
+            f"than {self.format_bytes(self.STORE_WARN_BYTES)}.")
         resid_sizer.Add(self.chk_store_sims, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
         self.btn_residuals = PillButton(left, "Show Residual Maps",
                                          color_key="pill_calm")
@@ -1588,6 +956,13 @@ class GridSearchFrame(wx.Frame):
         left.SetSizer(leftsizer)
         self.left_panel = left
 
+        # The splitter used to be this frame's only child and so filled it
+        # automatically; with the status strip below it they need a sizer.
+        framesizer = wx.BoxSizer(wx.VERTICAL)
+        framesizer.Add(splitter, 1, wx.EXPAND)
+        framesizer.Add(self.statusbar, 0, wx.EXPAND)
+        self.SetSizer(framesizer)
+
         self.btn_refresh.Bind(wx.EVT_BUTTON, self.on_refresh)
         self.btn_cmap.Bind(wx.EVT_BUTTON, self.on_choose_cmap)
         self.btn_map_contours.Bind(wx.EVT_BUTTON, self.on_edit_map_contours)
@@ -1601,8 +976,13 @@ class GridSearchFrame(wx.Frame):
         self.neff_divisor.Bind(wx.EVT_KILL_FOCUS, self.on_display_mode_changed)
         self.rmsd_contour_width.Bind(wx.EVT_SPINCTRLDOUBLE, self.on_analysis_choice_changed)
         # SpinCtrlDouble only fires EVT_SPINCTRLDOUBLE for the arrows; typing
-        # a value and tabbing/entering away emits a plain text event.
-        self.rmsd_contour_width.Bind(wx.EVT_TEXT_ENTER, self.on_analysis_choice_changed)
+        # a value and tabbing away emits a plain text event. Enter is handled
+        # by theme.bind_spin_enter, since wx.EVT_TEXT_ENTER doesn't reliably
+        # reach these compound controls (see that function).
+        theme.bind_spin_enter(self.neff_divisor,
+                              lambda: self.on_display_mode_changed(None))
+        theme.bind_spin_enter(self.rmsd_contour_width,
+                              lambda: self.on_analysis_choice_changed(None))
         self.rmsd_contour_width.Bind(wx.EVT_KILL_FOCUS, self.on_analysis_choice_changed)
         self.btn_run.Bind(wx.EVT_BUTTON, self.on_run_or_cancel)
         self.param_pg.Bind(wxpg.EVT_PG_CHANGED, self.on_param_toggle)
@@ -1710,10 +1090,10 @@ class GridSearchFrame(wx.Frame):
     def _build_param_grid(self):
         self.param_pg.Clear()
         self._bool_props = {}
-        flat = [p for p in flatten_sys_params(self.sys_snapshot)
-                if qualified_label(p) not in self._driven_sys_labels]
-        flat += flatten_func_vars(self.func_var_snapshot)
-        self._param_by_name = {param_name(p): p for p in flat}
+        flat = [p for p in self.flatten_sys_params(self.sys_snapshot)
+                if self.qualified_label(p) not in self._driven_sys_labels]
+        flat += self.flatten_func_vars(self.func_var_snapshot)
+        self._param_by_name = {self.param_name(p): p for p in flat}
         # drop selections whose parameter no longer exists (e.g. nucleus removed)
         self._selected = [n for n in self._selected if n in self._param_by_name]
 
@@ -1723,8 +1103,8 @@ class GridSearchFrame(wx.Frame):
             if p['cat'] != cur_cat:
                 cur_cat = p['cat']
                 cat_prop = self.param_pg.Append(wxpg.PropertyCategory(cur_cat))
-            pname = param_name(p)
-            disp = f"{param_leaf_label(p)} = {p['value']:.5g}"
+            pname = self.param_name(p)
+            disp = f"{self.param_leaf_label(p)} = {p['value']:.5g}"
             prop = self.param_pg.AppendIn(
                 cat_prop, wxpg.BoolProperty(disp, pname, value=(pname in self._selected)))
             prop.SetAttribute(wxpg.PG_BOOL_USE_CHECKBOX, True)
@@ -1815,7 +1195,7 @@ class GridSearchFrame(wx.Frame):
                 min_str, max_str, npts = f"{v - halfrange:.6g}", f"{v + halfrange:.6g}", 11
                 self._range_memory[pname] = (min_str, max_str, npts)
             self.range_sizer.Add(
-                wx.StaticText(self.range_panel, label=param_full_label(p)),
+                wx.StaticText(self.range_panel, label=self.param_full_label(p)),
                 0, wx.ALIGN_CENTER_VERTICAL)
             min_ctrl = wx.TextCtrl(self.range_panel, value=min_str)
             max_ctrl = wx.TextCtrl(self.range_panel, value=max_str)
@@ -1862,7 +1242,7 @@ class GridSearchFrame(wx.Frame):
                 if vmax <= vmin:
                     raise ValueError(
                         f"Max must be greater than Min for "
-                        f"{param_full_label(self._param_by_name[pname])}.")
+                        f"{self.param_full_label(self._param_by_name[pname])}.")
                 ranges.append((vmin, vmax, npts))
         except ValueError as e:
             wx.MessageBox(str(e), "Grid Search", wx.OK | wx.ICON_ERROR)
@@ -1885,15 +1265,18 @@ class GridSearchFrame(wx.Frame):
         # Slice each dataset's experimental region once, up front: the scan
         # reuses it at every grid point instead of re-slicing, and its size
         # is what determines the cost of keeping simulations.
-        roi_cache = [dataset_roi(dd) for dd in active_data]
+        roi_cache = [self.dataset_roi(dd) for dd in active_data]
 
         store_sims = self.chk_store_sims.GetValue()
         if store_sims:
-            est = estimate_store_bytes(roi_cache, len(grid1), len(grid2))
-            if est > STORE_WARN_BYTES:
+            # predicted cost of keeping every grid point's interpolated
+            # simulation: one float per region-of-interest point, per dataset
+            per_point = sum(roi['exp'].size for roi in roi_cache if roi is not None)
+            est = per_point * len(grid1) * len(grid2) * self.STORE_BYTES_PER_POINT
+            if est > self.STORE_WARN_BYTES:
                 answer = wx.MessageBox(
                     f"Keeping every simulation from this scan would need about "
-                    f"{format_bytes(est)} of memory\n"
+                    f"{self.format_bytes(est)} of memory\n"
                     f"({len(grid1)} x {len(grid2)} grid points x "
                     f"{len(active_data)} dataset(s), interpolated onto the "
                     f"[fmin, fmax] region only).\n\n"
@@ -1961,7 +1344,7 @@ class GridSearchFrame(wx.Frame):
         # dataset per grid point -- negligible next to anything else here.
         results_sse = np.full((n1, n2, n_ds), np.nan)
         results_nk = np.zeros((n1, n2, n_ds), dtype=int)
-        hs = HYSCOREsim(errorFunc=_silent_error_func)
+        hs = HYSCOREsim(errorFunc=self._silent_error_func)
         hs.verbose = False
         start = time.perf_counter()
         count = 0
@@ -1982,24 +1365,24 @@ class GridSearchFrame(wx.Frame):
                     if p.get('kind', 'sysleaf') == 'funcvar':
                         variable_values[p['key']] = v
                     else:
-                        apply_param_value(sys_dict, p, v)
+                        self.apply_param_value(sys_dict, p, v)
                 slot = [None] * len(active_data) if store_sims else None
                 stats = [None] * len(active_data)
                 try:
-                    func_ok = apply_functions_to_sys_dict(
+                    func_ok = self.apply_functions_to_sys_dict(
                         sys_dict, func_rows, variable_values, error_log=error_log)
                     if not func_ok:
                         rmsd, n_pts, rmsd_norm = np.nan, 0, np.nan
                     else:
                         Sys = sysPar()
                         Sys.setFromCtrl(sys_dict)
-                        rmsd, n_pts, rmsd_norm = run_gridpoint(
+                        rmsd, n_pts, rmsd_norm = self.run_gridpoint(
                             hs, Sys, exp_template, opt_template,
                             active_data, error_log=error_log,
                             roi_cache=roi_cache, sim_store=slot,
                             stats_out=stats)
                 except Exception as e:
-                    _log_gridpoint_error(error_log, "Sys.setFromCtrl", e)
+                    self._log_gridpoint_error(error_log, "Sys.setFromCtrl", e)
                     rmsd, n_pts, rmsd_norm = np.nan, 0, np.nan
                 # Only points that actually produced a simulation are worth
                 # a dict entry -- a failed point would otherwise cost a
@@ -2078,7 +1461,7 @@ class GridSearchFrame(wx.Frame):
             held = sum(s.nbytes for slot in self._sim_store.values()
                        for s in slot if s is not None)
             msg += (f" Simulations kept for {len(self._sim_store)} grid points "
-                    f"({format_bytes(held)}).")
+                    f"({self.format_bytes(held)}).")
         self.statusbar.SetStatusText(msg)
 
         if error_log:
@@ -2109,12 +1492,12 @@ class GridSearchFrame(wx.Frame):
             return
         mode = self.display_mode()
         drew = False
-        if mode in PROBABILITY_MODES:
+        if mode in self.PROBABILITY_MODES:
             drew = self._display_probability(mode)
         if not drew:
             # Probability needs per-dataset residuals; fall back to the raw
             # fitness map if they are missing or the posterior degenerates.
-            self._display_fitness(DISPLAY_RMSD if mode in PROBABILITY_MODES else mode)
+            self._display_fitness(self.DISPLAY_RMSD if mode in self.PROBABILITY_MODES else mode)
         self.left_panel.Layout()
         self.Layout()
 
@@ -2142,8 +1525,8 @@ class GridSearchFrame(wx.Frame):
             params = self.main.tabulated_panel.Sys_param.parameters
         except AttributeError:
             return None
-        v1 = read_param_value(params, self._last_param1)
-        v2 = read_param_value(params, self._last_param2)
+        v1 = self.read_param_value(params, self._last_param1)
+        v2 = self.read_param_value(params, self._last_param2)
         if v1 is None or v2 is None:
             return None
         return (v1, v2)
@@ -2183,12 +1566,12 @@ class GridSearchFrame(wx.Frame):
         chi-square confidence region."""
         grid1, grid2 = self._last_grid1, self._last_grid2
         param1, param2 = self._last_param1, self._last_param2
-        label1, label2 = param_full_label(param1), param_full_label(param2)
+        label1, label2 = self.param_full_label(param1), self.param_full_label(param2)
 
         # Everything downstream -- interpolation, the minimum, the
         # confidence region, the contours -- runs on whichever statistic is
         # selected, so the whole display stays self-consistent.
-        normalized = (mode == DISPLAY_NORMALIZED)
+        normalized = (mode == self.DISPLAY_NORMALIZED)
         results = self._last_results_norm if normalized else self._last_results
         if results is None:
             results = self._last_results
@@ -2199,7 +1582,7 @@ class GridSearchFrame(wx.Frame):
         rmsd_cw = float(self.rmsd_contour_width.GetValue())
 
         method = 'cubic' if self.interp_choice.GetSelection() == 1 else 'linear'
-        out = _interpolate_grid(method, grid1, grid2, results)
+        out = self._interpolate_grid(method, grid1, grid2, results)
         if out is None:
             self.heatmap.show_results(results, grid1, grid2, label1, label2,
                                       as_contours=as_contours,
@@ -2230,7 +1613,7 @@ class GridSearchFrame(wx.Frame):
             N = 0
         self._last_N = N
         CONF = 0.95
-        factor = _rmsd_threshold_factor(ci_method, CONF, N, p=2)
+        factor = self._rmsd_threshold_factor(ci_method, CONF, N, p=2)
         contour_levels = []
         half_width = {1: None, 2: None}
         if factor is not None:
@@ -2239,8 +1622,8 @@ class GridSearchFrame(wx.Frame):
                 contour_levels.append((thresh, "95%"))
                 profile1 = np.nanmin(fine_vals, axis=1)  # min over axis2, vs. axis1
                 profile2 = np.nanmin(fine_vals, axis=0)  # min over axis1, vs. axis2
-                bounds1 = _axis_confidence_bounds(fine1, profile1, thresh)
-                bounds2 = _axis_confidence_bounds(fine2, profile2, thresh)
+                bounds1 = self._axis_confidence_bounds(fine1, profile1, thresh)
+                bounds2 = self._axis_confidence_bounds(fine2, profile2, thresh)
                 if bounds1 is not None:
                     half_width[1] = (bounds1[1] - bounds1[0]) / 2.0
                 if bounds2 is not None:
@@ -2293,11 +1676,11 @@ class GridSearchFrame(wx.Frame):
         if self._last_results_sse is None or self._last_results_nk is None:
             return False
         grid1, grid2 = self._last_grid1, self._last_grid2
-        label1 = param_full_label(self._last_param1)
-        label2 = param_full_label(self._last_param2)
+        label1 = self.param_full_label(self._last_param1)
+        label2 = self.param_full_label(self._last_param2)
 
         divisor = float(self.neff_divisor.GetValue())
-        nlp = neg_log_posterior(self._last_results_sse, self._last_results_nk, divisor)
+        nlp = self.neg_log_posterior(self._last_results_sse, self._last_results_nk, divisor)
         if nlp is None:
             return False
 
@@ -2307,33 +1690,33 @@ class GridSearchFrame(wx.Frame):
         # interpolate atrociously. It also keeps the min-is-best convention
         # that _interpolate_grid's failed-point sentinel assumes.
         method = 'cubic' if self.interp_choice.GetSelection() == 1 else 'linear'
-        out = _interpolate_grid(method, grid1, grid2, nlp)
+        out = self._interpolate_grid(method, grid1, grid2, nlp)
         if out is None:
             return False
         fine1, fine2, nlp_fine, used_method = out
 
-        p = posterior_grid(nlp_fine)
+        p = self.posterior_grid(nlp_fine)
         if p is None:
             return False
-        level = credible_level_map(p)
+        level = self.credible_level_map(p)
         bi, bj = np.unravel_index(np.argmax(p), p.shape)
         best1, best2 = fine1[bi], fine2[bj]
 
         CONF_INNER, CONF_OUTER = 0.68, 0.95
-        if mode == DISPLAY_CREDIBLE:
+        if mode == self.DISPLAY_CREDIBLE:
             displayed = level
             contour_levels = [(CONF_INNER, "68%"), (CONF_OUTER, "95%")]
         else:
             displayed = p
-            contour_levels = [(density_threshold(p, CONF_INNER), "68%"),
-                              (density_threshold(p, CONF_OUTER), "95%")]
-        value_label = DISPLAY_VALUE_LABELS[mode]
+            contour_levels = [(self.density_threshold(p, CONF_INNER), "68%"),
+                              (self.density_threshold(p, CONF_OUTER), "95%")]
+        value_label = self.DISPLAY_VALUE_LABELS[mode]
 
         vmin, vmax = float(np.nanmin(displayed)), float(np.nanmax(displayed))
         background_levels = self._background_levels(vmin, vmax)
 
-        bounds1 = marginal_interval(fine1, p.sum(axis=1), CONF_OUTER)
-        bounds2 = marginal_interval(fine2, p.sum(axis=0), CONF_OUTER)
+        bounds1 = self.marginal_interval(fine1, p.sum(axis=1), CONF_OUTER)
+        bounds2 = self.marginal_interval(fine2, p.sum(axis=0), CONF_OUTER)
         half_width = {1: None, 2: None}
         if bounds1 is not None:
             half_width[1] = (bounds1[1] - bounds1[0]) / 2.0
@@ -2466,7 +1849,7 @@ class GridSearchFrame(wx.Frame):
 
     def display_mode(self):
         sel = self.display_choice.GetSelection()
-        return DISPLAY_RMSD if sel == wx.NOT_FOUND else sel
+        return self.DISPLAY_RMSD if sel == wx.NOT_FOUND else sel
 
     def on_display_mode_changed(self, event):
         """Switching statistic redraws the fitness map and, if a grid
@@ -2481,7 +1864,7 @@ class GridSearchFrame(wx.Frame):
             self._render_residuals(*self._last_click_ij)
 
     def _sync_display_controls(self):
-        probability = self.display_mode() in PROBABILITY_MODES
+        probability = self.display_mode() in self.PROBABILITY_MODES
         self.neff_divisor.Enable(probability)
         self.lbl_divisor.Enable(probability)
         # Credible intervals come from the posterior itself in probability
@@ -2529,8 +1912,8 @@ class GridSearchFrame(wx.Frame):
             return
         slot = self._sim_store.get((i, j))
         v1, v2 = self._last_grid1[i], self._last_grid2[j]
-        label1 = param_full_label(self._last_param1)
-        label2 = param_full_label(self._last_param2)
+        label1 = self.param_full_label(self._last_param1)
+        label2 = self.param_full_label(self._last_param2)
         header = f"{label1} = {v1:.5g},  {label2} = {v2:.5g}"
         self._last_click_ij = (i, j)
 
@@ -2597,7 +1980,7 @@ class GridSearchFrame(wx.Frame):
                         raise KeyError(p['key'])
                     fdict['var'][p['key']] = v
                 else:
-                    apply_param_value(main_params, p, v)
+                    self.apply_param_value(main_params, p, v)
         except KeyError:
             wx.MessageBox(
                 "The scanned parameter no longer exists in the main Sys grid "
@@ -2607,8 +1990,8 @@ class GridSearchFrame(wx.Frame):
         self.main.tabulated_panel.Sys_param.SetFromParClean(main_params)
         self.main.Sys.setFromCtrl(main_params)
         self.main.runSim()
-        msg = (f"Loaded {param_full_label(self._last_param1)}={v1:.5g}, "
-               f"{param_full_label(self._last_param2)}={v2:.5g} into main window "
+        msg = (f"Loaded {self.param_full_label(self._last_param1)}={v1:.5g}, "
+               f"{self.param_full_label(self._last_param2)}={v2:.5g} into main window "
                f"and re-ran simulation.")
         # The main Sys grid just changed under us -- refresh this window's
         # own parameter list so the picker's displayed values (and which
@@ -2628,3 +2011,567 @@ class GridSearchFrame(wx.Frame):
         self._sim_store = {}
         self._roi_cache = None
         event.Skip()
+
+    # ------------------------------------------------------------------
+    # Parameter descriptors and the Sys dictionary
+    # ------------------------------------------------------------------
+    def flatten_sys_params(self, sys_dict):
+        """
+        Flatten a Sys parameter dict (as stored in PropGridPanel.parameters,
+        i.e. {'spin(1)': {...}, 'nuc(1)': {...}, ...}) into scannable scalar
+        leaves. Only plain float/int values and elements of 1-D np.ndarray
+        values are included; bools, strings and [value, choices] entries
+        (e.g. 'Nucs', 'useFor') are skipped since a numeric grid scan over
+        them isn't meaningful. The 'functions' entry (Function Modifiers state)
+        is a dict too but contains no float/int/ndarray leaves at this level,
+        so it's naturally skipped here -- see flatten_func_vars() for scanning
+        the custom parameters (r, a, ...) defined there instead.
+        """
+        out = []
+        for cat, sub in sys_dict.items():
+            if not isinstance(sub, dict):
+                continue
+            for key, val in sub.items():
+                if isinstance(val, bool):
+                    continue
+                if isinstance(val, (int, float, np.floating, np.integer)):
+                    out.append({'kind': 'sysleaf', 'cat': cat, 'key': key, 'idx': None, 'value': float(val)})
+                elif isinstance(val, np.ndarray) and val.ndim == 1:
+                    for ii in range(val.size):
+                        out.append({'kind': 'sysleaf', 'cat': cat, 'key': key, 'idx': ii, 'value': float(val[ii])})
+        return out
+    def qualified_label(self, p):
+        return f"{p['cat']}.{self.param_leaf_label(p)}"
+    def flatten_func_vars(self, variable_values):
+        """
+        Flatten a {name: value} dict of Function-Modifier custom parameters
+        (e.g. {'r': 3.0, 'a': 1.5}) into scannable leaves, grouped under a
+        pseudo-category so they show up as their own section in the grid-search
+        parameter picker.
+        """
+        out = []
+        for name, val in variable_values.items():
+            out.append({'kind': 'funcvar', 'cat': 'Functions', 'key': name, 'idx': None, 'value': float(val)})
+        return out
+    def param_name(self, p):
+        kind = p.get('kind', 'sysleaf')
+        return f"{kind}:{p['cat']}:{p['key']}:{-1 if p['idx'] is None else p['idx']}"
+    def param_leaf_label(self, p):
+        return p['key'] if p['idx'] is None else f"{p['key']}({p['idx'] + 1})"
+    def param_full_label(self, p):
+        return f"{p['cat']} {self.param_leaf_label(p)}"
+    def read_param_value(self, sys_dict, param):
+        """Current value of a scannable parameter in `sys_dict`, or None if it
+        is no longer there (a nucleus removed, a Function-Modifier variable
+        renamed, ...). The read counterpart of apply_param_value, but it also
+        handles 'funcvar' leaves, which live under 'functions'.'var' rather
+        than as an ordinary Sys leaf."""
+        try:
+            if param.get('kind', 'sysleaf') == 'funcvar':
+                fdict = sys_dict.get('functions')
+                if not isinstance(fdict, dict):
+                    return None
+                variables = fdict.get('var')
+                if not isinstance(variables, dict) or param['key'] not in variables:
+                    return None
+                return float(variables[param['key']])
+
+            sub = sys_dict.get(param['cat'])
+            if not isinstance(sub, dict) or param['key'] not in sub:
+                return None
+            val = sub[param['key']]
+            if param['idx'] is None:
+                return float(val)
+            arr = np.asarray(val)
+            if arr.ndim != 1 or param['idx'] >= arr.size:
+                return None
+            return float(arr[param['idx']])
+        except (TypeError, ValueError):
+            return None
+    def apply_param_value(self, sys_dict, param, value):
+        if param.get('kind', 'sysleaf') != 'sysleaf':
+            raise ValueError(f"apply_param_value only applies to 'sysleaf' params, got {param}")
+        sub = sys_dict[param['cat']]
+        if param['idx'] is None:
+            sub[param['key']] = float(value)
+        else:
+            arr = sub[param['key']]
+            if not isinstance(arr, np.ndarray):
+                arr = np.array(arr, dtype=float)
+                sub[param['key']] = arr
+            arr[param['idx']] = float(value)
+    def apply_functions_to_sys_dict(self, sys_dict, func_rows, variable_values, error_log=None):
+        """
+        If Function Modifiers are defined (func_rows non-empty), evaluate them
+        -- using sys_functions.evaluate_functions(), the same UI-free engine
+        classFunctionModPG.py uses -- and patch the results into `sys_dict` in
+        place, resolving any "other property" references directly against
+        `sys_dict` itself (so e.g. a formula referencing "spin(1).S" picks up
+        whatever value a scanned sysleaf parameter already patched into
+        sys_dict for this grid point).
+
+        Returns True on success. Returns False (sys_dict left only partially
+        patched) if any row failed to evaluate -- callers should treat that
+        grid point as a failure (NaN) rather than silently simulating with
+        stale/wrong values for the properties that were supposed to be driven.
+        """
+        if not func_rows:
+            return True
+
+        # qualified 'cat.leaf' label (e.g. 'nuc(1).A(1)') -> sysleaf descriptor,
+        # for patching the results back in via apply_param_value below
+        syspath_map = {self.qualified_label(p): p for p in self.flatten_sys_params(sys_dict)}
+        known_labels = list(syspath_map.keys())
+
+        def lookup(label):
+            p = syspath_map.get(label)
+            if p is None:
+                raise sysfun.UnresolvedReference(label)
+            sub = sys_dict[p['cat']]
+            return float(sub[p['key']]) if p['idx'] is None else float(sub[p['key']][p['idx']])
+
+        result = sysfun.evaluate_functions(func_rows, variable_values, lookup, known_labels=known_labels)
+
+        if result['errors']:
+            for idx, msg in result['errors'].items():
+                lbl, expr = func_rows[idx]
+                self._log_gridpoint_error(error_log, f'function "{lbl} = {expr}"', RuntimeError(msg))
+            return False
+
+        for label, value in result['label_values'].items():
+            p = syspath_map.get(label)
+            if p is not None:
+                self.apply_param_value(sys_dict, p, value)
+        return True
+
+    # ------------------------------------------------------------------
+    # Fitness: one grid point, all datasets
+    # ------------------------------------------------------------------
+    def _silent_error_func(self, message):
+        raise _SilentSimError(message)
+    def dataset_roi(self, dd):
+        """Extract one dataset's experimental spectrum restricted to its
+        [fmin, fmax] x [fmin, fmax] region, together with the frequency axes
+        of that region. Returns a dict with keys 'exp', 'x', 'y', 'label', or
+        None when the dataset has no usable frequency-domain data or the
+        region selects nothing.
+
+        Split out of _dataset_sse so a scan can build this once per dataset up
+        front instead of re-slicing the same unchanging experimental data at
+        every grid point, and so the region's size is known before the scan
+        starts (needed to predict how much memory keeping every simulation
+        would cost -- see the estimate in _start_run)."""
+        if dd['isfft']:
+            raw = np.asarray(dd['data'])
+            expdata = np.real(raw[:, :, 0]) if raw.ndim > 2 else np.real(raw)
+            expX = np.asarray(dd['ax']['x'])
+            expY = np.asarray(dd['ax']['y'])
+        else:
+            if not dd['fftactual'] or dd['fftdata'] is None:
+                return None
+            expdata = dd['fftdata']
+            expX = np.asarray(dd['fftax']['x'])
+            expY = np.asarray(dd['fftax']['y'])
+
+        fmin, fmax = dd['fmin'], dd['fmax']
+        xsel = (expX >= fmin) & (expX <= fmax)
+        ysel = (expY >= fmin) & (expY <= fmax)
+        if not xsel.any() or not ysel.any():
+            return None
+
+        # Array axis 0 tracks the 'x' coordinate array and axis 1 tracks 'y'
+        # throughout this codebase (see MainFrame.update_FFT, which builds
+        # fftX from fftData.shape[0] and fftY from fftData.shape[1]) -- index
+        # accordingly rather than assuming the usual imshow row=y convention.
+        exp_roi = expdata[np.ix_(xsel, ysel)]
+        # 'null' is this dataset's no-simulation sum of squares -- the residual
+        # you are left with at c = 0. Since the amplitude fit clamps c to be
+        # non-negative it can never do worse than that, so SSE/null is bounded
+        # in (0, 1] and is what the normalized RMSD divides by. 'null_rms' is
+        # the same thing per point (the region's root-mean-square intensity),
+        # used to put residual *maps* into the same normalized units.
+        null = float(np.sum(exp_roi ** 2))
+        return {'exp': exp_roi,
+                'x': expX[xsel],
+                'y': expY[ysel],
+                'null': null,
+                'null_rms': float(np.sqrt(null / exp_roi.size)) if exp_roi.size else 0.0,
+                'label': dd.get('title', dd.get('fname', '?')),
+                'field': dd.get('field')}
+    def _dataset_sse(self, dd, simdata, simX, simY, roi=None, want_sim=False):
+        """Amplitude-scale simdata to dd's experimental data (minimizing SSE
+        over the [fmin, fmax] region) and return (sum-of-squared-residuals,
+        n_points, scaled_sim) for this one dataset.
+
+        roi: a precomputed dataset_roi(dd) result, to avoid re-slicing the
+        experimental data at every grid point; computed here when omitted.
+
+        want_sim: when True the third element is the simulation interpolated
+        onto the experimental region *and already multiplied by the best-fit
+        amplitude* c, i.e. exactly the array the residual was formed from, so
+        a stored copy can be turned back into a residual map later by
+        subtracting it from the same region's experimental data. It is None
+        otherwise -- callers that only need the fitness number keep the old
+        memory profile, since the scaled array is a temporary either way."""
+        roi = self.dataset_roi(dd) if roi is None else roi
+        if roi is None:
+            return 0.0, 0, None
+
+        exp_roi, sub_x, sub_y = roi['exp'], roi['x'], roi['y']
+
+        interp = RegularGridInterpolator((simX, simY), simdata,
+                                          bounds_error=False, fill_value=0.0)
+        gx, gy = np.meshgrid(sub_x, sub_y, indexing='ij')
+        sim_on_exp = interp(np.stack([gx.ravel(), gy.ravel()], axis=-1)).reshape(gx.shape)
+
+        denom = np.sum(sim_on_exp ** 2)
+        c = max(np.sum(exp_roi * sim_on_exp) / denom, 0.0) if denom > 1e-30 else 0.0
+        scaled = c * sim_on_exp
+        resid = exp_roi - scaled
+        return float(np.sum(resid ** 2)), int(resid.size), (scaled if want_sim else None)
+    def format_bytes(self, nbytes):
+        for unit in ('bytes', 'kilobytes', 'megabytes', 'gigabytes'):
+            if nbytes < 1024 or unit == 'gigabytes':
+                return f"{nbytes:.0f} {unit}" if unit == 'bytes' else f"{nbytes:.2f} {unit}"
+            nbytes /= 1024.0
+    def _log_gridpoint_error(self, error_log, where, exc):
+        """Print each distinct failure once (grid scans can hit the same
+        condition, e.g. 'no resonances', at hundreds of points; printing every
+        occurrence would just flood the console) and keep a count for the
+        end-of-scan summary shown to the user."""
+        msg = f"{where}: {type(exc).__name__}: {exc}"
+        if error_log is None:
+            return
+        if msg not in error_log:
+            print(f"[GridSearch] {msg}")
+            error_log[msg] = 0
+        error_log[msg] += 1
+    def run_gridpoint(self, hs, Sys, exp_template, opt_template, active_data, error_log=None,
+                       roi_cache=None, sim_store=None, stats_out=None):
+        """Run one HYSCORE simulation per active dataset for the given Sys and
+        return (pooled RMSD, pooled N, normalized RMSD) over all datasets
+        (NaN, 0, NaN if none succeeded). N (the total number of pooled ROI
+        residual points) is returned alongside the RMSD so confidence-interval
+        estimation can later convert RMSD back to a sum-of-squares without
+        re-running anything.
+
+        The normalized RMSD scores each dataset against its own null model
+        (SSE_k / null_k, i.e. how much of that dataset's power the simulation
+        failed to explain -- see dataset_roi) and then takes the N-weighted
+        mean of those fractions before the square root. Normalizing per
+        dataset rather than pooling the sums stops one bright dataset from
+        dominating a multi-dataset fit, at the cost of being a genuinely
+        different statistic: with more than one dataset its landscape (and so
+        its best-fit point) can differ from the raw pooled RMSD's. With a
+        single dataset it is exactly the raw RMSD divided by a constant.
+
+        Failures are not fatal to the scan (a single bad grid point/dataset
+        combination, e.g. "no resonances", shouldn't abort hundreds of other
+        points) but are logged via _log_gridpoint_error so they are never
+        silently invisible.
+
+        roi_cache: optional list, parallel to active_data, of precomputed
+        dataset_roi() results (None entries for unusable datasets).
+
+        sim_store: optional list, also parallel to active_data, into which
+        each dataset's amplitude-scaled interpolated simulation is written by
+        index -- writing by index rather than appending keeps the slots
+        aligned with active_data even when some datasets fail and are skipped.
+        Left as None (i.e. not requested) this costs nothing.
+
+        stats_out: optional list, parallel to active_data, filled with each
+        dataset's (SSE, N) pair. Two floats per dataset per grid point, which
+        is nothing next to the simulations themselves, and it is what the
+        posterior needs -- the pooled RMSD alone cannot reconstruct the
+        per-dataset terms that noise-level marginalization requires."""
+        hs.Sys = Sys
+        if roi_cache is None:
+            roi_cache = [self.dataset_roi(dd) for dd in active_data]
+        try:
+            hs.preCompute()
+        except Exception as e:
+            self._log_gridpoint_error(error_log, "preCompute", e)
+            return np.nan, 0, np.nan
+
+        total_sse = 0.0
+        total_n = 0
+        norm_acc = 0.0    # sum of N_k * (SSE_k / null_k)
+        norm_n = 0        # sum of N_k over datasets that could be normalized
+        for k, dd in enumerate(active_data):
+            Exp = expPar()
+            Exp.setDict(copy.deepcopy(exp_template))
+            if Exp.tau < 0:
+                Exp.tau = dd['tau']
+            if Exp.Field < 0:
+                Exp.Field = dd['field']
+            if Exp.mwFreq < 0:
+                Exp.mwFreq = dd['freq']
+            if Exp.MaxFreq < 0:
+                Exp.MaxFreq = dd['fmax']
+            if Exp.nPoints < 0:
+                Exp.nPoints = (len(dd['fftax']['x']) if not dd['isfft']
+                                else len(dd['ax']['x']))
+
+            Opt = optHYSCORE()
+            Opt.setFromCtrl(copy.deepcopy(opt_template))
+            if dd.get('orisel') is not None:
+                Opt.OriSelInp = dd['orisel']
+
+            hs.Exp = Exp
+            hs.Opt = Opt
+            try:
+                hs.reRun()
+            except Exception as e:
+                self._log_gridpoint_error(error_log, f"reRun ({dd.get('title', dd.get('fname', '?'))})", e)
+                continue
+            if hs.Spectrum is None:
+                continue
+
+            roi = roi_cache[k]
+            sse, n, scaled = self._dataset_sse(dd, hs.Spectrum, hs.X, hs.Y, roi=roi,
+                                           want_sim=sim_store is not None)
+            if n > 0:
+                total_sse += sse
+                total_n += n
+                if sim_store is not None:
+                    sim_store[k] = scaled
+                if stats_out is not None:
+                    stats_out[k] = (sse, n)
+                # A region that is identically zero has no power to explain and
+                # cannot be normalized; it still counts towards the raw RMSD.
+                if roi is not None and roi['null'] > 0.0:
+                    norm_acc += n * (sse / roi['null'])
+                    norm_n += n
+
+        if total_n == 0:
+            return np.nan, 0, np.nan
+        rmsd_norm = float(np.sqrt(norm_acc / norm_n)) if norm_n > 0 else np.nan
+        return float(np.sqrt(total_sse / total_n)), total_n, rmsd_norm
+
+    # ------------------------------------------------------------------
+    # Interpolating the scanned grid, and confidence regions
+    # ------------------------------------------------------------------
+    def _interpolate_grid(self, method, grid1, grid2, results, n_out=160):
+        """Interpolate a (possibly NaN-containing) coarse RMSD grid onto a
+        finer regular grid, for a smoother heatmap and for locating the
+        minimum/confidence contours more precisely than the coarse sampling
+        allows. Returns (fine1, fine2, fine_results, used_method) or None if
+        there is no finite data at all.
+
+        NaN entries (grid points where every dataset's simulation failed) are
+        replaced with a value worse than the worst finite point before
+        interpolating -- treating a failed point as "confirmed bad fit" rather
+        than "unknown" keeps the interpolators (which don't accept NaN) well
+        defined without silently ignoring the failure. Bilinear interpolation
+        of a sentinel value stays safely bounded to its local grid cell, but a
+        global bicubic spline does not -- a single sentinel outlier can ring
+        across the *entire* surface and fabricate a spurious dip well below
+        every real sampled value (verified: on an 11x6 test grid, one bad
+        point turned a true minimum of 0 into an interpolated minimum of -24).
+        So 'cubic' silently falls back to 'linear' whenever the coarse grid
+        contains any failed point at all, not only when an axis is too short.
+
+        method='cubic' uses a bicubic spline (RectBivariateSpline, kx=ky=3):
+        smooth and best for locating the minimum/contours when every grid
+        point succeeded, but needs >=4 points along each scanned axis and can
+        still overshoot between very noisy (but all-finite) samples.
+        """
+        finite = results[np.isfinite(results)]
+        if finite.size == 0:
+            return None
+        has_failures = finite.size < results.size
+        sentinel = float(finite.max()) * 2.0 + 1e-9
+        filled = np.where(np.isfinite(results), results, sentinel)
+
+        n1, n2 = len(grid1), len(grid2)
+        fine1 = np.linspace(grid1[0], grid1[-1], max(n_out, n1))
+        fine2 = np.linspace(grid2[0], grid2[-1], max(n_out, n2))
+
+        used_method = method
+        if method == 'cubic' and n1 >= 4 and n2 >= 4 and not has_failures:
+            spline = RectBivariateSpline(grid1, grid2, filled, kx=3, ky=3)
+            fine_vals = spline(fine1, fine2)
+        else:
+            used_method = 'linear'
+            interp = RegularGridInterpolator((grid1, grid2), filled, method='linear',
+                                              bounds_error=False, fill_value=None)
+            g1, g2 = np.meshgrid(fine1, fine2, indexing='ij')
+            fine_vals = interp(np.stack([g1.ravel(), g2.ravel()], axis=-1)).reshape(g1.shape)
+        return fine1, fine2, fine_vals, used_method
+    def _rmsd_threshold_factor(self, method, conf, N, p=2):
+        """sqrt of the SSE-inflation factor that bounds the `conf` (e.g. 0.68,
+        0.95) confidence region: any grid point with rmsd <= rmsd_min*factor
+        lies inside it. p is the number of jointly-scanned parameters (always
+        2 here).
+
+        'fstat' (recommended): Draper & Smith's F-test region for nonlinear
+        least squares when the noise variance isn't independently known --
+        SSE(theta) <= SSE_min * [1 + (p/(N-p))*F_p,(N-p)(conf)]. This is what
+        the "F-test (unknown noise)" UI option uses.
+
+        'chi2': textbook Delta-chi^2 = chi2.ppf(conf, df=p), but since there is
+        no independently calibrated noise level for these spectra either, the
+        fit's own rmsd_min is (ab)used as sigma -- which makes chi^2_min equal
+        to N by construction and gives SSE(theta) <= SSE_min*(1 + chi2/N). This
+        is simpler but under-corrects for finite N, so it tends to be more
+        optimistic (narrower) than the F-test region; the two converge as
+        N -> infinity.
+        """
+        if N is None or N <= p:
+            return None
+        if method == 'fstat':
+            Fval = stats.f.ppf(conf, p, N - p)
+            factor = 1.0 + (p / (N - p)) * Fval
+        else:
+            chi2val = stats.chi2.ppf(conf, df=p)
+            factor = 1.0 + chi2val / N
+        return float(np.sqrt(factor))
+    def _axis_confidence_bounds(self, axis_vals, profile, thresh):
+        """Where a 1D profile (the interpolated surface minimized over the
+        *other* scanned axis, so profile[i] = min_j fine_vals[i, j] or
+        min_i fine_vals[i, j]) first drops to/below `thresh` and last rises
+        back above it -- i.e. the projection of the 2D confidence region onto
+        this axis. The crossing points are linearly interpolated between the
+        bracketing samples rather than snapped to the nearest one, so the
+        reported interval responds continuously to small changes in `thresh`
+        (e.g. from switching CI method) instead of only changing once the
+        threshold crosses an entire fine-grid cell -- at typical N the F-test
+        vs. chi-square factors can differ by 10-25% while still landing in the
+        same grid cell, which made the two methods look identical otherwise.
+        Returns (lo, hi) or None if the profile never reaches thresh.
+        """
+        below = profile <= thresh
+        if not np.any(below):
+            return None
+        idx = np.where(below)[0]
+        i0, i1 = int(idx[0]), int(idx[-1])
+
+        if i0 == 0:
+            lo = axis_vals[0]
+        else:
+            x0, x1 = axis_vals[i0 - 1], axis_vals[i0]
+            y0, y1 = profile[i0 - 1], profile[i0]
+            lo = x1 if y1 == y0 else x0 + (thresh - y0) * (x1 - x0) / (y1 - y0)
+
+        if i1 == len(axis_vals) - 1:
+            hi = axis_vals[-1]
+        else:
+            x0, x1 = axis_vals[i1], axis_vals[i1 + 1]
+            y0, y1 = profile[i1], profile[i1 + 1]
+            hi = x0 if y1 == y0 else x0 + (thresh - y0) * (x1 - x0) / (y1 - y0)
+
+        return float(lo), float(hi)
+
+    # ------------------------------------------------------------------
+    # Posterior probability over the scanned grid
+    # ------------------------------------------------------------------
+    def neg_log_posterior(self, results_sse, results_nk, divisor=1.0):
+        """Negative log posterior (up to an additive constant) on the coarse
+        grid, from the per-dataset sums of squared residuals.
+
+        Assuming Gaussian residuals with a noise level that is *unknown and
+        separate for each dataset*, and integrating each of those unknown
+        levels out under the usual scale-invariant prior, the posterior over
+        the scanned parameters comes out as a product of per-dataset terms,
+
+            p(theta) ~ prod_k SSE_k(theta) ** (-N_k/2)
+
+        so the quantity to minimize is sum_k (N_k/2)*log SSE_k. Two things
+        follow that are worth knowing. First, it is automatically invariant to
+        each dataset's overall brightness: rescaling a dataset changes
+        log SSE_k by a constant, which shifts the whole surface without moving
+        anything -- so unlike the fitness map, this does not care whether the
+        RMSD was normalized. Second, it is the *logarithm* of each dataset's
+        residual that gets averaged, not the residual itself, which is what
+        makes the noise-level marginalization show up as a plain reweighting.
+
+        divisor: how many raw points make up one independent one. Adjacent
+        points in a zero-filled/apodized spectrum are not independent, and N
+        sits in an exponent here, so overstating it drives the posterior
+        towards a delta function. Dividing N_k by this before use is the
+        crude but visible correction.
+
+        Returns a (n1, n2) array, offset so its minimum is 0, with NaN where
+        no dataset produced a usable residual -- or None if that is everywhere.
+        """
+        sse = np.asarray(results_sse, dtype=float)
+        nk = np.asarray(results_nk, dtype=float)
+        div = max(float(divisor), 1e-9)
+
+        usable = np.isfinite(sse) & (nk > 0)
+        # A dataset that fits perfectly would send log SSE to -inf; floor it
+        # rather than dropping the dataset, which would silently change the
+        # weighting at that one grid point.
+        safe = np.where(usable & (sse > 0), sse, 1.0)
+        safe = np.maximum(safe, 1e-300)
+
+        contrib = np.where(usable, (nk / (2.0 * div)) * np.log(safe), 0.0)
+        any_ok = usable.any(axis=2)
+        if not any_ok.any():
+            return None
+        nlp = np.where(any_ok, contrib.sum(axis=2), np.nan)
+        return nlp - np.nanmin(nlp)
+    def posterior_grid(self, nlp):
+        """exp(-nlp) normalized to sum to 1 over the grid. Failed points get
+        exactly zero probability. Returns None if nothing is finite.
+
+        Note this makes the scanned box the prior: the result is only
+        meaningful if the posterior has decayed to negligible before the edges,
+        which is worth checking by eye on the map itself."""
+        nlp = np.asarray(nlp, dtype=float)
+        good = np.isfinite(nlp)
+        if not good.any():
+            return None
+        p = np.zeros(nlp.shape, dtype=float)
+        p[good] = np.exp(-(nlp[good] - nlp[good].min()))
+        total = p.sum()
+        if not np.isfinite(total) or total <= 0:
+            return None
+        return p / total
+    def _sorted_levels(self, p):
+        """(densities sorted high to low, credible level of each). Cells of
+        equal density share one level -- the cumulative mass through the end of
+        their tied block. Without that, an arbitrary sort order splits a ring of
+        equal-probability cells across the contour, and the credible-level and
+        density displays disagree about where the boundary is."""
+        flat = np.asarray(p, dtype=float).ravel()
+        order = np.argsort(flat)[::-1]
+        s = flat[order]
+        cum = np.cumsum(s)
+        # index of the last cell in each run of equal density
+        last = np.searchsorted(-s, -s, side='right') - 1
+        return order, s, cum[last]
+    def credible_level_map(self, p):
+        """Label every cell with the smallest credible region that contains
+        it: near 0 at the most probable cell, 1 at the least. Contouring the
+        result at 0.68 / 0.95 draws the credible regions, and cells of zero
+        probability (failed points) land at 1."""
+        order, _s, lvl_sorted = self._sorted_levels(p)
+        level = np.empty(order.size, dtype=float)
+        level[order] = lvl_sorted
+        return level.reshape(np.shape(p))
+    def density_threshold(self, p, conf):
+        """The density value whose credible level is `conf` -- i.e. the contour
+        level that draws the same boundary on a plot of the density as
+        contouring the credible-level map at `conf` does. Interpolated between
+        adjacent cells so the two displays agree to better than one cell."""
+        _order, s, lvl_sorted = self._sorted_levels(p)
+        # lvl_sorted is non-decreasing, s non-increasing, so this reads off the
+        # density at which the credible level passes conf.
+        return float(np.interp(conf, lvl_sorted, s))
+    def marginal_interval(self, axis_vals, marg, conf):
+        """Highest-density interval of a 1-D marginal, returned as the span of
+        the selected cells. As with the existing confidence bounds, a
+        multimodal marginal is reported as the range that brackets every
+        included mode rather than as disjoint pieces -- conservative, and
+        consistent with what the F-test path reports."""
+        m = np.asarray(marg, dtype=float)
+        total = m.sum()
+        if not np.isfinite(total) or total <= 0:
+            return None
+        m = m / total
+        order = np.argsort(m)[::-1]
+        cum = np.cumsum(m[order])
+        k = min(int(np.searchsorted(cum, conf)) + 1, m.size)
+        sel = np.sort(order[:k])
+        return float(axis_vals[sel[0]]), float(axis_vals[sel[-1]])

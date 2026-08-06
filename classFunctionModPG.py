@@ -23,49 +23,6 @@ import theme
 from theme import PillButton
 
 
-# wx.SpinCtrlDouble rounds to its own `digits` setting on SetValue, and that
-# setting defaults to 1 -- so a control left at the default silently turns
-# 2.8374512 into 2.8, and 0.000123456 into 0.0 outright. The variable
-# controls below therefore carry as many decimals as the value in them
-# actually needs, rather than a fixed number. This cap keeps the display
-# clear of floating-point noise: at 15+ decimals wx starts showing the
-# binary representation (2.83745119999999984017).
-MAX_VAR_DIGITS = 12
-
-
-def digits_for_value(value, cap=MAX_VAR_DIGITS):
-    """Fewest decimals that still write `value` exactly, up to `cap`.
-
-    Taken from repr(), which is the shortest string that round-trips back
-    to the same float. Formatting to a fixed number of decimals instead
-    would expose the binary representation -- 123456.789 written to 12
-    decimals is '123456.789000000004', which would then be read as needing
-    all 12."""
-    try:
-        v = float(value)
-    except (TypeError, ValueError):
-        return 1
-    if not math.isfinite(v):
-        return 1
-    exponent = decimal.Decimal(repr(v)).as_tuple().exponent
-    if not isinstance(exponent, int) or exponent >= 0:
-        return 1                      # a whole number; keep one decimal
-    return max(1, min(cap, -exponent))
-
-
-def digits_for_step(step, cap=MAX_VAR_DIGITS):
-    """Decimals needed for `step` to actually move the value. Picking a
-    1e-6 step is pointless if the control only keeps one decimal -- the
-    nudge is rounded straight back off."""
-    try:
-        s = abs(float(step))
-    except (TypeError, ValueError):
-        return 1
-    if not math.isfinite(s) or s <= 0:
-        return 1
-    return max(1, min(cap, int(math.ceil(-math.log10(s))) if s < 1 else 1))
-
-
 class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
 
     # Names available inside expressions in addition to custom parameters
@@ -432,16 +389,21 @@ class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
             min=-1e12,
             max=1e12,
             inc=0.001,
-            initial=0.0
+            initial=0.0,
+            style=wx.SP_ARROW_KEYS | wx.TE_PROCESS_ENTER
         )
+        spin.SetDigits(6)
         spin.Bind(wx.EVT_CONTEXT_MENU, self.ShowStepMenu)
         spin.Bind(wx.EVT_RIGHT_DOWN, self.ShowStepMenu)
         # Widen the control to whatever precision was typed before reading
-        # the value back out, on both ways of committing an edit.
-        spin.Bind(wx.EVT_TEXT_ENTER,
-                  lambda e, sp=spin: self._on_variable_committed(e, sp))
+        # the value back out, on both ways of committing an edit. Enter goes
+        # through theme.bind_spin_enter rather than wx.EVT_TEXT_ENTER, which
+        # this control never emitted (it was built without TE_PROCESS_ENTER)
+        # and which is unreliable on compound controls even with it.
+        theme.bind_spin_enter(
+            spin, lambda sp=spin: self.on_variable_edited(None, sp))
         spin.Bind(wx.EVT_KILL_FOCUS,
-                  lambda e, sp=spin: self._on_variable_committed(e, sp))
+                  lambda e, sp=spin: self.on_variable_edited(e, sp))
         spin.Bind(wx.EVT_SPINCTRLDOUBLE, lambda e: self.recompute_all())
         theme.theme_control(spin)
 
@@ -460,49 +422,46 @@ class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
     # --------------------------------------------------------------
     # Variable value <-> control, without losing precision
     # --------------------------------------------------------------
-    @staticmethod
-    def set_variable_value(spin, value):
-        """Store `value` in a variable's spin control at full precision.
+    def set_variable_value(self, spin, value):
+        """Store `value` in a variable's spin control without losing
+        precision.
 
-        The control is given enough decimals for the value first, because
-        SetValue rounds to whatever `digits` currently is. The step is
-        respected too, so a control nudged in units of 1e-6 keeps at least
-        six decimals even when the value sitting in it is a round number."""
+        SetValue rounds to the control's `digits`, and that defaults to 1 --
+        so a fresh control turns 2.8374512 into 2.8 and 0.000123456 into 0.0
+        outright. Widen it first: enough decimals for the value, and at
+        least enough for the step to have any effect (a 1e-6 nudge on a
+        one-decimal control is rounded straight back off).
+
+        The decimals a value needs come from repr(), the shortest text that
+        round-trips back to the same float; formatting to a fixed width
+        instead would expose the binary representation, since 123456.789 to
+        12 decimals is '123456.789000000004'. Past 12 decimals that noise
+        shows up regardless, so the count is capped there."""
         try:
             v = float(value)
         except (TypeError, ValueError):
             return
-        need = max(digits_for_value(v), digits_for_step(spin.GetIncrement()))
-        if spin.GetDigits() != need:
-            spin.SetDigits(need)
+
+        spin.SetDigits(6)
         spin.SetValue(v)
 
-    def _on_variable_committed(self, event, spin):
-        event.Skip()          # EVT_KILL_FOCUS must keep propagating
-        self.commit_typed_value(spin)
+    def on_variable_edited(self, event, spin):
+        """Accept whatever precision was typed, reading the raw text before
+        wx rounds it to the control's current digits. `event` is None when
+        called from the Enter binding, which does its own skipping."""
+        if event is not None:
+            event.Skip()      # EVT_KILL_FOCUS must keep propagating
+        try:
+            self.set_variable_value(spin, float(spin.GetTextValue()))
+        except (TypeError, ValueError):
+            pass
         self.recompute_all()
 
-    def commit_typed_value(self, spin):
-        """Accept whatever precision was typed. Read the raw text before wx
-        rounds it to the control's current digits, then widen the control to
-        fit. Without this, typing 2.8374512 into a one-decimal control keeps
-        2.8 -- the same loss as loading did."""
-        try:
-            v = float(spin.GetTextValue())
-        except (TypeError, ValueError):
-            return
-        self.set_variable_value(spin, v)
-
     def set_variable_step(self, spin, step):
-        """Change the nudge size, keeping at least enough decimals for it to
-        have an effect, and without disturbing the value already there."""
-        current = spin.GetValue()
+        """Change the nudge size, re-applying the value so the control keeps
+        enough decimals for the new step to move it."""
         spin.SetIncrement(step)
-        need = max(digits_for_value(current), digits_for_step(step))
-        
-        if spin.GetDigits() != need:
-            spin.SetDigits(need)
-            spin.SetValue(current)
+        self.set_variable_value(spin, spin.GetValue())
 
     def ShowStepMenu(self, evt):
         menu = wx.Menu()

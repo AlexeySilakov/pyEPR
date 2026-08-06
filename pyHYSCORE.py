@@ -16,7 +16,6 @@ import matplotlib
 #matplotlib.use('WXAgg')                 # Force the WXAgg backend
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_wxagg import FigureCanvasWxAgg
-from matplotlib.backends.backend_wxagg import NavigationToolbar2WxAgg 
 import matplotlib.tri as mtri
 # from matplotlib import cm
 import matplotlib.pyplot as plt
@@ -535,6 +534,8 @@ class MatplotlibPanel(wx.Panel):
         self.showDiagonalProj = False
         self.OverlaySim = False
         self.quadrant = 'all'   # 'all' | 'horizontal' | 'vertical'
+        self.rebuildAxes = False  # set when the subplots must be recreated
+                                  # even though their number hasn't changed
         self.figure = Figure(figsize=(2, 2), dpi=100)
         self.axes = []
         self.contours = []   # parallel to self.axes; holds QuadContourSet or None
@@ -606,7 +607,7 @@ class MatplotlibPanel(wx.Panel):
         
         sizer.Add(self.canvas, 1, wx.EXPAND)
         
-        self.toolbar = NavigationToolbar2WxAgg(self.canvas)
+        self.toolbar = theme.ThemedNavigationToolbar(self.canvas)
         self.toolbar.Realize()
         # By adding toolbar in sizer, we are able to put it at the bottom
         # of the frame - so appearance is closer to GTK version.
@@ -654,6 +655,11 @@ class MatplotlibPanel(wx.Panel):
     def on_quadrant(self, event):
         sel = self.get_quadrant()
         self.quadrant = ('all', 'horizontal', 'vertical')[sel]
+        # The skyline panel shares its x axis with the data panel above only
+        # while it projects onto that same axis, and which axis that is
+        # depends on the quadrant -- so the subplots have to be rebuilt here,
+        # not merely re-limited.
+        self.rebuildAxes = True
         self.update_graph()
 
     def get_quadrant(self):
@@ -683,7 +689,7 @@ class MatplotlibPanel(wx.Panel):
 
         #print(nrows)
         makenew = False
-        if len(self.axes)!=nData*nrows:
+        if len(self.axes)!=nData*nrows or self.rebuildAxes:
             for ax in self.axes:
                 if ax is not None:
                     ax.clear()
@@ -692,6 +698,7 @@ class MatplotlibPanel(wx.Panel):
             self.contours = [None]*(nData*nrows)
             self.figure.clf()
             makenew = True
+        self.rebuildAxes = False
         axcnt= 0
         showLabels = True
         ### first row is always DATA
@@ -703,29 +710,63 @@ class MatplotlibPanel(wx.Panel):
                 data = dd['fftdata']
                 if isinstance(data, type(None)):
                     self.RaiseError("No FFT has been performed yet. Nothing to display")
-                axEx = [np.min(dd['fftax']['x']), np.max(dd['fftax']['x']), 
+                axEx = [np.min(dd['fftax']['x']), np.max(dd['fftax']['x']),
                         np.min(dd['fftax']['y']), np.max(dd['fftax']['y'])]
-                
-                ma = np.max(np.max(data))*dd['zmax']
-                mi = np.max(np.max(data))*dd['zmin'] 
+                freqDomain = True
                 xmi,xma, ymi, yma = (dd['fmin'], dd['fmax'], dd['fmin'], dd['fmax'] )
                 axlabel='Frequency, MHz'
             else:
                 data = np.real(dd['data'][:,:,0])
-                axEx = [np.min(dd['ax']['x']), np.max(dd['ax']['x']), 
+                axEx = [np.min(dd['ax']['x']), np.max(dd['ax']['x']),
                         np.min(dd['ax']['y']), np.max(dd['ax']['y'])]
+                freqDomain = dd['isfft']
                 if not dd['isfft']:
-                    ma = np.max(np.max(data)); mi = np.min(np.min(data))
                     xmi = np.min(dd['ax']['x'])
                     xma = np.max(dd['ax']['x'])
                     ymi = np.min(dd['ax']['y'])
-                    yma = np.max(dd['ax']['y'])  
+                    yma = np.max(dd['ax']['y'])
                 else:
-                    ma = np.max(np.max(data))*dd['zmax']
-                    mi = np.max(np.max(data))*dd['zmin'] 
                     xmi,xma, ymi, yma = (dd['fmin'], dd['fmax'], dd['fmin'], dd['fmax'] )
                 axlabel=r'Time, $\mu$s'
-            if makenew:                                             
+
+            # -- Quadrant display mode ---------------------------------------
+            # A quadrant choice only means anything while the range actually
+            # straddles zero: then "horiz"/"vert" drop the negative half of
+            # one axis. If f.min and f.max already sit in the same quadrant
+            # (both positive, say) the buttons do nothing and the limits stay
+            # exactly f.min..f.max -- they used to overwrite one of them with
+            # a hard 0, throwing away a positive f.min set to crop the
+            # low-frequency pile-up near the origin.
+            if self.quadrant == 'horizontal' and ymi < 0 < yma:
+                # Show full x range (±ν₁) but only positive y (ν₂ ≥ 0)
+                ymi = 0.0
+            elif self.quadrant == 'vertical' and xmi < 0 < xma:
+                # Show only positive x (ν₁ ≥ 0) but full y range (±ν₂)
+                xmi = 0.0
+
+            # Index masks for the visible window. The colour scale (when
+            # z.max is negative), the skyline projections and the diagonal
+            # projection all work off the displayed region only, not the
+            # whole map.
+            x_axis = np.linspace(axEx[0], axEx[1], data.shape[1])
+            y_axis = np.linspace(axEx[2], axEx[3], data.shape[0])
+            x_vis = (x_axis >= xmi) & (x_axis <= xma)
+            y_vis = (y_axis >= ymi) & (y_axis <= yma)
+
+            # A negative z.max means "scale by the maximum of the visible
+            # area" rather than by the maximum of the whole map, so z.max=-1
+            # puts the brightest visible feature at the top of the colour
+            # scale no matter what sits outside the window.
+            scale = np.max(data)
+            if dd['zmax'] < 0 and x_vis.any() and y_vis.any():
+                scale = np.max(data[np.ix_(y_vis, x_vis)])
+
+            if freqDomain:
+                ma = scale*abs(dd['zmax'])
+                mi = scale*dd['zmin']
+            else:
+                ma = np.max(np.max(data)); mi = np.min(np.min(data))
+            if makenew:
                 self.axes[axcnt]=self.figure.add_subplot(nrows, nData, axcnt+1)
                 
                 im = self.axes[axcnt].imshow(
@@ -743,18 +784,6 @@ class MatplotlibPanel(wx.Panel):
                         break
             self.axes[axcnt].set_xlim(xmi, xma)
             self.axes[axcnt].set_ylim(ymi, yma)
-            # -- Quadrant display mode ---------------------------------------
-            # xmi/xma/ymi/yma already span the full FFT range (negative to
-            # positive). Override limits to show only the requested quadrants.
-            if self.quadrant == 'horizontal':
-                # Show full x range (±ν₁) but only positive y (ν₂ ≥ 0)
-                self.axes[axcnt].set_xlim(xmi, xma)
-                self.axes[axcnt].set_ylim(0, yma)
-            elif self.quadrant == 'vertical':
-                # Show only positive x (ν₁ ≥ 0) but full y range (±ν₂)
-                self.axes[axcnt].set_xlim(0, xma)
-                self.axes[axcnt].set_ylim(ymi, yma)
-            # 'all' keeps the limits already set above unchanged
             tf = dd['field']
             self.axes[axcnt].set_title(f'B$_0$={tf} mT', fontsize = 'small')
             if showLabels:
@@ -770,11 +799,20 @@ class MatplotlibPanel(wx.Panel):
                 nlev = 7
                 if type(dd['simdata'])!=type(None):
                     simdata = dd['simdata']
-                    sima = np.max(np.max(simdata))
-                    simi = sima*dd['zmin']/dd['zmax']
-                    simaxEx = [np.min(dd['simax']['x']), np.max(dd['simax']['x']), 
+                    simaxEx = [np.min(dd['simax']['x']), np.max(dd['simax']['x']),
                             np.min(dd['simax']['y']), np.max(dd['simax']['y'])]
-                    
+                    # The simulation always fills its own colour scale; z.min
+                    # and z.max only fix the *relative* height of the low cut,
+                    # so the two panels have matching contrast. A negative
+                    # z.max scales by the visible window here too.
+                    sx_axis = np.linspace(simaxEx[0], simaxEx[1], simdata.shape[1])
+                    sy_axis = np.linspace(simaxEx[2], simaxEx[3], simdata.shape[0])
+                    sx_vis = (sx_axis >= xmi) & (sx_axis <= xma)
+                    sy_vis = (sy_axis >= ymi) & (sy_axis <= yma)
+                    sima = np.max(np.max(simdata))
+                    if dd['zmax'] < 0 and sx_vis.any() and sy_vis.any():
+                        sima = np.max(simdata[np.ix_(sy_vis, sx_vis)])
+                    simi = sima*dd['zmin']/abs(dd['zmax']) if dd['zmax'] else 0.0
                 else:
                     simdata = np.zeros_like(data)
                     simi,sima = (0.0, 1.0)
@@ -819,74 +857,69 @@ class MatplotlibPanel(wx.Panel):
                         simdata, np.linspace(simi, sima, nlev),
                         colors=['white'], linewidths=0.5)
 
-                # axes lim set to data specs, then quadrant mode applied
+                # same visible window as the data panel above
                 self.axes[simax].set_xlim(xmi, xma)
                 self.axes[simax].set_ylim(ymi, yma)
-                if self.quadrant == 'horizontal':
-                    self.axes[simax].set_xlim(xmi, xma)
-                    self.axes[simax].set_ylim(0, yma)
-                elif self.quadrant == 'vertical':
-                    self.axes[simax].set_xlim(0, xma)
-                    self.axes[simax].set_ylim(ymi, yma)
                 if len(realsim)>0:
                     self.axes[simax].annotate("no simulation", (.0, .0), xycoords='axes points', color='w')
                 rowcnt+=1
             ########## ----- skyline (max projection along each axis) ----------
             if self.showSkyline:
                 skyax = axcnt+rowcnt*nData
+                # Which axis is being projected onto depends on the quadrant:
+                # 'all'/'horizontal' project onto ν₁ (the data panel's own x
+                # axis, so the two can share it and stay aligned on zoom),
+                # 'vertical' projects onto ν₂ and must not.
+                show_x = self.quadrant in ('all', 'horizontal')
+                show_y = self.quadrant == 'vertical'
                 if makenew:
-                    # sharex links physical x width to the data panel above
                     self.axes[skyax] = self.figure.add_subplot(
-                        nrows, nData, skyax+1, sharex=self.axes[axcnt])
+                        nrows, nData, skyax+1,
+                        sharex=self.axes[axcnt] if show_x else None)
                 else:
                     self.axes[skyax].cla()
 
-                # Determine frequency range for each axis based on quadrant mode
-                # 'vertical'   -> only ν₁ ≥ 0, so x runs [0, xma]; y still full
-                # 'horizontal' -> only ν₂ ≥ 0, so y runs [0, yma]; x still full
-                sky_xmi = 0 if self.quadrant == 'vertical'   else xmi
-                sky_ymi = 0 if self.quadrant == 'horizontal' else ymi
-
-                # Slice data to the active quadrant before projecting
-                x_axis = np.linspace(axEx[0], axEx[1], data.shape[1])
-                y_axis = np.linspace(axEx[2], axEx[3], data.shape[0])
-                x_mask = x_axis >= sky_xmi
-                y_mask = y_axis >= sky_ymi
-                sky_data = data[np.ix_(y_mask, x_mask)]
-                show_x = self.quadrant in ('all', 'horizontal')
-                show_y = self.quadrant == 'vertical'
+                # Project over the visible window only (x_vis/y_vis carry both
+                # the f.min/f.max crop and the quadrant restriction), so the
+                # skyline shows the peaks actually on screen instead of being
+                # dominated -- and normalized -- by whatever lies outside it.
+                sky_data = data[np.ix_(y_vis, x_vis)]
                 if show_x:
                     sky_x = np.max(sky_data, axis=0)
                     norm_val = np.max(sky_x) if np.max(sky_x) != 0 else 1.0
-                    self.axes[skyax].plot(x_axis[x_mask], sky_x / norm_val, color='b', label='x-proj')
+                    self.axes[skyax].plot(x_axis[x_vis], sky_x / norm_val, color='b', label='x-proj')
                 if show_y:
                     sky_y = np.max(sky_data, axis=1)
                     norm_val = np.max(sky_y) if np.max(sky_y) != 0 else 1.0
-                    self.axes[skyax].plot(y_axis[y_mask], sky_y / norm_val, color='g', label='y-proj')
+                    self.axes[skyax].plot(y_axis[y_vis], sky_y / norm_val, color='g', label='y-proj')
 
                 if type(dd['simdata']) != type(None):
                     simdata_sky = dd['simdata']
                     simaxEx_sky = [np.min(dd['simax']['x']), np.max(dd['simax']['x']),
                                np.min(dd['simax']['y']), np.max(dd['simax']['y'])]
-                    sx_axis = np.linspace(simaxEx_sky[0], simaxEx_sky[1], simdata_sky.shape[1])
-                    sy_axis = np.linspace(simaxEx_sky[2], simaxEx_sky[3], simdata_sky.shape[0])
-                    sx_mask = sx_axis >= sky_xmi
-                    sy_mask = sy_axis >= sky_ymi
-                    ssky_data = simdata_sky[np.ix_(sy_mask, sx_mask)]
+                    ssx_axis = np.linspace(simaxEx_sky[0], simaxEx_sky[1], simdata_sky.shape[1])
+                    ssy_axis = np.linspace(simaxEx_sky[2], simaxEx_sky[3], simdata_sky.shape[0])
+                    ssx_vis = (ssx_axis >= xmi) & (ssx_axis <= xma)
+                    ssy_vis = (ssy_axis >= ymi) & (ssy_axis <= yma)
+                    ssky_data = simdata_sky[np.ix_(ssy_vis, ssx_vis)]
                     if show_x:
                         ssky_x = np.max(ssky_data, axis=0)
                         snorm = np.max(ssky_x) if np.max(ssky_x) != 0 else 1.0
-                        self.axes[skyax].plot(sx_axis[sx_mask], ssky_x / snorm, color='r',
+                        self.axes[skyax].plot(ssx_axis[ssx_vis], ssky_x / snorm, color='r',
                                               linestyle='--', label='sim x-proj')
                     if show_y:
                         ssky_y = np.max(ssky_data, axis=1)
                         snorm = np.max(ssky_y) if np.max(ssky_y) != 0 else 1.0
-                        self.axes[skyax].plot(sy_axis[sy_mask], ssky_y / snorm, color='m',
+                        self.axes[skyax].plot(ssy_axis[ssy_vis], ssky_y / snorm, color='m',
                                               linestyle='--', label='sim y-proj')
 
-                # x limits mirror the data panel (sharex keeps them in sync on zoom,
-                # but we set them explicitly so the initial view is correct too)
-                self.axes[skyax].set_xlim(sky_xmi, xma)
+                # Span exactly the projected axis's visible range (for the
+                # x-projection sharex keeps that in sync with the data panel
+                # on zoom, but the initial view still has to be set here).
+                if show_y:
+                    self.axes[skyax].set_xlim(ymi, yma)
+                else:
+                    self.axes[skyax].set_xlim(xmi, xma)
                 self.axes[skyax].set_ylabel('Intensity (norm.)', fontsize='small')
                 self.axes[skyax].legend(fontsize='x-small', loc='upper right')
                 rowcnt += 1
@@ -945,13 +978,17 @@ class MatplotlibPanel(wx.Panel):
                 npts = data.shape[0]
                 dx = (axEx[1]-axEx[0])/(npts-1)
                 dy = (axEx[3]-axEx[2])/(npts-1)
-                idxmi = int(np.floor((xmi-axEx[0])/dx))
-                idxma = int(np.floor((xma-axEx[0])/dx))
-                idymi = int(np.floor((ymi-axEx[2])/dy))
-                idyma = int(np.floor((yma-axEx[2])/dy))
-                ma = np.max(np.max(data))*dd['zmax']
+                # Clipped: with a quadrant selected the visible window no
+                # longer covers the whole map, and a negative index would
+                # wrap round to the far edge instead of stopping at it.
+                idxmi = max(0, int(np.floor((xmi-axEx[0])/dx)))
+                idxma = min(data.shape[1], int(np.floor((xma-axEx[0])/dx)))
+                idymi = max(0, int(np.floor((ymi-axEx[2])/dy)))
+                idyma = min(data.shape[0], int(np.floor((yma-axEx[2])/dy)))
+                ma = scale*abs(dd['zmax']) or 1.0
 
-                rotdata = self.rotate45(data[idxmi:idxma, idymi:idyma]/ma)
+                # data is indexed [row=y, col=x]
+                rotdata = self.rotate45(data[idymi:idyma, idxmi:idxma]/ma)
                 skyprj = np.max(rotdata, axis=0)
                 xaX = np.linspace(idxmi*dx+axEx[0], idxma*dx+axEx[0], rotdata.shape[0]) - (xma+xmi)/2
                 self.axes[diagprj].plot(xaX, skyprj, color='b')
@@ -965,13 +1002,13 @@ class MatplotlibPanel(wx.Panel):
                     npts = simdata.shape[0]
                     dx = (simaxEx[1]-simaxEx[0])/(npts-1)
                     dy = (simaxEx[3]-simaxEx[2])/(npts-1)
-                    idxmi = int(np.floor((xmi-simaxEx[0])/dx))
-                    idxma = int(np.floor((xma-simaxEx[0])/dx))
-                    idymi = int(np.floor((ymi-simaxEx[2])/dy))
-                    idyma = int(np.floor((yma-simaxEx[2])/dy))
-                    ma = np.max(np.max(simdata))
+                    idxmi = max(0, int(np.floor((xmi-simaxEx[0])/dx)))
+                    idxma = min(simdata.shape[1], int(np.floor((xma-simaxEx[0])/dx)))
+                    idymi = max(0, int(np.floor((ymi-simaxEx[2])/dy)))
+                    idyma = min(simdata.shape[0], int(np.floor((yma-simaxEx[2])/dy)))
+                    ma = np.max(np.max(simdata)) or 1.0
 
-                    rotdata = self.rotate45(simdata[idxmi:idxma, idymi:idyma]/ma)
+                    rotdata = self.rotate45(simdata[idymi:idyma, idxmi:idxma]/ma)
                     skyprj = np.max(rotdata, axis=0)
                     xaX = np.linspace(idxmi*dx+simaxEx[0], idxma*dx+simaxEx[0], rotdata.shape[0]) - (xma+xmi)/2
                     self.axes[diagprj].plot(xaX, skyprj, color='r')
@@ -984,12 +1021,15 @@ class MatplotlibPanel(wx.Panel):
             self.figure.tight_layout(pad=1.2)
         self.canvas.draw()
     def rotate45(self, A):
-        N = A.shape[0]
-        out_size = 2 * N - 1
+        # Rectangular, not just square: once a quadrant crops one axis but
+        # not the other, the visible window this is handed is no longer
+        # N x N. Reduces to the original square case when nrow == ncol.
+        nrow, ncol = A.shape
+        out_size = nrow + ncol - 1
         out = np.zeros((out_size, out_size), dtype=A.dtype)
-        ii, jj = np.indices((N, N))
+        ii, jj = np.indices((nrow, ncol))
         x = ii + jj
-        y = ii - jj + (N - 1)
+        y = ii - jj + (ncol - 1)
         out[x, y] = A
         return out
 class TabulatedPanel(wx.Panel):
@@ -1218,6 +1258,13 @@ class TabulatedPanel(wx.Panel):
         self.filetree.SetCaptionBackgroundColour(self.Color_BG_FILE_Inact)
         self.filetree.SetCaptionTextColour(self.Color_FG_FILE_Title)
         self.filetree.SetEmptySpaceColour(self.Color_BG_FILE_Main)
+
+        # "BG Scale" uses the app's spin-with-step-menu float editor. Editors
+        # live in one registry shared by every grid, but this panel is built
+        # before any PropGridPanel is, so it can't rely on one of those
+        # having registered it already.
+        if not self.filetree.GetEditorByName("SpinFloat"):
+            self.filetree.RegisterEditor(MypgPanel.SpinCtrlDoubleEditor, "SpinFloat")
         # cat1 = self.filetree.Append(wxpg.PropertyCategory("Nothing loaded yet"))
         # self.filetree.AppendIn(cat1, wxpg.FloatProperty("MW Freq", value=9.43))
         # self.filetree.AppendIn(cat1, wxpg.FloatProperty("B0", value=350.0))
@@ -1583,7 +1630,13 @@ class TabulatedPanel(wx.Panel):
     def on_filetree(self, event):
         (key, strval) = event.GetPropertyName().split()
         val = int(strval)
-        self.parent.Data[val][key]=event.GetValue()
+        if key == 'bgdata':
+            # An EnumProperty's value is the index into its choice list; the
+            # dataset stores the background's title, which is what
+            # update_FFT() matches against.
+            self.parent.Data[val][key] = event.GetProperty().GetValueAsString()
+        else:
+            self.parent.Data[val][key] = event.GetValue()
         if self.parent.tb_autoFFT.GetValue():
             self.parent.update_FFT()
             
@@ -1643,17 +1696,24 @@ class TabulatedPanel(wx.Panel):
             self.filetree.AppendIn(cat[ii], wxpg.FloatProperty("z.min", f"zmin {ii}",value=dd['zmin']))
             self.filetree.AppendIn(cat[ii], wxpg.FloatProperty("f.max", f"fmax {ii}",value=dd['fmax']))
             self.filetree.AppendIn(cat[ii], wxpg.FloatProperty("f.min", f"fmin {ii}",value=dd['fmin']))
-            if dd['bgdata'] in bgchoices:
-                val = [dd['bgdata']]
-            else:
-                ### this is to make sure everything lines up
-                val = ['none']
-                self.parent.Data[ii]['bgdata']=val
-                
-            self.filetree.AppendIn(cat[ii], wxpg.MultiChoiceProperty("BG Data", f"bgdata {ii}",
-                                                                     choices=bgchoices,
-                                                                     value=val))
-            self.filetree.AppendIn(cat[ii], wxpg.FloatProperty("BG Scale", f"bgscale {ii}",value=dd['bgscale']))
+            # A single pulldown, like "Show" -- not a multi-choice. Only one
+            # background can be subtracted anyway, and MultiChoiceProperty
+            # handed back a *list*, which then never matched the plain title
+            # strings this list is rebuilt from, so every rebuild silently
+            # reset the selection to 'none'.
+            bgname = dd['bgdata']
+            if isinstance(bgname, (list, tuple)):   # sessions saved earlier
+                bgname = bgname[0] if len(bgname) else 'none'
+            if bgname not in bgchoices:
+                bgname = 'none'
+            self.parent.Data[ii]['bgdata'] = bgname
+            self.filetree.AppendIn(cat[ii], wxpg.EnumProperty("BG Data", f"bgdata {ii}",
+                                                              labels=bgchoices,
+                                                              value=bgchoices.index(bgname)))
+            bgscale = self.filetree.AppendIn(
+                cat[ii], wxpg.FloatProperty("BG Scale", f"bgscale {ii}", value=dd['bgscale']))
+            self.filetree.SetPropertyEditor(bgscale, "SpinFloat")
+            bgscale.SetAttribute(wxpg.PG_ATTR_SPINCTRL_STEP, 0.01)
         if self.chk_expanded.GetValue():
             self.filetree.ExpandAll()
         else:
@@ -1762,24 +1822,21 @@ class MainFrame(wx.Frame):
             (wx.ACCEL_CTRL, ord('D'), theme_id),
         ]))
 
-        # ---- Status bar ----------------------------------------------------
+        # ---- Status strip --------------------------------------------------
         # Field 0: general status messages
         # Field 1: x, y coordinates when hovering over a matplotlib axis
-        # Field 2: holds the simulation progress gauge (see _position_sim_gauge)
-        self.statusbar = self.CreateStatusBar(3)
-        self.statusbar.SetStatusWidths([-1, 260, 170])
+        # Then the simulation progress gauge, hidden unless a run is going.
+        # theme.StatusStrip rather than a native wx.StatusBar, whose field
+        # text is drawn by MSW in the system colour and stayed black in dark
+        # mode however the theme was set.
+        self.statusbar = theme.StatusStrip(self, widths=[-1, 260])
         self.statusbar.SetStatusText("Ready", 0)
         self.statusbar.SetStatusText("", 1)
 
-        # A gauge parented to the status bar and moved into field 2 by hand --
-        # wx has no notion of a widget "in" a status bar field, so its
-        # position has to be recomputed whenever the bar is laid out. Hidden
-        # unless a run is actually in progress.
         self.sim_gauge = wx.Gauge(self.statusbar, range=100,
                                    style=wx.GA_HORIZONTAL | wx.GA_SMOOTH)
+        self.statusbar.AddWidget(self.sim_gauge, width=170)
         self.sim_gauge.Hide()
-        self.statusbar.Bind(wx.EVT_SIZE, self._on_statusbar_size)
-        wx.CallAfter(self._position_sim_gauge)
 
         # Root splitter:  left | right
         self.splitter_main = wx.SplitterWindow(self, style=wx.SP_3D)
@@ -1842,6 +1899,7 @@ class MainFrame(wx.Frame):
         main_sizer = wx.BoxSizer(wx.VERTICAL)
         main_sizer.Add(self.top_toolbar, 0, wx.EXPAND)
         main_sizer.Add(content_sizer, 1, wx.EXPAND)
+        main_sizer.Add(self.statusbar, 0, wx.EXPAND)
         self.SetSizer(main_sizer)
 
         # Freeze the whole window for the duration of a live resize or
@@ -2173,13 +2231,18 @@ class MainFrame(wx.Frame):
             if dd['isfft']:
                 continue          # skip already-FFT datasets; do NOT return
             
-            # dd['bgdata'] is coming from a MultiChoice property, so it's value is a list
-            if dd['bgdata'][0]!='none':
+            # dd['bgdata'] holds the chosen background's title, or 'none'.
+            # Sessions saved while it was a MultiChoice property carry a
+            # one-element list instead.
+            bgname = dd['bgdata']
+            if isinstance(bgname, (list, tuple)):
+                bgname = bgname[0] if len(bgname) else 'none'
+            if bgname!='none':
                 BGscale= dd['bgscale']
-                
+
                 gotBG = False
                 for bb in self.BGData:
-                    if dd['bgdata'][0]==bb['title']:
+                    if bgname==bb['title']:
                         if len(bb['data'].shape)>2: ### need to fix at the source. Just for now let's deal with it.
                             BG = np.array(bb['data'][:,:,0])
                         else:
@@ -2306,29 +2369,14 @@ class MainFrame(wx.Frame):
     # ------------------------------------------------------------------
     # Simulation progress gauge (lives in status bar field 2)
     # ------------------------------------------------------------------
-    def _on_statusbar_size(self, event):
-        event.Skip()
-        self._position_sim_gauge()
-
-    def _position_sim_gauge(self):
-        gauge = getattr(self, 'sim_gauge', None)
-        if gauge is None:
-            return
-        try:
-            rect = self.statusbar.GetFieldRect(2)
-        except Exception:
-            return          # field not there yet during early construction
-        gauge.SetPosition((rect.x + 2, rect.y + 2))
-        gauge.SetSize((max(rect.width - 4, 1), max(rect.height - 4, 1)))
-
     def _sim_progress_begin(self, total):
         """Show an empty gauge sized to the number of spectra about to run."""
         if total <= 0:
             return
         self.sim_gauge.SetRange(total)
         self.sim_gauge.SetValue(0)
-        self._position_sim_gauge()
         self.sim_gauge.Show()
+        self.statusbar.Layout()
         self.statusbar.SetStatusText(f"Simulating 0/{total}...", 0)
         self.statusbar.Update()
 
@@ -2345,6 +2393,7 @@ class MainFrame(wx.Frame):
     def _sim_progress_end(self):
         self.sim_gauge.SetValue(0)
         self.sim_gauge.Hide()
+        self.statusbar.Layout()
 
     def runSim(self):
         self.Sys.setFromCtrl(self.tabulated_panel.Sys_param.parameters)

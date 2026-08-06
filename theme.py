@@ -22,6 +22,9 @@ import sys
 import wx
 import wx.propgrid as wxpg
 
+from matplotlib import cbook
+from matplotlib.backends.backend_wxagg import NavigationToolbar2WxAgg
+
 THEMES = {
     "light": {
         "win_bg": "#F4F3F8",
@@ -166,6 +169,54 @@ def theme_control(w):
                     pass
 
 
+def bind_spin_enter(spin, handler=None):
+    """Make Enter commit a wx.SpinCtrl/wx.SpinCtrlDouble immediately, the
+    same way tabbing away or clicking elsewhere already does.
+
+    wx.EVT_TEXT_ENTER is unreliable for these compound controls: it only
+    fires at all when wx.TE_PROCESS_ENTER was passed at construction (easy
+    to forget, and impossible to add afterwards), and on some wxWidgets
+    builds it doesn't fire even then. Catching the raw key press works
+    regardless -- but WHERE it has to be bound differs by control kind:
+    wx.SpinCtrlDouble is a generic control with an embedded wx.TextCtrl
+    that actually holds keyboard focus, while a plain wx.SpinCtrl is a
+    single native (MSW) widget with no child windows at all and receives
+    key events directly.
+
+    IMPORTANT: at the moment Enter's key-down fires, spin.GetValue() still
+    returns the last *committed* value, not what is currently typed -- the
+    pending text hasn't been parsed into it yet (that normally only happens
+    via the control's internal kill-focus handling). So read the typed text
+    straight out of the embedded field and parse that instead; using
+    GetValue() here is exactly the "Enter resets to the previous number"
+    bug."""
+    text_child = next((c for c in spin.GetChildren()
+                       if isinstance(c, wx.TextCtrl)), None)
+
+    def on_key(event):
+        enter = event.GetKeyCode() in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER)
+        # Skip first, not last: a commit handler is free to tear the control
+        # down (the Function Modifiers panel drops a parameter's spin box as
+        # soon as no expression references it any more), and touching the
+        # event afterwards would then be reaching through a dead window.
+        event.Skip()
+        if enter:
+            if text_child is not None:
+                try:
+                    spin.SetValue(float(text_child.GetValue()))
+                except (ValueError, TypeError):
+                    pass
+            if handler is not None:
+                handler()
+    # Bind on exactly ONE window: a compound control's child key event
+    # propagates up to the parent when skipped, so binding both would fire
+    # the handler twice per Enter press.
+    if text_child is not None:
+        text_child.Bind(wx.EVT_KEY_DOWN, on_key)
+    else:
+        spin.Bind(wx.EVT_KEY_DOWN, on_key)
+
+
 # --------------------------------------------------------------------------- #
 # Native-control retheming (things that stay native for behavioural reasons:
 # property grids, list ctrls, splitters, gauges, status bars, plain
@@ -183,6 +234,11 @@ def apply_theme_to_window(win, theme):
     border = wx.Colour(t["border"])
 
     def walk(w):
+        if isinstance(w, ThemedNavigationToolbar):
+            # Rebuilds its icon bitmaps in the new accent colour; also does
+            # its own background/label colouring, so don't fall through.
+            w.retint(theme)
+            return
         if isinstance(w, wxpg.PropertyGrid):
             pass   # themed separately via theme_propgrid() -- needs caption-key choice
         elif isinstance(w, wx.ListCtrl):
@@ -243,13 +299,9 @@ def apply_theme_to_window(win, theme):
         except Exception:
             pass
     walk(win)
-
-    if isinstance(win, wx.Frame):
-        sb = win.GetStatusBar()
-        if sb is not None:
-            sb.SetBackgroundColour(win_bg)
-            sb.SetForegroundColour(fg)
-            sb.Refresh()
+    # No native-wx.StatusBar case here: those ignore SetForegroundColour on
+    # MSW and are not used any more -- see StatusStrip, which the walk above
+    # recolours like any other panel.
 
 
 def theme_propgrid(pg, theme=None, caption_key="accent"):
@@ -300,6 +352,104 @@ def style_figure(figure, axes_list, theme=None):
         ax.xaxis.label.set_color(t["ax_fg"])
         ax.yaxis.label.set_color(t["ax_fg"])
         ax.title.set_color(t["ax_fg"])
+
+
+class ThemedNavigationToolbar(NavigationToolbar2WxAgg):
+    """matplotlib's built-in Home/Back/Forward/Pan/Zoom/Subplots/Save
+    toolbar (the one docked under each plot), recoloured to this app's
+    accent colour instead of matplotlib's default black -- which otherwise
+    only ever turns white if the *OS* itself is in dark mode, completely
+    ignoring this app's own theme toggle, so the whole strip stayed a black
+    smear on a dark background."""
+
+    @staticmethod
+    def _icon(name):
+        path = cbook._get_data_path('images', name)
+        if path.suffix == '.svg':
+            svg = path.read_bytes()
+            hexcolor = theme_colors()["accent"].encode("ascii")
+            svg = svg.replace(b'fill:black;', b'fill:' + hexcolor + b';')
+            size = wx.ArtProvider().GetDIPSizeHint(wx.ART_TOOLBAR)
+            return wx.BitmapBundle.FromSVG(svg, size)
+        return NavigationToolbar2WxAgg._icon(name)   # non-svg icons: unchanged
+
+    def retint(self, theme=None):
+        """Re-apply the current theme to every button plus the toolbar's own
+        background and coordinate readout. matplotlib only builds those
+        bitmaps once, at construction time, so this has to be called again
+        after the theme (or the accent colour itself) changes."""
+        t = THEMES[theme or _CURRENT_THEME]
+        for text, _tip, image_file, _cb in self.toolitems:
+            if text is None or text not in self.wx_ids:
+                continue
+            self.SetToolNormalBitmap(
+                self.wx_ids[text], self._icon(f"{image_file}.svg"))
+        # The strip itself and the "x=... y=..." label matplotlib puts at its
+        # right-hand end are plain wx windows and keep whatever colour they
+        # were built with.
+        self.SetBackgroundColour(wx.Colour(t["win_bg"]))
+        self.SetForegroundColour(wx.Colour(t["text"]))
+        label = getattr(self, "_label_text", None)
+        if label is not None:
+            label.SetBackgroundColour(wx.Colour(t["win_bg"]))
+            label.SetForegroundColour(wx.Colour(t["text"]))
+        self.Realize()
+        self.Refresh()
+
+
+class StatusStrip(wx.Panel):
+    """A flat status bar built out of wx.StaticText fields.
+
+    wx.StatusBar on MSW is a native common control that paints its field
+    text in the *system* colour and ignores SetForegroundColour outright,
+    so its text stayed black on the dark background no matter what the
+    theme said. This is an ordinary panel, so it just follows the theme
+    along with everything else, and it drops the native sunken field
+    separators and size grip that never suited this app's flat look either.
+
+    Drop-in for the wx.StatusBar calls used here: SetStatusText(text,
+    field) and GetStatusText(field). `widths` mirrors SetStatusWidths --
+    a negative entry is a stretch weight, a positive one a fixed pixel
+    width. Extra controls (a progress gauge, say) go in via AddWidget."""
+
+    def __init__(self, parent, widths=(-1,), **kw):
+        super().__init__(parent, **kw)
+        self.fields = []
+        sizer = wx.BoxSizer(wx.HORIZONTAL)
+        for width in widths:
+            label = wx.StaticText(self, style=wx.ST_ELLIPSIZE_END)
+            if width < 0:
+                sizer.Add(label, -width,
+                          wx.ALIGN_CENTER_VERTICAL | wx.ALL, 4)
+            else:
+                label.SetMinSize(wx.Size(width, -1))
+                sizer.Add(label, 0,
+                          wx.ALIGN_CENTER_VERTICAL | wx.ALL, 4)
+            self.fields.append(label)
+        self.SetSizer(sizer)
+        # Initial colours; apply_theme_to_window() repaints the panel and its
+        # labels along with everything else on a theme switch.
+        t = theme_colors()
+        self.SetBackgroundColour(wx.Colour(t["win_bg"]))
+        self.SetForegroundColour(wx.Colour(t["text"]))
+
+    def SetStatusText(self, text, field=0):
+        if 0 <= field < len(self.fields):
+            self.fields[field].SetLabel(text)
+
+    def GetStatusText(self, field=0):
+        if 0 <= field < len(self.fields):
+            return self.fields[field].GetLabel()
+        return ''
+
+    def AddWidget(self, win, width=0):
+        """Dock a control at the right-hand end of the strip. Hiding it
+        closes the gap, since this is a real sizer and not a status bar's
+        hand-positioned overlay."""
+        if width > 0:
+            win.SetMinSize(wx.Size(width, -1))
+        self.GetSizer().Add(win, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 3)
+        self.Layout()
 
 
 def recolor_icon_image(path, hex_color):
