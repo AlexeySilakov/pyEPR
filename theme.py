@@ -259,7 +259,7 @@ def apply_theme_to_window(win, theme):
             except Exception:
                 pass
         elif isinstance(w, (wx.TextCtrl, wx.SpinCtrl, wx.SpinCtrlDouble,
-                            wx.Choice, wx.ComboBox)):
+                            wx.Choice, wx.ComboBox, wx.StaticText)):
             strip_native_visual_style(w)
             w.SetBackgroundColour(ctrl_bg)
             try:
@@ -417,7 +417,7 @@ class StatusStrip(wx.Panel):
         self.fields = []
         sizer = wx.BoxSizer(wx.HORIZONTAL)
         for width in widths:
-            label = wx.StaticText(self, style=wx.ST_ELLIPSIZE_END)
+            label = wx.StaticText(self, style=wx.ST_ELLIPSIZE_END|wx.BORDER_NONE)
             if width < 0:
                 sizer.Add(label, -width,
                           wx.ALIGN_CENTER_VERTICAL | wx.ALL, 4)
@@ -430,7 +430,7 @@ class StatusStrip(wx.Panel):
         # Initial colours; apply_theme_to_window() repaints the panel and its
         # labels along with everything else on a theme switch.
         t = theme_colors()
-        self.SetBackgroundColour(wx.Colour(t["win_bg"]))
+        self.SetBackgroundColour(wx.Colour(t["ctrl_bg"]))
         self.SetForegroundColour(wx.Colour(t["text"]))
 
     def SetStatusText(self, text, field=0):

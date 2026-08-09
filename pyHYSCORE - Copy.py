@@ -28,7 +28,6 @@ from hyscore_sim import optHYSCORE, HYSCOREsim
 from colormap_editor import (ColormapEditorDialog, stops_to_cmap,
                               colormap_to_stops)
 import grid_search
-import time
 # import wx.lib.agw.customtreectrl as CT
 VERSION=0.9
 
@@ -108,7 +107,7 @@ class FileBrowserPanel(wx.Panel, listmix.ListCtrlAutoWidthMixin,
         hbox_path = wx.BoxSizer(wx.HORIZONTAL)
 
         self.lbl_path = wx.TextCtrl(self, value="",
-                                    style=wx.TE_PROCESS_ENTER | wx.TE_RIGHT | wx.BORDER_NONE)
+                                    style=wx.TE_PROCESS_ENTER | wx.TE_RIGHT)
         self.lbl_path.Bind(wx.EVT_TEXT_ENTER, self.on_path_entered)
         self.lbl_path.Bind(wx.EVT_KILL_FOCUS, self.on_path_entered)
 
@@ -126,7 +125,7 @@ class FileBrowserPanel(wx.Panel, listmix.ListCtrlAutoWidthMixin,
         lbl = wx.StaticText(self, label="Filter:")
         self.choice_filter = wx.ComboBox(
             self, choices=self.filter_choices, value=self.current_filter,
-            style=wx.CB_READONLY|wx.BORDER_NONE)
+            style=wx.CB_READONLY)
         hbox_filter.Add(lbl, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
         hbox_filter.Add(self.choice_filter, 1)
         vbox.Add(hbox_filter, 0, wx.EXPAND | wx.ALL, 5)
@@ -134,7 +133,7 @@ class FileBrowserPanel(wx.Panel, listmix.ListCtrlAutoWidthMixin,
         # 4️⃣ One‑column list (must be created *before* loading a path!)
         self.list = wx.ListCtrl(
             self,
-            style=wx.LC_REPORT | wx.LC_SINGLE_SEL | wx.LC_VRULES | wx.LC_HRULES|wx.BORDER_NONE)
+            style=wx.LC_REPORT | wx.LC_SINGLE_SEL | wx.LC_VRULES | wx.LC_HRULES)
         self.list.InsertColumn(0, "Name", width=400)
         self.list.InsertColumn(1, "Title", width=400)
         vbox.Add(self.list, 1,
@@ -1377,7 +1376,7 @@ class TabulatedPanel(wx.Panel):
         tgtBox.Add(self.spin_gridTarget, 0, wx.EXPAND | wx.ALL, 2)
 
         self.txt_gridActual = wx.TextCtrl(
-            self.Opt_panel, style=wx.TE_READONLY | wx.TE_CENTRE|wx.BORDER_NONE )
+            self.Opt_panel, style=wx.TE_READONLY | wx.TE_CENTRE)
         self.txt_gridActual.SetToolTip(
             "Grid actually produced for the current Grid method and nKnots.")
         tgtBox.Add(self.txt_gridActual, 0, wx.EXPAND | wx.ALL, 2)
@@ -1492,7 +1491,7 @@ class TabulatedPanel(wx.Panel):
                   wxpg.PG_SPLITTER_AUTO_CENTER |
                   wxpg.PG_HIDE_MARGIN |
                   wxpg.PG_TOOLTIPS |
-                  wxpg.PG_NO_INTERNAL_BORDER |wx.BORDER_NONE
+                  wxpg.PG_NO_INTERNAL_BORDER
         )
         
         self.filetree.SetCellBackgroundColour(self.Color_BG_FILE_Main)
@@ -1528,7 +1527,7 @@ class TabulatedPanel(wx.Panel):
             self.data_panel,
             style=wxpg.PG_DEFAULT_STYLE | 
                   wxpg.PG_SPLITTER_AUTO_CENTER |wxpg.PG_HIDE_MARGIN |
-                  wxpg.PG_NO_INTERNAL_BORDER|wx.BORDER_NONE
+                  wxpg.PG_NO_INTERNAL_BORDER
         )
         self.ffttree.SetCellBackgroundColour(self.Color_BG_FFT_Main)
         self.ffttree.SetCellTextColour(self.Color_FG_FFT_Main)
@@ -2690,27 +2689,24 @@ class MainFrame(wx.Frame):
         
         hs = HYSCOREsim(Sys=self.Sys, errorFunc=self.RaiseError)
         hs.preCompute() ## get housekeeping stuff out of the way to speed up computations a bit
-        hs.verbose = False
+
         failed_titles = []
         total = len(self.Data)
         self._sim_progress_begin(total)
-        
-        end_time = 0.0
         try:
-            start_time = time.time()
             self._runSim_series(hs, failed_titles, total)
-            end_time = time.time()-start_time
         finally:
             # However the series ends -- cleanly, or on an exception that got
             # past the per-dataset handler -- the gauge must not be left
             # sitting on screen at a stale value.
             self._sim_progress_end()
-        
+
         if failed_titles:
             self.statusbar.SetStatusText(
-                f"Simulation failed for {len(failed_titles)}/{len(self.Data)} dataset(s)", 0)
+                f"Simulation failed for {len(failed_titles)}/{len(self.Data)} dataset(s) "
+                f"(see console for details): {', '.join(failed_titles)}", 0)
         else:
-            self.statusbar.SetStatusText(f"Ready. It took {end_time:.2f} s", 0)
+            self.statusbar.SetStatusText("Ready", 0)
 
         self.matplotlib_panel.update_graph()
 
@@ -2722,7 +2718,7 @@ class MainFrame(wx.Frame):
 
             try:
                 hs.reRun()
-                
+
                 self.Data[ii]['simdata']=hs.Spectrum
                 self.Data[ii]['simax']={'x':hs.X, 'y':hs.Y, 'xlabel':'Frequency, MHz', 'ylabel':'Frequency, MHz',
                                         'orisel': np.array([hs.phi, hs.theta, hs.ak]),

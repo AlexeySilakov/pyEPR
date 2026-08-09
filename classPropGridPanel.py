@@ -278,10 +278,10 @@ class PropGridPanel(wx.Panel):
         self.current_sash = 200
         if showModFunc:
             self.splitter = wx.SplitterWindow(self, style=wx.SP_3D)
-            self.parentpanel = wx.Panel(self.splitter)
+            self.parentpanel = wx.Panel(self.splitter, style = wx.BORDER_NONE)
             self.func_panel=MypgMod.FunctionModPanel(self.splitter, 
                                                      PropertyGridPanel = self, 
-                                                     style = wx.SUNKEN_BORDER)
+                                                     style = wx.BORDER_NONE)
             sizer.Add(self.splitter, 1, wx.EXPAND)
             self.parameters['functions'] = {}
         else:
@@ -292,7 +292,7 @@ class PropGridPanel(wx.Panel):
             
         self.pg = wxpg.PropertyGrid(
             self.parentpanel,
-            style=wxpg.PG_SPLITTER_AUTO_CENTER | wxpg.PG_AUTO_SORT | wx.TAB_TRAVERSAL | wxpg.PG_NO_INTERNAL_BORDER,
+            style=wxpg.PG_SPLITTER_AUTO_CENTER | wxpg.PG_AUTO_SORT | wx.TAB_TRAVERSAL | wxpg.PG_NO_INTERNAL_BORDER|wx.BORDER_NONE,
 
         ) #wxpg.PG_HIDE_MARGIN |
         theme.theme_propgrid(self.pg, caption_key="accent")

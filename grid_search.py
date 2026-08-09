@@ -83,9 +83,28 @@ collapses inside a single cell (narrow them).
 Once a scan finishes, the coarse RMSD grid is interpolated (linear or
 cubic, selectable live without re-scanning -- see _interpolate_grid) onto
 a finer grid for display, and used to estimate a confidence interval for
-each scanned parameter (F-test or naive chi-square, selectable -- see
-_rmsd_threshold_factor) at both 68% and 95%, reported as the bounding box
-of the joint 2-parameter confidence region projected onto each axis.
+each scanned parameter (F-test, naive chi-square, or measured-noise
+chi-square, selectable -- see _rmsd_threshold_factor) at both 68% and 95%,
+reported as the bounding box of the joint 2-parameter confidence region
+projected onto each axis.
+
+The measured-noise option is the only one of the three that uses a noise
+level from outside the fit. pyHYSCORE measures one per dataset at the end of
+every FFT, as the mean of the second half of the +- quadrant's extreme-y
+x-trace -- the far corner of the map in both frequencies, where a HYSCORE
+spectrum holds no signal but the same noise as everywhere else. Since the
+spectrum is a magnitude it never falls to zero, and that mean is within
+about 11% of the RMS a chi-square denominator wants. It rides along on the
+dataset dict, so it survives a session save/load and needs no rescan
+(MainFrame.noise_from_spectrum). Here it is pooled across datasets by point
+count (pooled_sigma), in the units of whichever statistic is on display, and
+the region becomes SSE <= SSE_min + divisor*Delta-chi^2*sigma^2: a width set
+by how noisy the data is rather than by how good the fit happens to be. The
+same oversampling divisor as the posterior applies, for the same reason.
+Whenever a noise level is available the panel also reports the reduced
+chi^2 of the best fit, which says plainly whether the residual has reached
+the noise or stalled well above it -- and warns when it has, since a region
+scaled to the noise alone is then optimistically narrow.
 """
 import copy
 import time
@@ -710,6 +729,12 @@ class GridSearchFrame(wx.Frame):
         self._last_results_sse = None
         self._last_results_nk = None
         self._last_n_datasets = 0
+        # (sigma, N_k, null_rms_k) per usable dataset, captured when the scan
+        # starts. Kept separately from _roi_cache, which is released whenever
+        # simulations aren't being stored -- the noise level has to outlive it
+        # so switching CI method or display can re-derive the interval without
+        # a rescan.
+        self._last_noise = None
         self._last_grid1 = None
         self._last_grid2 = None
         self._last_N = 0
@@ -776,20 +801,17 @@ class GridSearchFrame(wx.Frame):
         self.residuals.Hide()
         self.right_panel = right
 
-        splitter.SplitVertically(left, right, sashPosition=440)
+        splitter.SplitVertically(left, right, sashPosition=400)
         splitter.SetMinimumPaneSize(260)
         # Give the left pane a share of any extra width, so the parameter
         # range boxes grow with the window instead of staying pinned at
         # their starting size, and relayout live while the sash is dragged.
-        splitter.SetSashGravity(0.2)
+        splitter.SetSashGravity(0)
         splitter.Bind(wx.EVT_SPLITTER_SASH_POS_CHANGED, self._on_sash_moved)
         splitter.Bind(wx.EVT_SPLITTER_SASH_POS_CHANGING, self._on_sash_moved)
         self.splitter = splitter
 
         leftsizer = wx.BoxSizer(wx.VERTICAL)
-
-        lbl = wx.StaticText(left, label="Check up to two Sys parameters to scan:")
-        leftsizer.Add(lbl, 0, wx.ALL, 4)
 
         self.param_pg = wxpg.PropertyGrid(
             left, style=wxpg.PG_DEFAULT_STYLE | wxpg.PG_HIDE_MARGIN | wxpg.PG_TOOLTIPS)
@@ -828,7 +850,7 @@ class GridSearchFrame(wx.Frame):
         leftsizer.Add(cmap_sizer, 0, wx.ALL, 4)
 
         analysis_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        analysis_sizer.Add(wx.StaticText(left, label="Interpolation:"),
+        analysis_sizer.Add(wx.StaticText(left, label="Smooth: "),
                            0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
         self.interp_choice = wx.Choice(left, choices=["Linear", "Cubic"])
         self.interp_choice.SetSelection(1)
@@ -839,17 +861,29 @@ class GridSearchFrame(wx.Frame):
             "data; needs >=4 points per scanned axis and no failed grid "
             "points, and falls back to linear otherwise.")
         analysis_sizer.Add(self.interp_choice, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 12)
-        analysis_sizer.Add(wx.StaticText(left, label="CI method:"),
+        analysis_sizer.Add(wx.StaticText(left, label="CI :"),
                            0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
         self.ci_method_choice = wx.Choice(
-            left, choices=["F-test (unknown noise)", "Chi-square (simple)"])
+            left, choices=["F-test", "χ²",
+                           "χ²/w noise"])
         self.ci_method_choice.SetSelection(0)
         self.ci_method_choice.SetToolTip(
-            "F-test: standard when the noise level isn't independently "
-            "known (our case) -- more conservative (wider) intervals.\n"
-            "Chi-square: textbook Delta-chi^2 using the fit's own RMSD as "
-            "the noise estimate -- simpler but can be optimistic/too narrow.")
-        analysis_sizer.Add(self.ci_method_choice, 0, wx.ALIGN_CENTER_VERTICAL)
+            "F-test: standard when the noise level isn't independently known\n"
+            "χ²: Delta-χ² using the fit's own RMSD as the noise estimate\n"
+            "χ² /w noise: the same Delta-χ² , but with the noise level for each spectrum")
+        analysis_sizer.Add(self.ci_method_choice, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 12)
+        self.chk_use_noise = wx.CheckBox(left, label="Use exp. noise")
+        self.chk_use_noise.SetValue(True)
+        self.chk_use_noise.SetToolTip(
+            "Use the noise level pyHYSCORE measured on each spectrum's far "
+            "high-frequency corner (where a HYSCORE spectrum carries no "
+            "signal) as an independent sigma.\n"
+            "On: enables the measured-noise chi-square, and reports the "
+            "reduced χ² of the best fit -- whether the residual is at the "
+            "noise level or well above it.\n"
+            "Off: the noise estimate is ignored entirely and the interval is "
+            "whatever the F-test or simple chi-square says, as before.")
+        analysis_sizer.Add(self.chk_use_noise, 0, wx.ALIGN_CENTER_VERTICAL)
         leftsizer.Add(analysis_sizer, 0, wx.ALL, 4)
 
         display_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -886,7 +920,10 @@ class GridSearchFrame(wx.Frame):
         self.neff_divisor.SetToolTip(
             "Spectrum points per independent measurement.\n"
             "Oversampling = 4^(zero fill), i.e. 2^n per axis, squared.\n"
-            "At 1 the credible regions come out too narrow.")
+            "At 1 the credible regions come out too narrow.\n"
+            "Applies to the probability maps and to the measured-noise "
+            "chi-square, both of which would otherwise count correlated "
+            "points as independent ones.")
         self.neff_divisor.SetValue(self._default_oversampling())
         theme.theme_control(self.neff_divisor)
         display_sizer.Add(self.neff_divisor, 0, wx.ALIGN_CENTER_VERTICAL)
@@ -969,6 +1006,7 @@ class GridSearchFrame(wx.Frame):
         self.chk_invert_cmap.Bind(wx.EVT_CHECKBOX, self.on_invert_cmap_toggle)
         self.interp_choice.Bind(wx.EVT_CHOICE, self.on_analysis_choice_changed)
         self.ci_method_choice.Bind(wx.EVT_CHOICE, self.on_analysis_choice_changed)
+        self.chk_use_noise.Bind(wx.EVT_CHECKBOX, self.on_analysis_choice_changed)
         self.btn_residuals.Bind(wx.EVT_BUTTON, self.on_toggle_residuals)
         self.chk_rmsd_contours.Bind(wx.EVT_CHECKBOX, self.on_analysis_choice_changed)
         self.display_choice.Bind(wx.EVT_CHOICE, self.on_display_mode_changed)
@@ -1266,6 +1304,8 @@ class GridSearchFrame(wx.Frame):
         # reuses it at every grid point instead of re-slicing, and its size
         # is what determines the cost of keeping simulations.
         roi_cache = [self.dataset_roi(dd) for dd in active_data]
+        self._last_noise = [(roi['sigma'], roi['exp'].size, roi['null_rms'])
+                            for roi in roi_cache if roi is not None]
 
         store_sims = self.chk_store_sims.GetValue()
         if store_sims:
@@ -1481,6 +1521,10 @@ class GridSearchFrame(wx.Frame):
         # propagating, or focus handling for the control breaks.
         if event is not None:
             event.Skip()
+        # The CI method and the "use measured noise" checkbox both decide
+        # whether the oversampling divisor is doing anything, so the control
+        # states have to follow them and not only the Display pulldown.
+        self._sync_display_controls()
         self._refresh_display()
 
     def _refresh_display(self):
@@ -1602,7 +1646,7 @@ class GridSearchFrame(wx.Frame):
         vmin, vmax = float(np.nanmin(fine_vals)), float(np.nanmax(fine_vals))
         background_levels = self._background_levels(vmin, vmax)
 
-        ci_method = 'fstat' if self.ci_method_choice.GetSelection() == 0 else 'chi2'
+        ci_method = ('fstat', 'chi2', 'noise')[max(self.ci_method_choice.GetSelection(), 0)]
         # Degrees of freedom come from the coarse point that is best under
         # the *displayed* statistic -- with per-dataset normalization the
         # two statistics can put their minimum in different places.
@@ -1612,8 +1656,33 @@ class GridSearchFrame(wx.Frame):
         else:
             N = 0
         self._last_N = N
+
+        # The measured noise level, in the same units as the displayed
+        # statistic, and the residual it has to be compared against. Both are
+        # needed for the measured-noise region and for the reduced chi^2, which
+        # is worth reporting whichever method drew the contour -- it is the one
+        # number that says whether the fit has reached the noise or stalled
+        # well above it.
+        divisor = float(self.neff_divisor.GetValue())
+        use_noise = self.chk_use_noise.GetValue()
+        sigma = self.pooled_sigma(normalized) if use_noise else None
+        sse_min = N * rmsd_min ** 2 if N > 0 else None
+        chi2_red = None
+        if sigma and sse_min and (N / max(divisor, 1e-9)) > 2:
+            chi2_red = sse_min / (sigma ** 2 * (N / max(divisor, 1e-9) - 2))
+        # Falling back silently would leave the panel claiming a measured-noise
+        # interval it never computed, so say which of the two reasons it was.
+        noise_note = None
+        if ci_method == 'noise' and sigma is None:
+            noise_note = ('("Use measured noise" is off -- used the F-test instead)'
+                          if not use_noise else
+                          "(no measured noise level for every dataset -- re-run the "
+                          "FFT, or load data saved with one; used the F-test instead)")
+            ci_method = 'fstat'
+
         CONF = 0.95
-        factor = self._rmsd_threshold_factor(ci_method, CONF, N, p=2)
+        factor = self._rmsd_threshold_factor(ci_method, CONF, N, p=2, sigma=sigma,
+                                             sse_min=sse_min, divisor=divisor)
         contour_levels = []
         half_width = {1: None, 2: None}
         if factor is not None:
@@ -1637,6 +1706,25 @@ class GridSearchFrame(wx.Frame):
         lines = [fmt_line(label1, best1, half_width[1]), fmt_line(label2, best2, half_width[2])]
         if used_method != method:
             lines.append("(cubic needs >=4 points/axis and no failed grid points -- used linear instead)")
+        if noise_note is not None:
+            lines.append(noise_note)
+        if sigma:
+            noise_line = (f"Measured noise sigma = {sigma:.4g} "
+                          f"(high-frequency corner of each spectrum), "
+                          f"best-fit {value_label} = {rmsd_min:.4g}")
+            if chi2_red is not None:
+                noise_line += f",  reduced chi^2 = {chi2_red:.3g}"
+            lines.append(noise_line)
+        if chi2_red is not None and chi2_red > 2.0:
+            # Worth spelling out rather than silently drawing a narrow contour:
+            # at this point the residual is dominated by model error, not by
+            # noise, and a region scaled to the noise alone answers the wrong
+            # question. (Some excess is expected regardless -- the spectrum is
+            # a magnitude, so its noise floor has a positive mean that an
+            # amplitude-scaled simulation cannot reproduce.)
+            lines.append(f"(residual sits {np.sqrt(chi2_red):.1f}x above the noise -- "
+                         f"systematic misfit, so the measured-noise region is "
+                         f"optimistically narrow; the F-test is the safer read)")
         if N <= 2:
             lines.append(f"(only N={N} pooled residual points at the best fit -- "
                          f"too few for a meaningful confidence interval)")
@@ -1865,11 +1953,19 @@ class GridSearchFrame(wx.Frame):
 
     def _sync_display_controls(self):
         probability = self.display_mode() in self.PROBABILITY_MODES
-        self.neff_divisor.Enable(probability)
-        self.lbl_divisor.Enable(probability)
+        # The oversampling divisor is no longer the posterior's alone: the
+        # measured-noise chi-square divides by it too, for the same reason
+        # (neighbouring points of a zero-filled spectrum are not independent
+        # measurements), so leaving it greyed out there would hide a control
+        # that is setting the width of the region on screen.
+        noise_ci = (self.ci_method_choice.GetSelection() == 2
+                    and self.chk_use_noise.GetValue())
+        self.neff_divisor.Enable(probability or noise_ci)
+        self.lbl_divisor.Enable(probability or noise_ci)
         # Credible intervals come from the posterior itself in probability
         # mode, so the F-test/chi-square choice has nothing to act on.
         self.ci_method_choice.Enable(not probability)
+        self.chk_use_noise.Enable(not probability)
 
     def _on_doubleclick(self, x, y):
         """Rebuild the residual row for whichever *coarse* grid point the
@@ -2191,11 +2287,20 @@ class GridSearchFrame(wx.Frame):
         # the same thing per point (the region's root-mean-square intensity),
         # used to put residual *maps* into the same normalized units.
         null = float(np.sum(exp_roi ** 2))
+        # 'sigma' is the per-point noise level pyHYSCORE measured on this
+        # spectrum's far high-frequency corner when the FFT was built
+        # (MainFrame.noise_from_spectrum) -- an *independent* estimate, which
+        # is what turns the confidence region into a real chi-square instead
+        # of one calibrated on the fit's own residual. None for a session
+        # saved before this existed, or when the border was unmeasurable; the
+        # CI code falls back to the F-test in that case.
+        sigma = dd.get('noise')
         return {'exp': exp_roi,
                 'x': expX[xsel],
                 'y': expY[ysel],
                 'null': null,
                 'null_rms': float(np.sqrt(null / exp_roi.size)) if exp_roi.size else 0.0,
+                'sigma': float(sigma) if sigma else None,
                 'label': dd.get('title', dd.get('fname', '?')),
                 'field': dd.get('field')}
     def _dataset_sse(self, dd, simdata, simX, simY, roi=None, want_sim=False):
@@ -2398,7 +2503,39 @@ class GridSearchFrame(wx.Frame):
             g1, g2 = np.meshgrid(fine1, fine2, indexing='ij')
             fine_vals = interp(np.stack([g1.ravel(), g2.ravel()], axis=-1)).reshape(g1.shape)
         return fine1, fine2, fine_vals, used_method
-    def _rmsd_threshold_factor(self, method, conf, N, p=2):
+    def pooled_sigma(self, normalized):
+        """The measured noise level in the units of whichever fitness
+        statistic is on display, as an N-weighted pooled variance over the
+        datasets that carry an estimate:
+
+            raw:        sigma^2     = sum_k N_k sigma_k^2 / sum_k N_k
+            normalized: sigma_norm^2 = sum_k N_k (sigma_k/null_rms_k)^2 / sum_k N_k
+
+        The second form is the exact counterpart of what run_gridpoint does to
+        the residuals themselves -- the normalized statistic divides each
+        dataset's mean square residual by its own mean square intensity
+        (null_rms_k^2), so the noise has to be divided by the same thing or
+        the threshold and the surface would be in different units.
+
+        Returns None unless *every* contributing dataset has a noise estimate:
+        pooling a measured level with a missing one would quietly report a
+        confidence region calibrated on only part of the data.
+        """
+        if not self._last_noise:
+            return None
+        acc, n_tot = 0.0, 0
+        for sigma, n_k, null_rms in self._last_noise:
+            if not sigma or n_k <= 0:
+                return None
+            if normalized:
+                if not null_rms:
+                    return None
+                sigma = sigma / null_rms
+            acc += n_k * sigma ** 2
+            n_tot += n_k
+        return float(np.sqrt(acc / n_tot)) if n_tot else None
+    def _rmsd_threshold_factor(self, method, conf, N, p=2, sigma=None, sse_min=None,
+                                divisor=1.0):
         """sqrt of the SSE-inflation factor that bounds the `conf` (e.g. 0.68,
         0.95) confidence region: any grid point with rmsd <= rmsd_min*factor
         lies inside it. p is the number of jointly-scanned parameters (always
@@ -2416,10 +2553,31 @@ class GridSearchFrame(wx.Frame):
         is simpler but under-corrects for finite N, so it tends to be more
         optimistic (narrower) than the F-test region; the two converge as
         N -> infinity.
+
+        'noise': the same Delta-chi^2, but with a noise level measured
+        independently on the spectrum's own far high-frequency corner rather
+        than borrowed from the fit -- which is what a chi-square is supposed
+        to be.
+        The region is chi^2(theta) <= chi^2_min + chi2.ppf(conf, df=p) with
+        chi^2 = SSE/(divisor*sigma^2), i.e.
+
+            SSE(theta) <= SSE_min + divisor * Delta-chi^2 * sigma^2
+
+        so the width no longer depends on how good the fit happens to be, only
+        on how noisy the data is. `divisor` is the same oversampling correction
+        the posterior uses: adjacent points of a zero-filled, apodized spectrum
+        are not independent measurements, and counting them as if they were
+        would shrink the region by exactly that factor. Needs `sigma` and
+        `sse_min`; returns None without them, so the caller can fall back.
         """
         if N is None or N <= p:
             return None
-        if method == 'fstat':
+        if method == 'noise':
+            if not sigma or not sse_min or sse_min <= 0:
+                return None
+            chi2val = stats.chi2.ppf(conf, df=p)
+            factor = 1.0 + max(float(divisor), 1e-9) * chi2val * sigma ** 2 / sse_min
+        elif method == 'fstat':
             Fval = stats.f.ppf(conf, p, N - p)
             factor = 1.0 + (p / (N - p)) * Fval
         else:
