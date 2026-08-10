@@ -17,6 +17,8 @@ import matplotlib
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_wxagg import FigureCanvasWxAgg
 import matplotlib.tri as mtri
+from matplotlib.path import Path as MplPath
+from matplotlib.patches import PathPatch
 # from matplotlib import cm
 import matplotlib.pyplot as plt
 # from mpl_toolkits.mplot3d import Axes3D
@@ -553,6 +555,9 @@ class MatplotlibPanel(wx.Panel):
         self.showNoiseFloor = True
         self.noiseCompare = 'lift'   # 'none' | 'lift' | 'subtract'
         self.projection_axes = []    # skyline/diagonal axes, for the hit test
+        # One-shot: the unequal-step warning is raised from inside a redraw,
+        # so without this it would reappear on every single one.
+        self._warned_dxdy = False
         self.rebuildAxes = False  # set when the subplots must be recreated
                                   # even though their number hasn't changed
         self.figure = Figure(figsize=(2, 2), dpi=100)
@@ -797,13 +802,25 @@ class MatplotlibPanel(wx.Panel):
         )
         self.update_graph()
         
-    def draw_fitbox(self, ax, fit, view):
-        """Mark the f.min..f.max analysis window on a 2D map that is drawing
-        more than it (see self.viewPad): a dashed outline plus a light grey
-        wash over the padding, so the surroundings read as context rather than
-        as something being fitted. The four wash rectangles form a frame and
-        deliberately do not overlap -- overlapping ones would darken the
-        corners twice.
+    def draw_fitbox(self, ax, corners, view):
+        """Outline the region that is actually fitted -- the 45-degree tilted
+        box inscribed in f.min..f.max (optHYSCORE.diagonalBox) -- and wash
+        everything outside it in light grey, so the surroundings read as
+        context rather than as something being fitted.
+
+        The outlined polygon is built from the very samples the diagonal
+        skyline maximizes over and the grid search sums residuals over, so what
+        is drawn here and what is analysed are the same set of points, at any
+        AntiDiagSpan and in any quadrant mode.
+
+        One wash patch with a hole in it rather than the four rectangles this
+        used to draw: the excluded region is no longer a frame, and the box's
+        own corners now cut into it. Outer and inner rings are given opposite
+        windings so matplotlib's nonzero fill rule leaves the box unpainted
+        instead of washing the whole panel.
+
+        `corners` is the polygon as (x, y) pairs, or None outside the frequency
+        domain, where a diagonal measured in MHz has nothing to mean.
 
         Always clears first: these axes are reused between draws rather than
         cleared (only the image is swapped), so the previous draw's patches
@@ -811,25 +828,48 @@ class MatplotlibPanel(wx.Panel):
         for p in list(ax.patches):
             if p.get_gid() == 'fitbox':
                 p.remove()
-        xfi, xfa, yfi, yfa = fit
-        xmi, xma, ymi, yma = view
-        if not self.showFitBox or (xmi >= xfi and xma <= xfa and ymi >= yfi and yma <= yfa):
+        if not self.showFitBox or corners is None:
             return
-        for x0, x1, y0, y1 in ((xmi, xfi, ymi, yma), (xfa, xma, ymi, yma),
-                               (xfi, xfa, ymi, yfi), (xfi, xfa, yfa, yma)):
-            if x1 <= x0 or y1 <= y0:
-                continue
-            wash = plt.Rectangle((x0, y0), x1 - x0, y1 - y0, facecolor='0.5',
-                                 edgecolor='none', alpha=0.18, zorder=2)
-            wash.set_gid('fitbox')
-            ax.add_patch(wash)
-        box = plt.Rectangle((xfi, yfi), xfa - xfi, yfa - yfi, fill=False,
-                            edgecolor='w', linestyle='--', linewidth=0.8,
-                            zorder=3)
+        xmi, xma, ymi, yma = view
+        outer = np.array([(xmi, ymi), (xma, ymi), (xma, yma), (xmi, yma)], dtype=float)
+        inner = np.asarray(corners, dtype=float)
+        shoelace = float(np.sum(inner[:, 0]*np.roll(inner[:, 1], -1)
+                                - inner[:, 1]*np.roll(inner[:, 0], -1)))
+        if shoelace > 0:          # same winding as `outer`, which is drawn
+            inner = inner[::-1]   # counter-clockwise -- reverse to cut a hole
+
+        verts = np.vstack([outer, outer[:1], inner, inner[:1]])
+        codes = ([MplPath.MOVETO] + [MplPath.LINETO]*(len(outer)-1) + [MplPath.CLOSEPOLY] +
+                 [MplPath.MOVETO] + [MplPath.LINETO]*(len(inner)-1) + [MplPath.CLOSEPOLY])
+        wash = PathPatch(MplPath(verts, codes), facecolor='0.5', edgecolor='none',
+                         alpha=0.18, zorder=2)
+        wash.set_gid('fitbox')
+        ax.add_patch(wash)
+
+        box = plt.Polygon(inner, closed=True, fill=False, edgecolor='w',
+                          linestyle='--', linewidth=0.8, zorder=3)
         box.set_gid('fitbox')
         ax.add_patch(box)
 
+    def sync_diagproj(self):
+        """Hide the Diag.Projection toggle unless a spectrum is on screen.
+
+        The projection measures distance from the f2 = f1 diagonal in MHz, so
+        it means nothing on a time-domain map -- rather than let the toggle
+        produce an empty panel, it disappears while FFT(y) is off or while no
+        shown dataset has a transform to display. Its state is forced off at
+        the same time: a hidden checkbox still reports whatever it was last
+        set to, and on_check would happily read that back."""
+        usable = any(dd['show'] and (dd['isfft'] or (self.showFFT and dd['fftactual']))
+                     for dd in self.parent.Data)
+        if not usable:
+            self.showDiagonalProj = False
+        if self.chk_DiagProj.IsShown() != usable:
+            self.chk_DiagProj.Show(usable)
+            self.Layout()
+
     def update_graph(self):
+        self.sync_diagproj()
         shw = []
         for dd in self.parent.Data:
             shw.append(dd['show'])
@@ -900,19 +940,83 @@ class MatplotlibPanel(wx.Panel):
             ymi = yfi if cut_y else min(yfi, max(yfi - pad, axEx[2]))
             yma = max(yfa, min(yfa + pad, axEx[3]))
 
-            # Index masks for the analysis window. 
+            # Index masks for the analysis window.
             x_axis = np.linspace(axEx[0], axEx[1], data.shape[1])
             y_axis = np.linspace(axEx[2], axEx[3], data.shape[0])
             x_fit = (x_axis >= xfi) & (x_axis <= xfa)
             y_fit = (y_axis >= yfi) & (y_axis <= yfa)
 
+            # The tilted analysis box (optHYSCORE.diagonalBox). Deliberately
+            # built on the *full* f.min..f.max window and not on the
+            # quadrant-cut one above: the quadrant is a view setting, so
+            # letting it reshape the box would quietly change what the grid
+            # search fits and leave the outline drawn here disagreeing with
+            # it. None in the time domain, where a 45-degree diagonal in MHz
+            # has nothing to mean.
+            box = None
+            fitpoly = None
+            simbox = None
+            simx_axis = simy_axis = None
+            if freqDomain:
+                adspan = dd.get('antidiagspan', -1.0)
+                box = self.parent.Opt.diagonalBox(y_axis, x_axis,
+                                                  dd['fmin'], dd['fmax'], adspan)
+                # The same window and the same span on the simulation's own
+                # grid, which is generally coarser. Built here rather than in
+                # either panel below because the simulation map normalizes over
+                # it and the diagonal projection overlays a trace from it, and
+                # each of those can be on while the other is off.
+                if type(dd['simdata']) != type(None) and type(dd['simax']) != type(None):
+                    simx_axis = np.linspace(np.min(dd['simax']['x']),
+                                            np.max(dd['simax']['x']),
+                                            dd['simdata'].shape[1])
+                    simy_axis = np.linspace(np.min(dd['simax']['y']),
+                                            np.max(dd['simax']['y']),
+                                            dd['simdata'].shape[0])
+                    simbox = self.parent.Opt.diagonalBox(simy_axis, simx_axis,
+                                                         dd['fmin'], dd['fmax'], adspan)
+                if box is not None:
+                    # corners come back as (axis0, axis1) = (f2, f1); the
+                    # patches want (x, y)
+                    fitpoly = box['corners'][:, ::-1]
+                # The box's sides are at 45 degrees only while one step is the
+                # same number of MHz on both axes. A square zero fill keeps
+                # them equal, so this should never fire -- but if it ever does,
+                # the diagonal is not the diagonal and the trace below is
+                # measuring the wrong thing, which is worth saying out loud.
+                dxa = x_axis[1]-x_axis[0] if x_axis.size > 1 else 0.0
+                dya = y_axis[1]-y_axis[0] if y_axis.size > 1 else 0.0
+                if not self._warned_dxdy and \
+                        abs(dxa-dya) > 1e-6*max(abs(dxa), abs(dya), 1e-30):
+                    self._warned_dxdy = True
+                    wx.MessageBox(
+                        f"This spectrum is sampled at {dxa:.6g} MHz along f1 but "
+                        f"{dya:.6g} MHz along f2.\n\n"
+                        "The tilted analysis box and the diagonal skyline "
+                        "projection both assume the two steps are equal -- with "
+                        "unequal steps their 'diagonal' is not at 45 degrees on "
+                        "the plotted axes, and the grid search's fit region is "
+                        "skewed the same way.\n\n"
+                        "Shown once per session.",
+                        "pyHYSCORE - unequal frequency steps",
+                        wx.OK | wx.ICON_WARNING)
+
             # A negative z.max means "scale by the maximum of the fitted
             # area" rather than by the maximum of the whole map, so z.max=-1
             # puts the brightest feature inside the analysis window at the top
             # of the colour scale no matter what sits outside it.
+            #
+            # That area is the tilted box, not the square around it: the
+            # corners the box cuts off are not fitted and not projected, so
+            # letting a peak sitting in one of them set the colour scale would
+            # flatten everything that is. The rectangle is still the fallback
+            # in the time domain, where there is no box.
             scale = np.max(data)
-            if dd['zmax'] < 0 and x_fit.any() and y_fit.any():
-                scale = np.max(data[np.ix_(y_fit, x_fit)])
+            if dd['zmax'] < 0:
+                if box is not None:
+                    scale = np.max(data[box['idx0'], box['idx1']])
+                elif x_fit.any() and y_fit.any():
+                    scale = np.max(data[np.ix_(y_fit, x_fit)])
 
             if freqDomain:
                 ma = scale*abs(dd['zmax'])
@@ -937,7 +1041,7 @@ class MatplotlibPanel(wx.Panel):
                         break
             self.axes[axcnt].set_xlim(xmi, xma)
             self.axes[axcnt].set_ylim(ymi, yma)
-            self.draw_fitbox(self.axes[axcnt], (xfi, xfa, yfi, yfa), (xmi, xma, ymi, yma))
+            self.draw_fitbox(self.axes[axcnt], fitpoly, (xmi, xma, ymi, yma))
             tf = dd['field']
             self.axes[axcnt].set_title(f'B$_0$={tf} mT', fontsize = 'small')
             if showLabels:
@@ -958,14 +1062,12 @@ class MatplotlibPanel(wx.Panel):
                     # The simulation always fills its own colour scale; z.min
                     # and z.max only fix the *relative* height of the low cut,
                     # so the two panels have matching contrast. A negative
-                    # z.max scales by the analysis window here too.
-                    sx_axis = np.linspace(simaxEx[0], simaxEx[1], simdata.shape[1])
-                    sy_axis = np.linspace(simaxEx[2], simaxEx[3], simdata.shape[0])
-                    sx_fit = (sx_axis >= xfi) & (sx_axis <= xfa)
-                    sy_fit = (sy_axis >= yfi) & (sy_axis <= yfa)
+                    # z.max scales by the analysis window here too -- over the
+                    # tilted box, as the measured map above, or the two would
+                    # be normalized over different regions and stop matching.
                     sima = np.max(np.max(simdata))
-                    if dd['zmax'] < 0 and sx_fit.any() and sy_fit.any():
-                        sima = np.max(simdata[np.ix_(sy_fit, sx_fit)])
+                    if dd['zmax'] < 0 and simbox is not None:
+                        sima = np.max(simdata[simbox['idx0'], simbox['idx1']])
                     simi = sima*dd['zmin']/abs(dd['zmax']) if dd['zmax'] else 0.0
                 else:
                     simdata = np.zeros_like(data)
@@ -1025,7 +1127,7 @@ class MatplotlibPanel(wx.Panel):
                 # same visible window as the data panel above
                 self.axes[simax].set_xlim(xmi, xma)
                 self.axes[simax].set_ylim(ymi, yma)
-                self.draw_fitbox(self.axes[simax], (xfi, xfa, yfi, yfa), (xmi, xma, ymi, yma))
+                self.draw_fitbox(self.axes[simax], fitpoly, (xmi, xma, ymi, yma))
                 if len(realsim)>0:
                     self.axes[simax].annotate("no simulation", (.0, .0), xycoords='axes points', color='w')
                 rowcnt+=1
@@ -1180,101 +1282,73 @@ class MatplotlibPanel(wx.Panel):
                 else:
                     self.axes[diagprj].cla()
                 self.projection_axes.append(self.axes[diagprj])
-                npts = data.shape[0]
-                dx = (axEx[1]-axEx[0])/(npts-1)
-                dy = (axEx[3]-axEx[2])/(npts-1)
-                # Clipped: with a quadrant selected the visible window no
-                # longer covers the whole map, and a negative index would
-                # wrap round to the far edge instead of stopping at it.
-                idxmi = max(0, int(np.floor((xfi-axEx[0])/dx)))
-                idxma = min(data.shape[1], int(np.floor((xfa-axEx[0])/dx)))
-                idymi = max(0, int(np.floor((yfi-axEx[2])/dy)))
-                idyma = min(data.shape[0], int(np.floor((yfa-axEx[2])/dy)))
-                ma = scale*abs(dd['zmax']) or 1.0
-
-                # The same single skyline noise level the straight projection
-                # uses, here in the units this panel normalizes to (the colour
-                # scale's max, not the projection's own peak). Deliberately one
-                # flat number for both panels rather than something re-derived
-                # from the 45-degree geometry
-                nfloor = dd.get('noisesky') if freqDomain else None
-                lvl = (nfloor / ma) if nfloor else None
-
-                # data is indexed [row=y, col=x]
+                # Nothing is rotated: `box` gathers the tilted rectangle's
+                # samples straight out of the map, one row per diagonal
+                # (constant f2-f1) and box['nalong'] samples along each. The
+                # maximum then runs across a row, and every point of the trace
+                # is a maximum over the same number of samples -- which is the
+                # whole reason for the tilted box (see diagonalBox).
                 #
-                # Cropped to the analysis window, never to the padded view: the
-                # max here runs *along* the diagonals, so a bigger box would
-                # make those longer and let intensity from outside f.min..f.max
-                # lift the trace anywhere on it, not just at its ends.
-                rotdata = self.rotate45(data[idymi:idyma, idxmi:idxma]/ma)
-                if lvl is not None:
-                    # Points contributing to each anti-diagonal, i.e. how many
-                    # samples that diagonal's maximum was taken over -- more
-                    # samples, higher the noise-only maximum, hence the taper.
-                    nrow, ncol = idyma-idymi, idxma-idxmi
-                    dcnt = np.arange(rotdata.shape[0]) - (ncol - 1)
-                    cnt = np.minimum(nrow - 1, ncol - 1 + dcnt) - np.maximum(0, dcnt) + 1
-                    span = np.log(np.max(cnt)) or 1.0
-                    taper = np.sqrt(np.log(cnt)/span)
-                skyprj = np.max(rotdata, axis=0)
-                xaX = np.linspace(idxmi*dx+axEx[0], idxma*dx+axEx[0], rotdata.shape[0]) - (xfa+xfi)/2
-                if lvl is not None and self.noiseCompare == 'subtract':
-                    skyprj = np.maximum(skyprj - taper*lvl, 0.0)
-                self.axes[diagprj].plot(xaX, skyprj, color='b')
-                if lvl is not None and self.showNoiseFloor and self.noiseCompare != 'subtract':
-                    self.axes[diagprj].plot(xaX, taper*lvl, color='0.45', linestyle=':',
-                                               linewidth=1.0, label='noise floor')
+                # data is indexed [row=y=f2, col=x=f1], matching the imshow
+                # above, and box was asked for in that same order.
+                #
+                # Only the box is ever read, never the padded view: the maximum
+                # runs *along* the diagonals, so a bigger region would make them
+                # longer and let intensity from outside f.min..f.max lift the
+                # trace anywhere on it, not just at its ends.
+                if box is not None:
+                    ma = scale*abs(dd['zmax']) or 1.0
+                    skyprj = np.max(data[box['idx0'], box['idx1']]/ma, axis=1)
 
-                if type(dd['simdata'])!=type(None):
-                    simdata = dd['simdata']
-                    sima = np.max(np.max(simdata))
-                    simi = ma*dd['zmin']/dd['zmax']
-                    simaxEx = [np.min(dd['simax']['x']), np.max(dd['simax']['x']), 
-                            np.min(dd['simax']['y']), np.max(dd['simax']['y'])]
-                    npts = simdata.shape[0]
-                    dx = (simaxEx[1]-simaxEx[0])/(npts-1)
-                    dy = (simaxEx[3]-simaxEx[2])/(npts-1)
-                    idxmi = max(0, int(np.floor((xfi-simaxEx[0])/dx)))
-                    idxma = min(simdata.shape[1], int(np.floor((xfa-simaxEx[0])/dx)))
-                    idymi = max(0, int(np.floor((yfi-simaxEx[2])/dy)))
-                    idyma = min(simdata.shape[0], int(np.floor((yfa-simaxEx[2])/dy)))
-                    ma = np.max(np.max(simdata)) or 1.0
+                    # The same single skyline noise level the straight
+                    # projection uses, in the units this panel normalizes to
+                    # (the colour scale's max, not the projection's own peak).
+                    #
+                    # One flat number, where the rotated square needed a taper
+                    # along the trace: with the count now constant all that is
+                    # left of that correction is its scale -- the sqrt(log)
+                    # growth of a noise-only maximum with the number of samples
+                    # behind it -- evaluated once, against the longest diagonal
+                    # the window holds (which is what the level was measured
+                    # for).
+                    nfloor = dd.get('noisesky')
+                    lvl = (nfloor / ma) if nfloor else None
+                    if lvl is not None:
+                        span = np.log(box['nwindow']) or 1.0
+                        lvl *= np.sqrt(np.log(box['nalong'])/span)
 
-                    rotdata = self.rotate45(simdata[idymi:idyma, idxmi:idxma]/ma)
-                    skyprj1 = np.max(rotdata, axis=0)
-                    xaX = np.linspace(idxmi*dx+simaxEx[0], idxma*dx+simaxEx[0], rotdata.shape[0]) - (xfa+xfi)/2
-                    if lvl is not None and self.noiseCompare == 'lift':
-                        # As on the skyline: put the noiseless simulation onto
-                        # the measurement's floor in quadrature, so the two
-                        # traces are comparable where the signal dies out.
-                        nrow, ncol = idyma-idymi, idxma-idxmi
-                        dcnt = np.arange(rotdata.shape[0]) - (ncol - 1)
-                        cnt = np.minimum(nrow - 1, ncol - 1 + dcnt) - np.maximum(0, dcnt) + 1
-                        span = np.log(np.max(cnt)) or 1.0
-                        taper = np.sqrt(np.log(cnt)/span)
-                        skyprj1*=1.0-lvl
-                        skyprj1 += lvl*taper
-                    self.axes[diagprj].plot(xaX, skyprj1, color='r')
+                    xw = x_axis[box['sel1']]
+                    xaX = np.linspace(xw[0], xw[-1], box['ndiag']) - (xw[0]+xw[-1])/2
+                    if lvl is not None and self.noiseCompare == 'subtract':
+                        skyprj = np.maximum(skyprj - lvl, 0.0)
+                    self.axes[diagprj].plot(xaX, skyprj, color='b')
+                    if lvl is not None and self.showNoiseFloor and self.noiseCompare != 'subtract':
+                        self.axes[diagprj].plot(xaX, np.full(xaX.shape, lvl), color='0.45',
+                                                linestyle=':', linewidth=1.0, label='noise floor')
 
+                    # simbox is the same window and the same span on the
+                    # simulation's own grid, so the two traces cover the same
+                    # region even though it is sampled more coarsely.
+                    if simbox is not None:
+                        simdata = dd['simdata']
+                        sma = np.max(simdata) or 1.0
+                        skyprj1 = np.max(simdata[simbox['idx0'], simbox['idx1']]/sma, axis=1)
+                        sxw = simx_axis[simbox['sel1']]
+                        sxaX = (np.linspace(sxw[0], sxw[-1], simbox['ndiag'])
+                                - (sxw[0]+sxw[-1])/2)
+                        if lvl is not None and self.noiseCompare == 'lift':
+                            # As on the skyline: put the noiseless simulation
+                            # onto the measurement's floor, so the two traces
+                            # are comparable where the signal dies out.
+                            skyprj1 = skyprj1*(1.0-lvl) + lvl
+                        self.axes[diagprj].plot(sxaX, skyprj1, color='r')
 
                 rowcnt+=1
-                
+
             axcnt+=1
         if makenew:
             self.figure.tight_layout(pad=1.2)
         self.canvas.draw()
-    def rotate45(self, A):
-        # Rectangular, not just square: once a quadrant crops one axis but
-        # not the other, the visible window this is handed is no longer
-        # N x N. Reduces to the original square case when nrow == ncol.
-        nrow, ncol = A.shape
-        out_size = nrow + ncol - 1
-        out = np.zeros((out_size, out_size), dtype=A.dtype)
-        ii, jj = np.indices((nrow, ncol))
-        x = ii + jj
-        y = ii - jj + (ncol - 1)
-        out[x, y] = A
-        return out
 class TabulatedPanel(wx.Panel):
     def __init__(self, parent, mainWindow, *args, **kwargs):
         super().__init__(parent,size=(200, 400), *args, **kwargs)
@@ -1387,7 +1461,8 @@ class TabulatedPanel(wx.Panel):
         self.spin_gridTarget.Bind(wx.EVT_TEXT_ENTER, self.on_gridTarget)
         self.updateGridInfo()
 
-        self.btn_doOriSel   = PillButton(self.Opt_panel, "Update Ori.Sel. Grid", color_key="pill_load")
+        self.btn_doOriSel   = PillButton(self.Opt_panel, "Update Ori.Sel. Grid", color_key="pill_load",
+                                         draw_badge=theme.draw_play_badge)
         Optsizer.Add(self.btn_doOriSel, 0, wx.EXPAND)
         self.btn_doOriSel.Bind(wx.EVT_BUTTON, self.parent.on_update_orisel)
 
@@ -1429,10 +1504,14 @@ class TabulatedPanel(wx.Panel):
         Syssizer = wx.BoxSizer(wx.VERTICAL)
         
         btnszr = wx.BoxSizer(wx.HORIZONTAL)
-        self.btn_add = PillButton(self.Sys_panel, "Add Nuc", color_key="accent")
+        self.btn_add = PillButton(self.Sys_panel, "Nuc", color_key="accent",
+                                  draw_badge=theme.draw_plus_badge)
+        self.btn_add.SetToolTip("Add a nucleus to the spin system.")
         self.btn_add.Bind(wx.EVT_BUTTON, self.on_add_Nuc)
         btnszr.Add(self.btn_add, 0, wx.EXPAND)
-        self.btn_delete = PillButton(self.Sys_panel, "Delete Nuc", color_key="pill_warn")
+        self.btn_delete = PillButton(self.Sys_panel, "Nuc", color_key="pill_warn",
+                                     draw_badge=theme.draw_minus_badge)
+        self.btn_delete.SetToolTip("Delete the selected nucleus from the spin system.")
         self.btn_delete.Bind(wx.EVT_BUTTON, self.on_delete_nuc)
         btnszr.Add(self.btn_delete, 0, wx.EXPAND)
 
@@ -1455,11 +1534,15 @@ class TabulatedPanel(wx.Panel):
         sizer = wx.BoxSizer(wx.VERTICAL)
 
         sizerBtns = wx.BoxSizer(wx.HORIZONTAL)
-        self.btn_delete = PillButton(self.data_panel, "Delete Data", color_key="pill_warn")
+        self.btn_delete = PillButton(self.data_panel, "Data", color_key="pill_warn",
+                                     draw_badge=theme.draw_cross_badge)
+        self.btn_delete.SetToolTip("Delete the selected data set.")
         self.btn_delete.Bind(wx.EVT_BUTTON, self.on_delete)
         sizerBtns.Add(self.btn_delete, 1, wx.ALIGN_CENTER | wx.ALL, 5)
 
-        self.btn_dsc = PillButton(self.data_panel, "Show DSC", color_key="pill_load")
+        self.btn_dsc = PillButton(self.data_panel, "DSC", color_key="pill_load",
+                                  draw_badge=theme.draw_textlines_badge)
+        self.btn_dsc.SetToolTip("Show the DSC parameter file of the selected data set.")
         self.btn_dsc.Bind(wx.EVT_BUTTON, self.on_dsc)
         sizerBtns.Add(self.btn_dsc, 1, wx.ALIGN_CENTER | wx.ALL, 5)
         sizer.Add(sizerBtns, 0, wx.ALIGN_LEFT | wx.ALL, 5)
@@ -1963,6 +2046,27 @@ class TabulatedPanel(wx.Panel):
             fmin = self.filetree.AppendIn(cat[ii], wxpg.FloatProperty("f.min", f"fmin {ii}",value=dd['fmin']))
             self.filetree.SetPropertyEditor(fmin, "SpinFloat")
             fmin.SetAttribute(wxpg.PG_ATTR_SPINCTRL_STEP, 0.5)
+            # Width of the tilted analysis box, walked in and out like f.min
+            # and f.max above and for the same reason, so it gets the same
+            # editor. .get() rather than [] -- sessions saved before this
+            # option existed have no key.
+            adspan = self.filetree.AppendIn(
+                cat[ii], wxpg.FloatProperty("a.diag span", f"antidiagspan {ii}",
+                                            value=dd.get('antidiagspan', -1.0)))
+            self.filetree.SetPropertyEditor(adspan, "SpinFloat")
+            adspan.SetAttribute(wxpg.PG_ATTR_SPINCTRL_STEP, 0.5)
+            adspan.SetHelpString(
+                "How far off the f2=f1 diagonal the tilted analysis box reaches,\n"
+                "in MHz of |f2-f1|. The box's length along the diagonal follows\n"
+                "from it: the corners always stay on the f.min..f.max border, so\n"
+                "a wider box is a shorter one.\n"
+                " -1  = square box, half the window wide (corners at the middle\n"
+                "       of each window edge)\n"
+                " f.max-f.min = the widest the window holds -- the box collapses\n"
+                "       to the bare anti-diagonal line, one sample thick\n"
+                "Anything larger is taken at that maximum. This box is what the\n"
+                "Diag.Projection maximizes over, what z.max scales by, and what\n"
+                "the grid search fits.")
             # A single pulldown, like "Show" -- not a multi-choice. Only one
             # background can be subtracted anyway, and MultiChoiceProperty
             # handed back a *list*, which then never matched the plain title
@@ -2455,6 +2559,10 @@ class MainFrame(wx.Frame):
                     'fname':fname, 'fullpath':path, 'show':True, 
                     'zmax':1.0, 'zmin':0.0, 'title':ax['title'],
                     'fmax':fmax, 'fmin':fmin,
+                    # How far off the f2=f1 diagonal the tilted analysis box
+                    # reaches, in MHz of |f2-f1|; -1 = the square box, half the
+                    # f.min..f.max window wide. See optHYSCORE.diagonalBox.
+                    'antidiagspan':-1.0,
                     'isfft':False,
                     'fftdata':None, 'fftax':None, 'fftmethod':None, 'fftactual':False,
                     # measured by update_FFT once there is a spectrum to

@@ -5,11 +5,15 @@ Scans two scalar Sys parameters over a user-defined grid. At every grid
 point, a full HYSCORE simulation is re-run for every "active" dataset
 (active == the dataset's "Show" checkbox in the main window's Data tab)
 and compared against that dataset's experimental spectrum, restricted to
-the [fmin, fmax] x [fmin, fmax] region shown in the main window's 2D
-plots (i.e. the same square region regardless of the "Quadrants" radio
-button). Comparison is always done in the frequency domain (FFT'd data
-for time-domain files, raw data for files already loaded as FFT spectra),
-independent of the main window's own "FFT(y)" display toggle.
+the region the main window's 2D plots outline with a dashed line: the
+45-degree tilted box inscribed in [fmin, fmax] x [fmin, fmax], whose
+sides run parallel and perpendicular to f2 = f1 and whose width is set by
+that dataset's AntiDiagSpan (see optHYSCORE.diagonalBox). That box is also exactly
+what the main window's diagonal skyline panel projects, and it is the
+same region regardless of the "Quadrants" radio button. Comparison is
+always done in the frequency domain (FFT'd data for time-domain files,
+raw data for files already loaded as FFT spectra), independent of the
+main window's own "FFT(y)" display toggle.
 
 Fitness = pooled RMSD:
   For each active dataset k, the simulated spectrum is amplitude-scaled
@@ -1304,7 +1308,7 @@ class GridSearchFrame(wx.Frame):
         # reuses it at every grid point instead of re-slicing, and its size
         # is what determines the cost of keeping simulations.
         roi_cache = [self.dataset_roi(dd) for dd in active_data]
-        self._last_noise = [(roi['sigma'], roi['exp'].size, roi['null_rms'])
+        self._last_noise = [(roi['sigma'], roi['n'], roi['null_rms'])
                             for roi in roi_cache if roi is not None]
 
         store_sims = self.chk_store_sims.GetValue()
@@ -2023,7 +2027,10 @@ class GridSearchFrame(wx.Frame):
         for roi, sim in zip(self._roi_cache, slot):
             if roi is None or sim is None:
                 continue
-            resid = roi['exp'] - sim
+            # Blanked outside the tilted box: those points were never fitted,
+            # so showing their residual would invite reading a miss into a
+            # region the scan never scored.
+            resid = np.where(roi['mask'], roi['exp'] - sim, np.nan)
             if roi['null_rms'] > 0.0:
                 scale = 1.0 / roi['null_rms']
                 resid = resid * scale
@@ -2042,7 +2049,7 @@ class GridSearchFrame(wx.Frame):
                 'x': roi['x'],
                 'y': roi['y'],
                 'extent': [roi['x'][0], roi['x'][-1], roi['y'][0], roi['y'][-1]],
-                'rmsd': float(np.sqrt(np.mean(resid ** 2))),
+                'rmsd': float(np.sqrt(np.nanmean(resid ** 2))),
             })
         self.residuals.show_maps(
             entries, subtitle=f"Residuals at {header} (normalized)",
@@ -2252,6 +2259,16 @@ class GridSearchFrame(wx.Frame):
         None when the dataset has no usable frequency-domain data or the
         region selects nothing.
 
+        'exp' stays the full rectangle -- residual maps are drawn from it and
+        want a grid -- but what is actually fitted is the 45-degree tilted box
+        inscribed in that square (optHYSCORE.diagonalBox, widened or narrowed
+        by the dataset's own AntiDiagSpan), and 'mask' marks it. Every sum below runs over the mask,
+        so the region scored here is exactly the one the main window outlines
+        on its 2D maps and projects in its diagonal skyline panel. At the
+        default AntiDiagSpan of -1 that is about half the square's points, and
+        less again as the span widens, so 'n' rather than exp.size is the count
+        the statistics must use.
+
         Split out of _dataset_sse so a scan can build this once per dataset up
         front instead of re-slicing the same unchanging experimental data at
         every grid point, and so the region's size is known before the scan
@@ -2270,15 +2287,21 @@ class GridSearchFrame(wx.Frame):
             expY = np.asarray(dd['fftax']['y'])
 
         fmin, fmax = dd['fmin'], dd['fmax']
-        xsel = (expX >= fmin) & (expX <= fmax)
-        ysel = (expY >= fmin) & (expY <= fmax)
-        if not xsel.any() or not ysel.any():
-            return None
-
         # Array axis 0 tracks the 'x' coordinate array and axis 1 tracks 'y'
         # throughout this codebase (see MainFrame.update_FFT, which builds
         # fftX from fftData.shape[0] and fftY from fftData.shape[1]) -- index
-        # accordingly rather than assuming the usual imshow row=y convention.
+        # accordingly rather than assuming the usual imshow row=y convention,
+        # and hand diagonalBox the axes in that same order so its masks and
+        # indices come back matching.
+        box = self.main.Opt.diagonalBox(expX, expY, fmin, fmax,
+                                        dd.get('antidiagspan', -1.0))
+        if box is None:
+            return None
+        xsel, ysel, mask = box['sel0'], box['sel1'], box['mask']
+        n_fit = int(mask.sum())
+        if not n_fit:
+            return None
+
         exp_roi = expdata[np.ix_(xsel, ysel)]
         # 'null' is this dataset's no-simulation sum of squares -- the residual
         # you are left with at c = 0. Since the amplitude fit clamps c to be
@@ -2286,7 +2309,7 @@ class GridSearchFrame(wx.Frame):
         # in (0, 1] and is what the normalized RMSD divides by. 'null_rms' is
         # the same thing per point (the region's root-mean-square intensity),
         # used to put residual *maps* into the same normalized units.
-        null = float(np.sum(exp_roi ** 2))
+        null = float(np.sum(exp_roi[mask] ** 2))
         # 'sigma' is the per-point noise level pyHYSCORE measured on this
         # spectrum's far high-frequency corner when the FFT was built
         # (MainFrame.noise_from_spectrum) -- an *independent* estimate, which
@@ -2296,10 +2319,13 @@ class GridSearchFrame(wx.Frame):
         # CI code falls back to the F-test in that case.
         sigma = dd.get('noise')
         return {'exp': exp_roi,
+                'mask': mask,
+                'n': n_fit,
+                'corners': box['corners'],
                 'x': expX[xsel],
                 'y': expY[ysel],
                 'null': null,
-                'null_rms': float(np.sqrt(null / exp_roi.size)) if exp_roi.size else 0.0,
+                'null_rms': float(np.sqrt(null / n_fit)),
                 'sigma': float(sigma) if sigma else None,
                 'label': dd.get('title', dd.get('fname', '?')),
                 'field': dd.get('field')}
@@ -2322,17 +2348,21 @@ class GridSearchFrame(wx.Frame):
         if roi is None:
             return 0.0, 0, None
 
-        exp_roi, sub_x, sub_y = roi['exp'], roi['x'], roi['y']
+        exp_roi, sub_x, sub_y, mask = roi['exp'], roi['x'], roi['y'], roi['mask']
 
         interp = RegularGridInterpolator((simX, simY), simdata,
                                           bounds_error=False, fill_value=0.0)
         gx, gy = np.meshgrid(sub_x, sub_y, indexing='ij')
         sim_on_exp = interp(np.stack([gx.ravel(), gy.ravel()], axis=-1)).reshape(gx.shape)
 
-        denom = np.sum(sim_on_exp ** 2)
-        c = max(np.sum(exp_roi * sim_on_exp) / denom, 0.0) if denom > 1e-30 else 0.0
+        # Both the amplitude and the residual are taken over the tilted box
+        # alone (roi['mask']). The simulation is still interpolated onto the
+        # whole rectangle, since `scaled` is what a stored residual map is
+        # later rebuilt from and that map is drawn as a grid.
+        denom = np.sum(sim_on_exp[mask] ** 2)
+        c = max(np.sum(exp_roi[mask] * sim_on_exp[mask]) / denom, 0.0) if denom > 1e-30 else 0.0
         scaled = c * sim_on_exp
-        resid = exp_roi - scaled
+        resid = exp_roi[mask] - scaled[mask]
         return float(np.sum(resid ** 2)), int(resid.size), (scaled if want_sim else None)
     def format_bytes(self, nbytes):
         for unit in ('bytes', 'kilobytes', 'megabytes', 'gigabytes'):

@@ -1703,6 +1703,60 @@ def draw_flatline_badge(gc, bx, by, d, color):
     gc.StrokeLine(bx + d * 0.22, y, bx + d * 0.78, y)
 
 
+def draw_cross_badge(gc, bx, by, d, color):
+    """Diagonal cross badge for the 'Data' (delete data) pill button."""
+    gc.SetPen(gc.CreatePen(wx.GraphicsPenInfo(color).Width(max(1.4, d * 0.11))
+                           .Cap(wx.CAP_ROUND)))
+    left, right = bx + d * 0.31, bx + d * 0.69
+    top, bottom = by + d * 0.31, by + d * 0.69
+    gc.StrokeLine(left, top, right, bottom)
+    gc.StrokeLine(left, bottom, right, top)
+
+
+def draw_textlines_badge(gc, bx, by, d, color):
+    """Three stacked horizontal lines badge -- lines of text -- for the
+    'DSC' pill button."""
+    gc.SetPen(gc.CreatePen(wx.GraphicsPenInfo(color).Width(max(1.0, d * 0.085))
+                           .Cap(wx.CAP_ROUND)))
+    x = bx + d * 0.27
+    # Last line short, as in a paragraph's trailing line.
+    for i, length in enumerate((0.46, 0.46, 0.30)):
+        y = by + d * (0.33 + i * 0.17)
+        gc.StrokeLine(x, y, x + d * length, y)
+
+
+def draw_plus_badge(gc, bx, by, d, color):
+    """Plus badge for the 'Nuc'/'Function' add pill buttons."""
+    cx, cy = bx + d * 0.5, by + d * 0.5
+    arm = d * 0.21
+    gc.SetPen(gc.CreatePen(wx.GraphicsPenInfo(color).Width(max(1.4, d * 0.11))
+                           .Cap(wx.CAP_ROUND)))
+    gc.StrokeLine(cx - arm, cy, cx + arm, cy)
+    gc.StrokeLine(cx, cy - arm, cx, cy + arm)
+
+
+def draw_minus_badge(gc, bx, by, d, color):
+    """Minus badge for the 'Nuc' delete pill button -- deliberately the same
+    arm length as draw_plus_badge so the add/delete pair reads as a set."""
+    cx, cy = bx + d * 0.5, by + d * 0.5
+    arm = d * 0.21
+    gc.SetPen(gc.CreatePen(wx.GraphicsPenInfo(color).Width(max(1.4, d * 0.11))
+                           .Cap(wx.CAP_ROUND)))
+    gc.StrokeLine(cx - arm, cy, cx + arm, cy)
+
+
+def draw_play_badge(gc, bx, by, d, color):
+    """Filled play triangle badge for the 'Update Ori.Sel. Grid' pill button."""
+    path = gc.CreatePath()
+    path.MoveToPoint(bx + d * 0.36, by + d * 0.25)
+    path.AddLineToPoint(bx + d * 0.76, by + d * 0.50)
+    path.AddLineToPoint(bx + d * 0.36, by + d * 0.75)
+    path.CloseSubpath()
+    gc.SetBrush(gc.CreateBrush(wx.Brush(color)))
+    gc.SetPen(wx.TRANSPARENT_PEN)
+    gc.FillPath(path)
+
+
 # --------------------------------------------------------------------------- #
 # Resize/sash-drag performance helpers.
 #

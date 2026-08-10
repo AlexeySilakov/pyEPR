@@ -64,11 +64,14 @@ class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
         self.vbox = wx.BoxSizer(wx.VERTICAL)
 
         topbar = wx.BoxSizer(wx.HORIZONTAL)
-        self.btn_addf = PillButton(self, "add function", color_key="pill_load")
+        self.btn_addf = PillButton(self, "Function", color_key="pill_load",
+                                   draw_badge=theme.draw_plus_badge)
+        self.btn_addf.SetToolTip("Add a function that computes a property from custom parameters.")
         self.btn_addf.Bind(wx.EVT_BUTTON, self.on_addfunc)
         topbar.Add(self.btn_addf, 0, wx.ALL | wx.CENTER, self.SPACE)
 
-        self.btn_recompute = PillButton(self, "Recompute All", color_key="accent")
+        self.btn_recompute = PillButton(self, "Recompute", color_key="accent",
+                                        draw_badge=theme.draw_play_badge)
         self.btn_recompute.SetToolTip(
             "Re-run every function. Use this after editing a property that a\n"
             "formula references, since that isn't picked up automatically.")

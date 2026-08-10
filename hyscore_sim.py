@@ -48,7 +48,7 @@ class optHYSCORE():
         'ProdRule': True,      # use product rule, producing combination frequencies (memory/time consuming)
         'AmpRatios': 1.0, # relative amplitudes of the peaks from different HF couplings
         'Treshold': 1e-3,
-        'OriSelType': ['g_eff', ['g_eff', 'g_eff+HFC', 'brute force', 'precalculated']]
+        'OriSelType': ['g_eff', ['g_eff', 'g_eff+HFC', 'brute force', 'precalculated']],
         }
     def nGridPoints(self, grid=None, nKnots=None):
         """Knots the selected grid will produce, without actually building it.
@@ -118,6 +118,119 @@ class optHYSCORE():
             if abs(target-below) <= abs(self.nGridPoints(grid, lo)-target):
                 return lo-1
         return lo
+
+    def diagonalBox(self, axis0, axis1, fmin, fmax, antidiagspan=-1.0):
+        """Samples of a 2D spectrum lying inside the 45-degree tilted rectangle
+        inscribed in the [fmin, fmax] x [fmin, fmax] window -- the region the
+        diagonal skyline projection is taken over, and the region the grid
+        search fits.
+
+        The projection maximizes along lines parallel to f2 = f1 and plots the
+        result against the perpendicular offset. Over the plain square window
+        those lines have wildly unequal lengths -- the full window diagonal at
+        the centre, a single sample at the corners -- so the ends of the trace
+        are a maximum over almost nothing and the noise level drifts along it.
+        A box whose own sides run parallel and perpendicular to f2 = f1 fixes
+        that: every line inside it has the same length, so every point of the
+        projection is a maximum over the same number of samples.
+
+        antidiagspan (the dataset's AntiDiagSpan) sets how far off the diagonal
+        the box reaches, in MHz of |f2-f1| -- the same quantity the projection
+        is plotted against. Only that one side is chosen: the extent along the
+        diagonal is then whatever keeps all four corners on the window's
+        border, so a wider box is automatically a shorter one and no setting
+        ever selects a point outside f.min..f.max.
+
+        A negative span (-1) asks for the square box, half the window's width,
+        whose corners land at the midpoints of the window's edges -- that being
+        the only sentinel, 0 is taken literally and leaves the bare f2 = f1
+        diagonal. The widest the window can hold is its full width, where the
+        box collapses the other way, to the bare anti-diagonal line one sample
+        thick along the diagonal. Anything larger is taken at that maximum
+        rather than refused.
+
+        Nothing is rotated or resampled: rotating by 45 degrees maps sample
+        (i, j) to (i+j, i-j), whose two indices always share parity, so a
+        rotated *image* is half holes and needs padding the maximum would then
+        pick up. Grouping by the diagonal index d = i-j instead selects exactly
+        the measured samples and nothing else.
+
+        'corners' outlines the selection for display. The two sides at constant
+        d are exactly straight; the two ends sawtooth by one step of i+j, which
+        is unavoidable -- i+j and i-j always share parity, so a 45-degree line
+        can only pass through every other diagonal and the alternation is the
+        closest a square lattice gets to straight. It puts the drawn edge
+        within 1/(2*sqrt(2)) = 0.354 of a sample of every selected point, and
+        the count per diagonal stays exactly constant.
+
+        axis0/axis1 are the frequency axes of the map's first and second array
+        dimension; every index returned follows that same order, so the caller
+        alone decides which of the two is which frequency. Returns None when
+        the window selects nothing usable.
+        """
+        axis0, axis1 = np.asarray(axis0), np.asarray(axis1)
+        sel0 = (axis0 >= fmin) & (axis0 <= fmax)
+        sel1 = (axis1 >= fmin) & (axis1 <= fmax)
+        if not sel0.any() or not sel1.any():
+            return None
+        off0, n0 = int(np.flatnonzero(sel0)[0]), int(sel0.sum())
+        off1, n1 = int(np.flatnonzero(sel1)[0]), int(sel1.sum())
+
+        # Samples available on diagonal d = i-j, for i/j inside the window.
+        # Non-increasing in |d|, so the whole span |d| <= D is covered as soon
+        # as its two outermost diagonals are.
+        count = lambda d: np.minimum(n0-1, n1-1+d) - np.maximum(0, d) + 1
+
+        # f2-f1 is d steps, so the requested span in MHz is a half-range in d
+        # directly. Clamped to the widest the window holds, which is d = nwin-1
+        # (the corner-to-corner anti-diagonal) and leaves L == 1 below.
+        nwin = min(n0, n1)
+        step = abs(axis0[1]-axis0[0]) if axis0.size > 1 else 0.0
+        span = float(antidiagspan) if antidiagspan is not None else -1.0
+        if span >= 0 and step > 0:
+            D = int(round(span/step))
+        else:
+            D = (nwin-1)//2          # -1: the square box, half the window wide
+        D = max(0, min(D, nwin-1))
+
+        # The corners sit on the window's border, so the diagonal extent is the
+        # longest run every diagonal in |d| <= D can still hold -- decided by
+        # the two outermost ones, since count only falls with |d|.
+        L = int(min(count(-D), count(D)))
+        if L < 1:
+            return None
+
+        d = np.arange(-D, D+1)
+        # Centred run: its midpoint then lands on the window's anti-diagonal
+        # for every d, which is what makes the selection a rectangle rather
+        # than a ragged strip.
+        i = (np.maximum(0, d) + (count(d)-L)//2)[:, None] + np.arange(L)[None, :]
+        j = i - d[:, None]
+
+        mask = np.zeros((n0, n1), dtype=bool)
+        mask[i, j] = True
+
+        # Outline the rectangle the selected samples fill, rather than four of
+        # the samples themselves. The run ends alternate between two
+        # neighbouring anti-diagonals (the parity above), so a line drawn
+        # through any particular sample lands a whole step to one side of half
+        # the boundary; taking the midpoint of the alternation instead centres
+        # it, leaving every selected sample within 0.354 of a sample of the
+        # line. Walked as a closed ring, so the four are in polygon order.
+        s = i + j
+        s_lo = 0.5*(s[:, 0].min() + s[:, 0].max())
+        s_hi = 0.5*(s[:, -1].min() + s[:, -1].max())
+        step0 = (axis0[1]-axis0[0]) if axis0.size > 1 else 0.0
+        step1 = (axis1[1]-axis1[0]) if axis1.size > 1 else 0.0
+        corners = np.array([(axis0[off0] + 0.5*(sv+dv)*step0,
+                             axis1[off1] + 0.5*(sv-dv)*step1)
+                            for sv, dv in ((s_lo, -D), (s_hi, -D),
+                                           (s_hi, D), (s_lo, D))])
+        return {'sel0': sel0, 'sel1': sel1, 'mask': mask,
+                'idx0': off0+i, 'idx1': off1+j, 'corners': corners,
+                'ndiag': int(d.size),      # points in the projection
+                'nalong': L,               # samples behind each of them
+                'nwindow': min(n0, n1)}    # longest diagonal the window holds
 
     def getToolTips(self, param=None):
         dc = {'nKnots': ("Orientation grid resolution. Each Grid method reads this\n"+
