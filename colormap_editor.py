@@ -34,7 +34,7 @@ from collections import deque
 import wx
 import numpy as np
 import matplotlib
-matplotlib.use("WXAgg")
+#matplotlib.use("WXAgg")
 import matplotlib.cm as cm
 from matplotlib.colors import LinearSegmentedColormap, to_rgb, to_hex
 from matplotlib.backends.backend_wxagg import FigureCanvasWxAgg as FigureCanvas

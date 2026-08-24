@@ -5,6 +5,7 @@ Created on Sun Nov 23 14:31:25 2025
 @author: Alexey Silakov
 """
 import numpy as np
+from scipy.interpolate import RegularGridInterpolator
 
 def RotMatrix(angles):
     ###  perform no checks for speed
@@ -119,6 +120,31 @@ def SpinOp(spins, corrs):
         totalout = np.kron(totalout, S_s)
 
     return totalout
+
+
+def adaptSim(Data_x, Data_y, Sim, SimX, SimY):
+    """Resample a simulated spectrum onto an experimental region's axes."""
+    if Sim is None:
+        return None
+    interp = RegularGridInterpolator((SimX, SimY), Sim,
+                                      bounds_error=False, fill_value=0.0)
+    gx, gy = np.meshgrid(Data_x, Data_y, indexing='ij')
+    return interp(np.stack([gx.ravel(), gy.ravel()], axis=-1)).reshape(gx.shape)
+
+def calcSSR(Exp, Sim, Mask, offset):
+    """Sum of squared residuals between an experimental region and a
+    simulation scaled to best fit it. Exp and Sim must share the same XY."""
+    denom = np.sum(Sim[Mask] ** 2)
+    if denom > 1e-30:
+        c = max(np.sum((Exp[Mask]-offset) * Sim[Mask]) / denom, 0.0)
+    else:
+        c = 0.0
+    scaled_sim = c * Sim + offset
+    resid = Exp[Mask] - scaled_sim[Mask]
+    SumSqRes = float(np.sum(resid ** 2))
+    N = int(resid.size)
+
+    return SumSqRes, N, scaled_sim
 
 if __name__ == "__main__":
     RR=RotMatrix(np.array([np.pi/3, np.pi/2, np.pi]))

@@ -46,8 +46,8 @@ class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
         self.functions = []
         self.function_ctrls = []
         self._driven_labels = set()
-        self._resim_pending = False
-        self._last_touched_prop_name = None
+        # self._resim_pending = False
+        # self._last_touched_prop_name = None
         # internal parameters
         self.SPACE = 2
         self.F_FUNC_ID = 0
@@ -295,19 +295,19 @@ class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
         self._driven_labels = driven_labels
         pg.Refresh()
 
-    def _schedule_resim(self, prop):
-        self._last_touched_prop_name = prop.GetName() if prop is not None else None
-        if not self._resim_pending:
-            self._resim_pending = True
-            wx.CallAfter(self._fire_resim)
+    # def _schedule_resim(self, prop):
+    #     self._last_touched_prop_name = prop.GetName() if prop is not None else None
+    #     if not self._resim_pending:
+    #         self._resim_pending = True
+    #         wx.CallAfter(self._fire_resim)
 
-    def _fire_resim(self):
-        self._resim_pending = False
-        if self._last_touched_prop_name is None:
-            return
-        prop = self.pgpanel.pg.GetPropertyByName(self._last_touched_prop_name)
-        if prop is not None:
-            self.pgpanel.OnValueChanged(None, prop=prop, trigger_run=True)
+    # def _fire_resim(self):
+    #     self._resim_pending = False
+    #     if self._last_touched_prop_name is None:
+    #         return
+    #     prop = self.pgpanel.pg.GetPropertyByName(self._last_touched_prop_name)
+    #     if prop is not None:
+    #         self.pgpanel.OnValueChanged(None, prop=prop, trigger_run=True)
 
     # --------------------------------------------------------------
     # Main entry point: (re)parse every function row and push results
@@ -376,7 +376,7 @@ class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
 
         self.pgpanel.parameters['functions'] = self.get_dict()
         if changed_any and last_prop is not None:
-            self._schedule_resim(last_prop)
+            self.pgpanel.OnValueChanged(None, prop=last_prop, trigger_run=True)
 
     # --------------------------------------------------------------
     # Add variable control (proper sizers)
