@@ -1788,7 +1788,8 @@ class GridSearchFrame(wx.Frame):
                 'sim': sim,
                 'x': region['x'],
                 'y': region['y'],
-                'extent': [region['x'][0]-dx/2, region['x'][-1]+dx/2, region['y'][0]-dy/2, region['y'][-1]]+dy/2,
+                'extent': [region['x'][0]-dx/2, region['x'][-1]+dx/2, 
+                           region['y'][0]-dy/2, region['y'][-1]+dy/2],
                 'rmsd': float(np.sqrt(np.nanmean(resid ** 2))),
             })
         self.residuals.show_maps(
