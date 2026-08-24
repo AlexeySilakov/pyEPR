@@ -1268,7 +1268,7 @@ class GridSearchFrame(wx.Frame):
 
         args = (payload, tasks, grid1, grid2, param1, param2,
                 self._cancel_event, sim_store, use_pool, n_workers)
-        self.RUN_IN_THREAD = False
+        #self.RUN_IN_THREAD = False
         if self.RUN_IN_THREAD:
             self._worker_thread = threading.Thread(target=self.worker_run,
                                                    args=args, daemon=True)
