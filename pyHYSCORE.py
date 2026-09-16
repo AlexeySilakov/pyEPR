@@ -559,6 +559,12 @@ class MatplotlibPanel(wx.Panel):
         # saved setting.
         self.showNoiseFloor = True
         self.noiseCompare = 'none'   # 'none' (default) | 'lift' | 'subtract'
+        # 2D map look; saved with the session, mirrored by toolbar toggles and the Opt "Contours" box
+        self.mapMode = 'density'     # 'density' | 'contour'
+        self.contourLevels = 10
+        self.contourWidth = 0.8
+        self.overlayColor = '#000000'
+        self.showGrid = False
         self.projection_axes = []    # skyline/diagonal axes, for the hit test
         # One-shot: the unequal-step warning is raised from inside a redraw,
         # so without this it would reappear on every single one.
@@ -568,6 +574,7 @@ class MatplotlibPanel(wx.Panel):
         self.figure = Figure(figsize=(2, 2), dpi=100)
         self.axes = []
         self.contours = []   # parallel to self.axes; holds QuadContourSet or None
+        self.mapContours = []   # parallel to self.axes; colormap contours replacing the image in contour mode
         #self.axes.append(self.figure.add_subplot(111))
         #self.axes.set_title("Placeholder Figure")
         #self.axes.plot([0, 1, 2], [0, 1, 4], marker='o')
@@ -598,63 +605,14 @@ class MatplotlibPanel(wx.Panel):
         self.chk_OverlaySim = PillCheckBox(self, "Overlay Sim")
         self.chk_OverlaySim.SetValue(self.OverlaySim)
 
-        self.chk_FitBox = PillCheckBox(self, "Fit box")
-        self.chk_FitBox.SetValue(self.showFitBox)
-
         self.chk_FFT.Bind(wx.EVT_CHECKBOX, self.on_check)
         self.chk_BG.Bind(wx.EVT_CHECKBOX, self.on_check)
         self.chk_Skyline.Bind(wx.EVT_CHECKBOX, self.on_check)
         self.chk_OriSel.Bind(wx.EVT_CHECKBOX, self.on_check)
         self.chk_DiagProj.Bind(wx.EVT_CHECKBOX, self.on_check)
         self.chk_OverlaySim.Bind(wx.EVT_CHECKBOX, self.on_check)
-        self.chk_FitBox.Bind(wx.EVT_CHECKBOX, self.on_check)
 
-        # ---- View pad ------------------------------------------------------
-        # Purely how much is drawn; see self.viewPad above.
-        self.view_box = wx.StaticBox(self, label="View pad, MHz")
-        self.view_box_sizer = wx.StaticBoxSizer(self.view_box, wx.HORIZONTAL)
-        self.spin_viewPad = wx.SpinCtrlDouble(
-            self, min=0.0, max=10000.0, inc=1.0, initial=self.viewPad,
-            style=wx.SP_ARROW_KEYS | wx.TE_PROCESS_ENTER)
-        self.spin_viewPad.SetDigits(2)
-        self.spin_viewPad.SetToolTip(
-            "Extra MHz drawn around the f.min..f.max analysis window.\n"
-            "Display only: the fit region, the colour scale, the projection\n"
-            "normalization and the noise floor all stay on f.min..f.max.\n"
-            "Clamped to the measured spectrum, and never crosses a quadrant cut.")
-        theme.theme_control(self.spin_viewPad)
-        self.view_box_sizer.Add(self.spin_viewPad, 0, wx.ALL, 3)
-        self.view_box_sizer.Add(self.chk_FitBox, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 3)
-        self.spin_viewPad.Bind(wx.EVT_SPINCTRLDOUBLE, self.on_viewpad)
-        self.spin_viewPad.Bind(wx.EVT_KILL_FOCUS, self.on_viewpad)
-        # SpinCtrlDouble only fires EVT_SPINCTRLDOUBLE for the arrows, and
-        # wx.EVT_TEXT_ENTER doesn't reliably reach these compound controls --
-        # Enter goes through theme.bind_spin_enter instead (see that function).
-        theme.bind_spin_enter(self.spin_viewPad, lambda: self.on_viewpad(None))
-
-        self.quadrant_box = wx.StaticBox(self, label="Quadrants")
-        self.quadrant_box_sizer = wx.StaticBoxSizer(self.quadrant_box, wx.HORIZONTAL)
-
-        self.quadrant_group = []
-
-        self.button_all4 = ThemedRadioButton(self, "All 4", self.quadrant_group, True)
-        self.button_horiz = ThemedRadioButton(self, "±ν₁  (horiz)", self.quadrant_group)
-        self.button_vert = ThemedRadioButton(self, "±ν₂  (vert)", self.quadrant_group)
-
-        self.quadrant_box_sizer.Add(self.button_all4, 0, wx.ALL, 3)
-        self.quadrant_box_sizer.Add(self.button_horiz, 0, wx.ALL, 3)
-        self.quadrant_box_sizer.Add(self.button_vert, 0, wx.ALL, 3)
-        self.button_all4.BindRadio(self.on_quadrant)
-        self.button_horiz.BindRadio(self.on_quadrant)
-        self.button_vert.BindRadio(self.on_quadrant)
-        self.button_all4.SetValue(True)
-
-        # A WrapSizer, not a BoxSizer: the toggles plus the Quadrants and View
-        # boxes need more width than this panel has at the default window size,
-        # and a horizontal BoxSizer answers that by squeezing the last items to
-        # nothing (the View box vanished entirely). Wrapping keeps every
-        # control reachable at any width; at a wide window the row still reads
-        # as one line, only left-aligned rather than pushed apart.
+        # View pad / Fit box / Quadrants controls live on the Opt tab (TabulatedPanel.add_optpanel)
         sizerH = wx.WrapSizer(wx.HORIZONTAL)
         sizerH.Add(self.chk_FFT, 0, wx.EXPAND)
         sizerH.Add(self.chk_BG, 0, wx.EXPAND)
@@ -662,8 +620,6 @@ class MatplotlibPanel(wx.Panel):
         sizerH.Add(self.chk_OriSel, 0, wx.EXPAND)
         sizerH.Add(self.chk_DiagProj, 0, wx.EXPAND)
         sizerH.Add(self.chk_OverlaySim, 0, wx.EXPAND)
-        sizerH.Add(self.view_box_sizer, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT | wx.RIGHT, 6)
-        sizerH.Add(self.quadrant_box_sizer, 0, wx.ALIGN_CENTER_VERTICAL)
 
         sizer = wx.BoxSizer(wx.VERTICAL)
         sizer.Add(sizerH, 0, wx.EXPAND)
@@ -763,9 +719,10 @@ class MatplotlibPanel(wx.Panel):
         self.update_graph()
 
     def get_quadrant(self):
-        if self.button_all4.GetValue():
+        tp = self.parent.tabulated_panel
+        if tp.button_all4.GetValue():
             return 0
-        if self.button_horiz.GetValue():
+        if tp.button_horiz.GetValue():
             return 1
         return 2
 
@@ -774,13 +731,45 @@ class MatplotlibPanel(wx.Panel):
         theme.bind_spin_enter) and to losing focus, so it commits however the
         user leaves the field -- hence the no-op guard: the same value
         arriving twice must not cost a second full redraw."""
-        pad = max(0.0, float(self.spin_viewPad.GetValue()))
+        pad = max(0.0, float(self.parent.tabulated_panel.spin_viewPad.GetValue()))
         if event is not None:
             event.Skip()
         if pad == self.viewPad:
             return
         self.viewPad = pad
         self.update_graph()
+
+    def set_map_mode(self, mode):
+        """Density image <-> colormap contours; axes rebuilt so no stale image lingers."""
+        if mode == self.mapMode:
+            return
+        self.mapMode = mode
+        self.parent.tb_mapmode.SetValue(mode == 'contour')
+        self.parent.tb_mapmode.SetToolTip(
+            "Contour map (click for density)" if mode == 'contour'
+            else "Density map (click for contours)")
+        self.parent.tabulated_panel.sync_contour_controls()
+        self.rebuildAxes = True
+        self.update_graph()
+
+    def set_contour_style(self, levels=None, width=None, overlayColor=None):
+        """Level count / line width / overlay colour from the Opt tab."""
+        if levels is not None:
+            self.contourLevels = int(levels)
+        if width is not None:
+            self.contourWidth = float(width)
+        if overlayColor is not None:
+            self.overlayColor = overlayColor
+        self.update_graph()
+
+    def set_show_grid(self, show):
+        """Grid on/off touches only the existing axes -- no data redraw."""
+        self.showGrid = bool(show)
+        self.parent.tb_grid.SetValue(self.showGrid)
+        for ax in self.axes:
+            if ax is not None and ax.name != '3d':
+                ax.grid(self.showGrid)
+        self.canvas.draw_idle()
 
     def on_check(self, event):
         (self.showFFT, self.showBG, self.showSkyline, self.showOriSel, self.showDiagonalProj, self.OverlaySim, self.showFitBox) = (
@@ -790,8 +779,9 @@ class MatplotlibPanel(wx.Panel):
         self.chk_OriSel.GetValue(),
         self.chk_DiagProj.GetValue(),
         self.chk_OverlaySim.GetValue(),
-        self.chk_FitBox.GetValue(),
+        self.parent.tabulated_panel.chk_FitBox.GetValue(),
         )
+        self.parent.tabulated_panel.sync_contour_controls()
         self.update_graph()
         
     def draw_fitbox(self, ax, corners, view):
@@ -849,6 +839,7 @@ class MatplotlibPanel(wx.Panel):
                     ax.remove()
             self.axes = [None]*(nData*nrows)
             self.contours = [None]*(nData*nrows)
+            self.mapContours = [None]*(nData*nrows)
             self.figure.clf()
             makenew = True
         self.rebuildAxes = False
@@ -961,12 +952,28 @@ class MatplotlibPanel(wx.Panel):
                 ma = np.max(np.max(data)); mi = np.min(np.min(data))
             if makenew:
                 self.axes[axcnt]=self.figure.add_subplot(nrows, nData, axcnt+1)
-                
+            # levels shared by the colormap contours and the sim overlay (overlay in sim units, i.e. /ma)
+            levels = np.linspace(mi, ma, self.contourLevels)
+            if self.mapMode == 'contour':
+                if self.mapContours[axcnt] is not None:
+                    try:
+                        self.mapContours[axcnt].remove()
+                    except Exception:
+                        pass
+                # contour only the visible window (+1 cell): the full 2048^2 array takes seconds
+                ix = np.flatnonzero((x_axis >= xmi) & (x_axis <= xma))
+                iy = np.flatnonzero((y_axis >= ymi) & (y_axis <= yma))
+                ix = slice(max(ix[0]-1, 0), ix[-1]+2) if ix.size else slice(None)
+                iy = slice(max(iy[0]-1, 0), iy[-1]+2) if iy.size else slice(None)
+                self.mapContours[axcnt] = self.axes[axcnt].contour(
+                    x_axis[ix], y_axis[iy], data[iy, ix], levels, cmap=self.parent.current_cmap,
+                    vmin=mi, vmax=ma, linewidths=self.contourWidth)
+                self.axes[axcnt].set_aspect('equal')   # imshow does this itself; contour does not
+            elif makenew:
                 im = self.axes[axcnt].imshow(
                     data, extent=axEx, origin="lower",
                     cmap=self.parent.current_cmap, interpolation="nearest")
                 im.set_clim(vmin=mi, vmax=ma)
-
             else:
                 for ch in self.axes[axcnt].get_children():
                     if isinstance(ch, matplotlib.image.AxesImage):
@@ -975,6 +982,7 @@ class MatplotlibPanel(wx.Panel):
                         ch.set_clim(vmin=mi, vmax=ma)
                         ch.set_cmap(self.parent.current_cmap)
                         break
+            self.axes[axcnt].grid(self.showGrid)
             self.axes[axcnt].set_xlim(xmi, xma)
             self.axes[axcnt].set_ylim(ymi, yma)
             self.draw_fitbox(self.axes[axcnt], fitpoly, (xmi, xma, ymi, yma))
@@ -992,11 +1000,11 @@ class MatplotlibPanel(wx.Panel):
             else:
                 ratio = 1.0
             if dd.get('noiselevel', -1.0) <0:
-                noiselevel = dd['noise']
+                noiselevel = dd.get('noise') or 0.0   # older sessions have no noise entry
             else:
                 noiselevel = np.max(data)*dd['noiselevel']
 
-        
+
             ########## ----- simulation ---------------------------------
             upshift = None
             if self.showSim or self.showSkyline or self.showDiagonalProj:
@@ -1027,26 +1035,38 @@ class MatplotlibPanel(wx.Panel):
             if self.showSim:
                 simax = axcnt+rowcnt*nData
                 realsim = ''
-                nlev = 7                
-                if makenew:                                             
+                if makenew:
                     self.axes[simax]=self.figure.add_subplot(nrows, nData, simax+1)
-                    im = self.axes[simax].imshow(simdata, extent=simaxEx, 
-                        origin="lower", cmap=self.parent.current_cmap, 
-                        interpolation="nearest")
-                    im.set_clim(vmin=simi, vmax=sima)
                 else:
                     for ch in self.axes[simax].get_children():
                         if type(ch)==matplotlib.text.Annotation:
                             ch.remove()
+                if self.mapMode == 'contour':
+                    if self.mapContours[simax] is not None:
+                        try:
+                            self.mapContours[simax].remove()
+                        except Exception:
+                            pass
+                    simx = np.linspace(simaxEx[0], simaxEx[1], simdata.shape[1])
+                    simy = np.linspace(simaxEx[2], simaxEx[3], simdata.shape[0])
+                    self.mapContours[simax] = self.axes[simax].contour(
+                        simx, simy, simdata, np.linspace(simi, sima, self.contourLevels),
+                        cmap=self.parent.current_cmap, vmin=simi, vmax=sima,
+                        linewidths=self.contourWidth)
+                    self.axes[simax].set_aspect('equal')
+                elif makenew:
+                    im = self.axes[simax].imshow(simdata, extent=simaxEx,
+                        origin="lower", cmap=self.parent.current_cmap,
+                        interpolation="nearest")
+                    im.set_clim(vmin=simi, vmax=sima)
+                else:
+                    for ch in self.axes[simax].get_children():
                         if type(ch)== matplotlib.image.AxesImage:
                             ch.set_data(simdata)
                             ch.set_extent(simaxEx)
                             ch.set_clim(vmin=simi, vmax=sima)
                             ch.set_cmap(self.parent.current_cmap)
-                    # cycle through data panel to find contour
-                    for ch in self.axes[axcnt].get_children():
-                        if type(ch)== matplotlib.image.AxesImage:
-                            pass
+                self.axes[simax].grid(self.showGrid)
 
                 ### Contours cannot have their data replaced in-place;
                 ### we must remove the old QuadContourSet and draw a new one.
@@ -1066,12 +1086,12 @@ class MatplotlibPanel(wx.Panel):
                 if self.OverlaySim:
                     self.contours[axcnt] = self.axes[axcnt].contour(
                         dd['simax']['x'], dd['simax']['y'],
-                        simdata, np.linspace(simi, sima, nlev),
-                        colors=['black'], linewidths=0.5)
+                        simdata, levels/ma,
+                        colors=[self.overlayColor], linewidths=self.contourWidth)
                     self.contours[axcnt+rowcnt*nData] = self.axes[axcnt+rowcnt*nData].contour(
                         dd['simax']['x'], dd['simax']['y'],
-                        simdata, np.linspace(simi, sima, nlev),
-                        colors=['black'], linewidths=0.5)
+                        simdata, levels/ma,
+                        colors=[self.overlayColor], linewidths=self.contourWidth)
 
                 # same visible window as the data panel above
                 self.axes[simax].set_xlim(xmi, xma)
@@ -1147,6 +1167,7 @@ class MatplotlibPanel(wx.Panel):
                                                      edgecolor='none', alpha=0.18)
                 self.axes[skyax].set_ylabel('Amplitude (norm.)', fontsize='small')
                 self.axes[skyax].legend(fontsize='x-small', loc='upper right')
+                self.axes[skyax].grid(self.showGrid)
                 rowcnt += 1
 
             ########## ----- show orientation selection -----------
@@ -1223,6 +1244,7 @@ class MatplotlibPanel(wx.Panel):
                         sxaX = (np.linspace(sxw[0], sxw[-1], simbox['ndiag'])
                                 - (sxw[0]+sxw[-1])/2)
                         self.axes[diagprj].plot(sxaX, skyprj1, color='r')
+                self.axes[diagprj].grid(self.showGrid)
                 rowcnt+=1
 
             axcnt+=1
@@ -1346,7 +1368,100 @@ class TabulatedPanel(wx.Panel):
         Optsizer.Add(self.btn_doOriSel, 0, wx.EXPAND)
         self.btn_doOriSel.Bind(wx.EVT_BUTTON, self.parent.on_update_orisel)
 
+        # ---- Contours -----------------------------------------------------
+        # mirrors MatplotlibPanel.contourLevels/contourWidth/overlayColor; toolbar toggle picks the mode
+        mp = self.parent.matplotlib_panel
+        cntBox = wx.StaticBoxSizer(
+            wx.StaticBox(self.Opt_panel, label="Contours"), wx.VERTICAL)
+        cntGrid = wx.FlexGridSizer(3, 2, 2, 4)
+        cntGrid.AddGrowableCol(1, 1)
+        self.spin_contourLevels = wx.SpinCtrl(
+            self.Opt_panel, min=2, max=100, initial=mp.contourLevels,
+            style=wx.SP_ARROW_KEYS | wx.TE_PROCESS_ENTER)
+        self.spin_contourLevels.SetToolTip(
+            "Number of linear levels between z.min and z.max (also used by the sim overlay).")
+        self.spin_contourWidth = wx.SpinCtrlDouble(
+            self.Opt_panel, min=0.1, max=5.0, inc=0.1, initial=mp.contourWidth,
+            style=wx.SP_ARROW_KEYS | wx.TE_PROCESS_ENTER)
+        self.spin_contourWidth.SetDigits(1)
+        self.spin_contourWidth.SetToolTip("Contour line width, points.")
+        self.pick_overlayColor = wx.ColourPickerCtrl(
+            self.Opt_panel, colour=wx.Colour(mp.overlayColor))
+        self.pick_overlayColor.SetToolTip("Uniform colour of the 'Overlay Sim' contour lines.")
+        theme.theme_control(self.spin_contourLevels)
+        theme.theme_control(self.spin_contourWidth)
+        for label, ctrl in (("Levels", self.spin_contourLevels),
+                            ("Line width", self.spin_contourWidth),
+                            ("Overlay colour", self.pick_overlayColor)):
+            cntGrid.Add(wx.StaticText(self.Opt_panel, label=label), 0,
+                        wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 2)
+            cntGrid.Add(ctrl, 1, wx.EXPAND)
+        cntBox.Add(cntGrid, 0, wx.EXPAND | wx.ALL, 2)
+        Optsizer.Add(cntBox, 0, wx.EXPAND | wx.TOP, 4)
+
+        self.spin_contourLevels.Bind(wx.EVT_SPINCTRL, self.on_contour_style)
+        self.spin_contourLevels.Bind(wx.EVT_TEXT_ENTER, self.on_contour_style)
+        self.spin_contourWidth.Bind(wx.EVT_SPINCTRLDOUBLE, self.on_contour_style)
+        theme.bind_spin_enter(self.spin_contourWidth, lambda: self.on_contour_style(None))
+        self.pick_overlayColor.Bind(wx.EVT_COLOURPICKER_CHANGED, self.on_contour_style)
+        self.sync_contour_controls()
+
+        # ---- View pad / Fit box -------------------------------------------
+        # display only, state on MatplotlibPanel (viewPad / showFitBox); handlers live there too
+        viewBox = wx.StaticBoxSizer(
+            wx.StaticBox(self.Opt_panel, label="View pad, MHz"), wx.HORIZONTAL)
+        self.spin_viewPad = wx.SpinCtrlDouble(
+            self.Opt_panel, min=0.0, max=10000.0, inc=1.0, initial=mp.viewPad,
+            style=wx.SP_ARROW_KEYS | wx.TE_PROCESS_ENTER)
+        self.spin_viewPad.SetDigits(2)
+        self.spin_viewPad.SetToolTip(
+            "Extra MHz drawn around the f.min..f.max analysis window.\n"
+            "Display only: the fit region, the colour scale, the projection\n"
+            "normalization and the noise floor all stay on f.min..f.max.\n"
+            "Clamped to the measured spectrum, and never crosses a quadrant cut.")
+        theme.theme_control(self.spin_viewPad)
+        self.chk_FitBox = PillCheckBox(self.Opt_panel, "Fit box")
+        self.chk_FitBox.SetValue(mp.showFitBox)
+        viewBox.Add(self.spin_viewPad, 1, wx.ALL, 3)
+        viewBox.Add(self.chk_FitBox, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 3)
+        Optsizer.Add(viewBox, 0, wx.EXPAND | wx.TOP, 4)
+        self.spin_viewPad.Bind(wx.EVT_SPINCTRLDOUBLE, mp.on_viewpad)
+        self.spin_viewPad.Bind(wx.EVT_KILL_FOCUS, mp.on_viewpad)
+        theme.bind_spin_enter(self.spin_viewPad, lambda: mp.on_viewpad(None))   # Enter is unreliable on SpinCtrlDouble
+        self.chk_FitBox.Bind(wx.EVT_CHECKBOX, mp.on_check)
+
+        # ---- Quadrants ----------------------------------------------------
+        quadBox = wx.StaticBoxSizer(
+            wx.StaticBox(self.Opt_panel, label="Quadrants"), wx.VERTICAL)   # stacked: three across clip at the default pane width
+        self.quadrant_group = []
+        self.button_all4 = ThemedRadioButton(self.Opt_panel, "All 4", self.quadrant_group, True)
+        self.button_horiz = ThemedRadioButton(self.Opt_panel, "±ν₁  (horiz)", self.quadrant_group)
+        self.button_vert = ThemedRadioButton(self.Opt_panel, "±ν₂  (vert)", self.quadrant_group)
+        quadBox.Add(self.button_all4, 0, wx.ALL, 3)
+        quadBox.Add(self.button_horiz, 0, wx.ALL, 3)
+        quadBox.Add(self.button_vert, 0, wx.ALL, 3)
+        self.button_all4.BindRadio(mp.on_quadrant)
+        self.button_horiz.BindRadio(mp.on_quadrant)
+        self.button_vert.BindRadio(mp.on_quadrant)
+        self.button_all4.SetValue(True)
+        Optsizer.Add(quadBox, 0, wx.EXPAND | wx.TOP, 4)
+
         self.Opt_panel.SetSizer(Optsizer)
+
+    def on_contour_style(self, event):
+        if event is not None:
+            event.Skip()
+        self.parent.matplotlib_panel.set_contour_style(
+            levels=self.spin_contourLevels.GetValue(),
+            width=self.spin_contourWidth.GetValue(),
+            overlayColor=self.pick_overlayColor.GetColour().GetAsString(wx.C2S_HTML_SYNTAX))
+
+    def sync_contour_controls(self):
+        """Grey out what has no effect: levels/width need contours or the overlay, colour needs the overlay."""
+        mp = self.parent.matplotlib_panel
+        self.spin_contourLevels.Enable(mp.mapMode == 'contour' or mp.OverlaySim)
+        self.spin_contourWidth.Enable(mp.mapMode == 'contour' or mp.OverlaySim)
+        self.pick_overlayColor.Enable(mp.OverlaySim)
 
     def add_setpanel(self):
         # ------------- Opt
@@ -2080,13 +2195,23 @@ class MainFrame(wx.Frame):
         toolbar_sizer.AddStretchSpacer(1)
         add_sep()
 
+        # grid / density-contour toggles; state lives on MatplotlibPanel, handlers forward to it
+        self.tb_grid = theme.IconToggleButton(
+            self.top_toolbar, theme.draw_grid_icon, tooltip="Axes grid")
+        self.tb_mapmode = theme.IconToggleButton(
+            self.top_toolbar, theme.draw_map_mode_icon,
+            tooltip="Density map (click for contours)")
         self.btn_cmap_icon = theme.IconButton(
             self.top_toolbar, theme.draw_colormap_icon, tooltip="Edit Colormap…")
         self.btn_theme_icon = theme.IconButton(
             self.top_toolbar, theme.draw_theme_icon, tooltip="Toggle dark mode (Ctrl+D)")
+        toolbar_sizer.Add(self.tb_grid, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
+        toolbar_sizer.Add(self.tb_mapmode, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
         toolbar_sizer.Add(self.btn_cmap_icon, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
         toolbar_sizer.Add(self.btn_theme_icon, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
         self.top_toolbar.SetSizer(toolbar_sizer)
+        self.tb_grid.Bind(wx.EVT_TOGGLEBUTTON, self.on_toggle_grid)
+        self.tb_mapmode.Bind(wx.EVT_TOGGLEBUTTON, self.on_toggle_mapmode)
         self.btn_cmap_icon.Bind(wx.EVT_BUTTON, self.on_edit_colormap)
         self.btn_theme_icon.Bind(wx.EVT_BUTTON, self.on_toggle_theme)
 
@@ -2271,6 +2396,50 @@ class MainFrame(wx.Frame):
                     self.current_cmap_name  = name
                     self.current_cmap_stops = stops
                     self.matplotlib_panel.update_graph()
+
+    def on_toggle_mapmode(self, event):
+        self.matplotlib_panel.set_map_mode(
+            'contour' if self.tb_mapmode.GetValue() else 'density')
+
+    def on_toggle_grid(self, event):
+        self.matplotlib_panel.set_show_grid(self.tb_grid.GetValue())
+
+    def get_view_state(self):
+        mp = self.matplotlib_panel
+        return {'mapMode': mp.mapMode, 'contourLevels': int(mp.contourLevels),
+                'contourWidth': float(mp.contourWidth), 'overlayColor': str(mp.overlayColor),
+                'showGrid': bool(mp.showGrid)}
+
+    def set_view_state(self, view):
+        """Apply a saved 'view' dict; every key optional and validated, bad ones keep the current value."""
+        mp = self.matplotlib_panel
+        tp = self.tabulated_panel
+        if not isinstance(view, dict):
+            view = {}
+        mode = view.get('mapMode', mp.mapMode)
+        mp.mapMode = mode if mode in ('density', 'contour') else 'density'
+        try:
+            mp.contourLevels = int(np.clip(int(view.get('contourLevels', mp.contourLevels)), 2, 100))
+        except (TypeError, ValueError):
+            pass
+        try:
+            mp.contourWidth = float(np.clip(float(view.get('contourWidth', mp.contourWidth)), 0.1, 5.0))
+        except (TypeError, ValueError):
+            pass
+        colour = wx.Colour(str(view.get('overlayColor', mp.overlayColor)))
+        if colour.IsOk():
+            mp.overlayColor = colour.GetAsString(wx.C2S_HTML_SYNTAX)
+        mp.showGrid = bool(view.get('showGrid', mp.showGrid))
+
+        self.tb_mapmode.SetValue(mp.mapMode == 'contour')
+        self.tb_mapmode.SetToolTip("Contour map (click for density)" if mp.mapMode == 'contour'
+                                   else "Density map (click for contours)")
+        self.tb_grid.SetValue(mp.showGrid)
+        tp.spin_contourLevels.SetValue(mp.contourLevels)
+        tp.spin_contourWidth.SetValue(mp.contourWidth)
+        tp.pick_overlayColor.SetColour(wx.Colour(mp.overlayColor))
+        tp.sync_contour_controls()
+        mp.rebuildAxes = True
 
 
 
@@ -3042,6 +3211,7 @@ class MainFrame(wx.Frame):
                              'Opt': self.tabulated_panel.Opt_param.parameters,
                              'cmap_name': self.current_cmap_name,
                              'cmap_stops': self.current_cmap_stops,
+                             'view': self.get_view_state(),
                              }
                 self.save_mixed_dict_xml(data_dict, pathname)
             except Exception as e:
@@ -3164,25 +3334,30 @@ class MainFrame(wx.Frame):
                     prop=self.tabulated_panel.ffttree.GetPropertyByName(kk)
                     prop.SetValue(fftmethod[kk])
 
-            # ---- Restore colormap (fall back to jet if absent) -------------
-            if 'cmap_name' in result and 'cmap_stops' in result:
+            # ---- Restore colormap: saved stops, else by name, else jet -------
+            name = str(result.get('cmap_name', 'jet') or 'jet')
+            stops = None
+            try:
+                stops = [(float(p), str(c)) for p, c in result['cmap_stops']]
+                if len(stops) < 2:
+                    raise ValueError("fewer than two stops")
+                self.current_cmap = stops_to_cmap(stops, name)
+            except Exception as e:
+                if 'cmap_stops' in result:
+                    print(f"[pyHYSCORE] Saved colormap stops in '{filename}' unusable "
+                          f"({type(e).__name__}: {e}); trying by name '{name}'.")
                 try:
-                    stops = [(float(p), str(c)) for p, c in result['cmap_stops']]
-                    self.current_cmap_name  = str(result['cmap_name'])
-                    self.current_cmap_stops = stops
-                    self.current_cmap       = stops_to_cmap(stops, self.current_cmap_name)
-                except Exception as e:
-                    print(f"[pyHYSCORE] Could not restore saved colormap from '{filename}' "
-                          f"({type(e).__name__}: {e}); falling back to jet.")
-                    self.current_cmap_name  = "jet"
-                    self.current_cmap_stops = colormap_to_stops("jet", 9)
-                    self.current_cmap       = stops_to_cmap(self.current_cmap_stops, "jet")
-            else:
-                # Older session file without colormap entry — use jet
-                self.current_cmap_name  = "jet"
-                self.current_cmap_stops = colormap_to_stops("jet", 9)
-                self.current_cmap       = stops_to_cmap(self.current_cmap_stops, "jet")
-    
+                    stops = colormap_to_stops(name, 9)
+                    self.current_cmap = stops_to_cmap(stops, name)
+                except Exception:
+                    print(f"[pyHYSCORE] Unknown colormap '{name}'; using jet.")
+                    name = "jet"
+                    stops = colormap_to_stops("jet", 9)
+                    self.current_cmap = stops_to_cmap(stops, "jet")
+            self.current_cmap_name  = name
+            self.current_cmap_stops = stops
+            self.set_view_state(result.get('view', {}))
+
             self.Sys.setFromCtrl(self.tabulated_panel.Sys_param.parameters) # This is more to double check that input works
             self.Exp.setFromCtrl(self.tabulated_panel.Exp_param.parameters)                            
             self.Opt.setFromCtrl(self.tabulated_panel.Opt_param.parameters)  

@@ -1655,6 +1655,44 @@ def draw_auto_toggle_icon(label):
     return _draw
 
 
+def draw_map_mode_icon(gc, w, h, color, on):
+    """Density/contour toggle glyph showing the current mode: a jet density blob off, jet-coloured rings on."""
+    s = min(w, h)
+    bw = bh = s * 0.64
+    bx, by = (w - bw) / 2.0, (h - bh) / 2.0
+    cx, cy = bx + bw * 0.55, by + bh * 0.42   # peak sits a little up-right, like a real spectrum
+    jet = ["#00008b", "#0000ff", "#00bfff", "#00ff80", "#ffff00", "#ff8000", "#ff0000"]  # outside -> centre
+    if on:
+        gc.SetBrush(wx.TRANSPARENT_BRUSH)
+        n = len(jet)
+        for i, hexcolor in enumerate(jet):
+            f = 1.0 - i / n
+            rx, ry = bw * 0.5 * f, bh * 0.42 * f
+            gc.SetPen(gc.CreatePen(wx.GraphicsPenInfo(wx.Colour(hexcolor)).Width(1.3)))
+            gc.DrawEllipse(cx - rx, cy - ry, 2 * rx, 2 * ry)
+    else:
+        stops = wx.GraphicsGradientStops(wx.Colour(jet[-1]), wx.Colour(jet[0]))
+        for i in range(len(jet) - 2, 0, -1):   # stops added with increasing position
+            stops.Add(wx.Colour(jet[i]), 1.0 - i / (len(jet) - 1))
+        gc.SetBrush(gc.CreateRadialGradientBrush(cx, cy, cx, cy, bw * 0.75, stops))
+        gc.SetPen(wx.TRANSPARENT_PEN)
+        gc.DrawRoundedRectangle(bx, by, bw, bh, s * 0.06)
+
+
+def draw_grid_icon(gc, w, h, color, on):
+    """Axes-grid toggle glyph: 3x3 lattice, same in both states (accent fill shows on/off)."""
+    s = min(w, h)
+    bw = bh = s * 0.56
+    bx, by = (w - bw) / 2.0, (h - bh) / 2.0
+    gc.SetBrush(wx.TRANSPARENT_BRUSH)
+    gc.SetPen(gc.CreatePen(wx.GraphicsPenInfo(color).Width(1.3)))
+    gc.DrawRectangle(bx, by, bw, bh)
+    gc.SetPen(gc.CreatePen(wx.GraphicsPenInfo(color).Width(1.0)))
+    for f in (1.0 / 3.0, 2.0 / 3.0):
+        gc.StrokeLine(bx + f * bw, by, bx + f * bw, by + bh)
+        gc.StrokeLine(bx, by + f * bh, bx + bw, by + f * bh)
+
+
 def draw_chevron_icon(direction):
     """Returns a draw_icon(gc, w, h, color) callable drawing a simple
     left/right chevron -- used for the file-browser collapse toggle."""
