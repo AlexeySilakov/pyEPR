@@ -190,8 +190,13 @@ def bind_spin_enter(spin, handler=None):
     straight out of the embedded field and parse that instead; using
     GetValue() here is exactly the "Enter resets to the previous number"
     bug."""
-    text_child = next((c for c in spin.GetChildren()
-                       if isinstance(c, wx.TextCtrl)), None)
+    #text_child = next((c for c in spin.GetChildren()
+    #                   if isinstance(c, wx.TextCtrl)), None)
+    # above line does not work on all versions of wxpython/python combo
+    #    ... some kind of bug
+    children = spin.GetChildren()
+    child_list = [children[index] for index in range(len(children))]
+    text_child = next((c for c in child_list if isinstance(c, wx.TextCtrl)), None)
 
     def on_key(event):
         enter = event.GetKeyCode() in (wx.WXK_RETURN, wx.WXK_NUMPAD_ENTER)

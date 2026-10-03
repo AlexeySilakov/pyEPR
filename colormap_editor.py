@@ -25,6 +25,7 @@ UI
     • 🌙 Dark / ☀ Light button in toolbar toggles theme live
     • theme="light"|"dark" constructor arg sets initial theme
 """
+from __future__ import annotations
 
 import copy
 import json
@@ -35,7 +36,8 @@ import wx
 import numpy as np
 import matplotlib
 #matplotlib.use("WXAgg")
-import matplotlib.cm as cm
+#import matplotlib.cm as cm
+import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap, to_rgb, to_hex
 from matplotlib.backends.backend_wxagg import FigureCanvasWxAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -93,7 +95,7 @@ STANDARD_CMAPS = [
 ]
 
 def colormap_to_stops(cmap_name: str, n: int = 9) -> list:
-    cmap = cm.get_cmap(cmap_name)
+    cmap = plt.get_cmap(cmap_name)
     return [(round(float(p), 4), to_hex(cmap(p)[:3]))
             for p in np.linspace(0.0, 1.0, n)]
 
@@ -245,7 +247,7 @@ class ColormapEditorDialog(wx.Dialog):
         self._cb_img = self._ax_cb.imshow(
             np.linspace(0, 1, 256).reshape(-1, 1),
             aspect='auto', origin='lower',
-            cmap=cm.get_cmap("jet"), extent=[0, 1, 0, 1])
+            cmap=plt.get_cmap("jet"), extent=[0, 1, 0, 1])
 
         self._canvas = FigureCanvas(panel, -1, self._figure)
         self._canvas.SetMinSize((-1, 180))

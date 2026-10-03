@@ -14,7 +14,8 @@ import wx.propgrid as wxpg
 
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_wxagg import FigureCanvasWxAgg
-import matplotlib.cm as cm
+#import matplotlib.cm as cm
+import matplotlib.pyplot as plt
 
 from scipy.interpolate import RegularGridInterpolator, RectBivariateSpline
 from scipy import stats
@@ -82,7 +83,7 @@ class HeatmapPanel(wx.Panel):
         self.label1 = ''
         self.label2 = ''
         self.value_label = 'RMSD'
-        self.cmap = cm.get_cmap('viridis')
+        self.cmap = plt.get_cmap('viridis')
         self.im = None
         self.cbar = None
 
@@ -428,7 +429,7 @@ class ResidualPanel(wx.Panel):
         self.SetSizer(sizer)
         self.SetMinSize((-1, 300))
 
-        self.cmap = cm.get_cmap('RdBu_r')
+        self.cmap = plt.get_cmap('RdBu_r')
 
         # Simulation-contour overlay settings, edited by right-clicking the
         # row (see _on_click). Kept here rather than in the frame because

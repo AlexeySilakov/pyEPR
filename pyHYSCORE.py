@@ -1341,8 +1341,12 @@ class TabulatedPanel(wx.Panel):
         # that is comparable. Kept out of the property grid because it is not
         # an Opt parameter -- nKnots remains the stored one, and the two stay
         # in sync in both directions via updateGridInfo().
-        tgtBox = wx.StaticBoxSizer(
-            wx.StaticBox(self.Opt_panel, label="Target Grid Points"), wx.VERTICAL)
+        #tgtBox = wx.StaticBoxSizer(
+        #    wx.StaticBox(self.Opt_panel, label="Target Grid Points"), wx.VERTICAL)
+        
+        Optsizer.Add(wx.StaticText(self.Opt_panel, label="■ Target Grid Points"), 0, wx.LEFT, 0)
+        Optsizer.Add(wx.StaticLine(self.Opt_panel, wx.LI_HORIZONTAL), 0, wx.EXPAND)
+        tgtBox = wx.BoxSizer(wx.VERTICAL)
         self.spin_gridTarget = wx.SpinCtrl(
             self.Opt_panel, min=1, max=10000000,
             initial=int(self.parent.Opt.nGridPoints() or 1),
@@ -1371,8 +1375,11 @@ class TabulatedPanel(wx.Panel):
         # ---- Contours -----------------------------------------------------
         # mirrors MatplotlibPanel.contourLevels/contourWidth/overlayColor; toolbar toggle picks the mode
         mp = self.parent.matplotlib_panel
-        cntBox = wx.StaticBoxSizer(
-            wx.StaticBox(self.Opt_panel, label="Contours"), wx.VERTICAL)
+        #cntBox = wx.StaticBoxSizer(
+        #    wx.StaticBox(self.Opt_panel, label="Contours"), wx.VERTICAL)
+        Optsizer.Add(wx.StaticText(self.Opt_panel, label="■ Contours"), 0, wx.LEFT, 0)
+        Optsizer.Add(wx.StaticLine(self.Opt_panel, wx.LI_HORIZONTAL), 0, wx.EXPAND)
+        cntBox = wx.BoxSizer(wx.VERTICAL)
         cntGrid = wx.FlexGridSizer(3, 2, 2, 4)
         cntGrid.AddGrowableCol(1, 1)
         self.spin_contourLevels = wx.SpinCtrl(
@@ -1408,8 +1415,12 @@ class TabulatedPanel(wx.Panel):
 
         # ---- View pad / Fit box -------------------------------------------
         # display only, state on MatplotlibPanel (viewPad / showFitBox); handlers live there too
-        viewBox = wx.StaticBoxSizer(
-            wx.StaticBox(self.Opt_panel, label="View pad, MHz"), wx.HORIZONTAL)
+        
+        #viewBox = wx.StaticBoxSizer(
+        #    wx.StaticBox(self.Opt_panel, label="View pad, MHz"), wx.HORIZONTAL)
+        Optsizer.Add(wx.StaticText(self.Opt_panel, label="■ View pad, MHz"), 0, wx.LEFT, 0)
+        Optsizer.Add(wx.StaticLine(self.Opt_panel, wx.LI_HORIZONTAL), 0, wx.EXPAND)
+        viewBox = wx.BoxSizer(wx.HORIZONTAL)
         self.spin_viewPad = wx.SpinCtrlDouble(
             self.Opt_panel, min=0.0, max=10000.0, inc=1.0, initial=mp.viewPad,
             style=wx.SP_ARROW_KEYS | wx.TE_PROCESS_ENTER)
@@ -1431,8 +1442,12 @@ class TabulatedPanel(wx.Panel):
         self.chk_FitBox.Bind(wx.EVT_CHECKBOX, mp.on_check)
 
         # ---- Quadrants ----------------------------------------------------
-        quadBox = wx.StaticBoxSizer(
-            wx.StaticBox(self.Opt_panel, label="Quadrants"), wx.VERTICAL)   # stacked: three across clip at the default pane width
+        #quadBox = wx.StaticBoxSizer(
+        #    wx.StaticBox(self.Opt_panel, label="Quadrants"), wx.VERTICAL)   # stacked: three across clip at the default pane width
+        quadBox = wx.BoxSizer(wx.VERTICAL)
+        Optsizer.Add(wx.StaticLine(self.Opt_panel, wx.LI_HORIZONTAL), 0, wx.EXPAND)
+        Optsizer.Add(wx.StaticText(self.Opt_panel, label="■ Quadrants"), 0, wx.LEFT, 0)
+        
         self.quadrant_group = []
         self.button_all4 = ThemedRadioButton(self.Opt_panel, "All 4", self.quadrant_group, True)
         self.button_horiz = ThemedRadioButton(self.Opt_panel, "±ν₁  (horiz)", self.quadrant_group)
@@ -2642,7 +2657,7 @@ class MainFrame(wx.Frame):
                     # measured by update_FFT once there is a spectrum to
                     # measure: per-point sigma, and the level a max projection
                     # of pure noise sits at
-                    'noise':None, 'noisesky':None,
+                    'noise':0.0, 'noisesky':0.0,
                     # -1 = use the two measured above; 0..1 replaces the
                     # per-point level, as a fraction of the peak inside the
                     # analysis box, and carries the skyline maximum with it.
