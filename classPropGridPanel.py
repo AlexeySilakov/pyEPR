@@ -3,6 +3,7 @@ import wx.propgrid as wxpg
 import numpy as np
 import classFunctionModPG as MypgMod
 import theme
+from theme import PillButton
 # ----------------------------------------------------------------------
 # Custom SpinCtrlDouble Editor for Float Properties in a wxPropertyGrid. 
 # Largely based on answers from qwen3-coder:30b, with earier versions 
@@ -308,7 +309,9 @@ class PropGridPanel(wx.Panel):
         if showModFunc:
             insizer = wx.BoxSizer(wx.VERTICAL)
             insizer.Add(self.pg, 1, wx.EXPAND)
-            self.btn_sash = wx.Button(self.parentpanel, label="▼", size=(-1, 15))
+            #self.btn_sash = wx.Button(self.parentpanel, label="▼", size=(-1, 15))
+            self.btn_sash = theme.PillButton(self.parentpanel, "▼", color_key="pill_calm", size=wx.Size(-1, 15))
+
             self.btn_sash.Bind(wx.EVT_BUTTON, self.adjustSash)
             insizer.Add(self.btn_sash, 0, wx.EXPAND, 0)
             self.parentpanel.SetSizer(insizer)

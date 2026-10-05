@@ -1344,7 +1344,7 @@ class TabulatedPanel(wx.Panel):
         #tgtBox = wx.StaticBoxSizer(
         #    wx.StaticBox(self.Opt_panel, label="Target Grid Points"), wx.VERTICAL)
         
-        Optsizer.Add(wx.StaticText(self.Opt_panel, label="■ Target Grid Points"), 0, wx.LEFT, 0)
+        Optsizer.Add(wx.StaticText(self.Opt_panel, label="\u25a0 Target Grid Points"), 0, wx.LEFT, 0)
         Optsizer.Add(wx.StaticLine(self.Opt_panel, wx.LI_HORIZONTAL), 0, wx.EXPAND)
         tgtBox = wx.BoxSizer(wx.VERTICAL)
         self.spin_gridTarget = wx.SpinCtrl(
@@ -1377,7 +1377,7 @@ class TabulatedPanel(wx.Panel):
         mp = self.parent.matplotlib_panel
         #cntBox = wx.StaticBoxSizer(
         #    wx.StaticBox(self.Opt_panel, label="Contours"), wx.VERTICAL)
-        Optsizer.Add(wx.StaticText(self.Opt_panel, label="■ Contours"), 0, wx.LEFT, 0)
+        Optsizer.Add(wx.StaticText(self.Opt_panel, label="\u25a0 Contours"), 0, wx.LEFT, 0)
         Optsizer.Add(wx.StaticLine(self.Opt_panel, wx.LI_HORIZONTAL), 0, wx.EXPAND)
         cntBox = wx.BoxSizer(wx.VERTICAL)
         cntGrid = wx.FlexGridSizer(3, 2, 2, 4)
@@ -1418,7 +1418,7 @@ class TabulatedPanel(wx.Panel):
         
         #viewBox = wx.StaticBoxSizer(
         #    wx.StaticBox(self.Opt_panel, label="View pad, MHz"), wx.HORIZONTAL)
-        Optsizer.Add(wx.StaticText(self.Opt_panel, label="■ View pad, MHz"), 0, wx.LEFT, 0)
+        Optsizer.Add(wx.StaticText(self.Opt_panel, label="\u25a0 View pad, MHz"), 0, wx.LEFT, 0)
         Optsizer.Add(wx.StaticLine(self.Opt_panel, wx.LI_HORIZONTAL), 0, wx.EXPAND)
         viewBox = wx.BoxSizer(wx.HORIZONTAL)
         self.spin_viewPad = wx.SpinCtrlDouble(
@@ -1446,7 +1446,7 @@ class TabulatedPanel(wx.Panel):
         #    wx.StaticBox(self.Opt_panel, label="Quadrants"), wx.VERTICAL)   # stacked: three across clip at the default pane width
         quadBox = wx.BoxSizer(wx.VERTICAL)
         Optsizer.Add(wx.StaticLine(self.Opt_panel, wx.LI_HORIZONTAL), 0, wx.EXPAND)
-        Optsizer.Add(wx.StaticText(self.Opt_panel, label="■ Quadrants"), 0, wx.LEFT, 0)
+        Optsizer.Add(wx.StaticText(self.Opt_panel, label="\u25a0 Quadrants"), 0, wx.LEFT, 0)
         
         self.quadrant_group = []
         self.button_all4 = ThemedRadioButton(self.Opt_panel, "All 4", self.quadrant_group, True)

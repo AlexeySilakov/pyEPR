@@ -901,7 +901,7 @@ class HYSCOREsim():
 
             s = self.Sys.I[ii]                     # Sys.I is expected to be a list/array
             mult = int(2 * s + 1)              # dimension of the local space
-            if not self.sIx[mult]:
+            if self.sIx[mult] is None:
                 # 1.  Spin operators ------------------------------------------------
                 self.sIx[mult] = mf.SpinOp([s], ['x'])
                 self.sIy[mult] = mf.SpinOp([s], ['y'])
@@ -967,7 +967,7 @@ class HYSCOREsim():
             quad_mat = np.zeros((mult, mult), dtype=complex)   # default 0
             if self.Sys.Q:
                 if (mult>2)&(np.sum(np.abs(self.Sys.Q[ii]))!=0):
-                    if not self.sIxx[mult]:
+                    if self.sIxx[mult] is None:
                         # products
                         self.sIxx[mult] = self.sIx[mult] @ self.sIx[mult]
                         self.sIxy[mult] = self.sIx[mult] @ self.sIy[mult]
@@ -1084,12 +1084,12 @@ class HYSCOREsim():
                 tW[:, 0]=wa[ii, kk]
                 tW[:, 1]=wb[ll, nn]
                 
-                if not Amp:
+                if Amp is None:
                     Amp = np.array(tAmp, dtype=complex)
                 else:
                     Amp = np.concatenate((Amp, tAmp), axis=0)
                     
-                if not W:
+                if W is None:
                     W = np.array(tW, dtype=float)
                 else:
                     W = np.concatenate((W, tW), axis=0)
