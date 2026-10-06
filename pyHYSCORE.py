@@ -936,15 +936,15 @@ class MatplotlibPanel(wx.Panel):
                         " df1=df2 is expected",
                         wx.OK | wx.ICON_WARNING)
 
-            # A negative z.max means "scale by the maximum of the fitted area" 
-            if dd['zmax'] < 0:
-                if activeBox is not None:
-                    scale = np.max(activeBox)
-                elif x_fit.any() and y_fit.any():
-                    scale = np.max(data[np.ix_(y_fit, x_fit)])
+            # |z.max| is a fraction of the active area's maximum; shared by every panel
+            if activeBox is not None:
+                ref = np.max(activeBox)
+            elif x_fit.any() and y_fit.any():
+                ref = np.max(data[np.ix_(y_fit, x_fit)])
             else:
-                scale = np.max(data)*dd['zmax']
-            
+                ref = np.max(data)
+            scale = (ref*abs(dd['zmax']) if dd['zmax'] else ref) or 1.0
+
             if freqDomain:
                 ma = scale
                 mi = scale*dd['zmin']
@@ -1006,7 +1006,7 @@ class MatplotlibPanel(wx.Panel):
 
 
             ########## ----- simulation ---------------------------------
-            upshift = None
+            upshift = noiselevel/ma
             if self.showSim or self.showSkyline or self.showDiagonalProj:
                 if type(dd['simdata'])!=type(None):
                     simdata = np.array(dd['simdata'])
@@ -1118,47 +1118,47 @@ class MatplotlibPanel(wx.Panel):
                 else:
                     plo, phi, flo, fhi = ymi, yma, yfi, yfa
 
-                sky_data = data[np.ix_(y_fit, x_fit)]
-
-                if show_x:
-                    proj_axis = x_axis[x_fit]
-                    sky = np.max(sky_data, axis=0)
-                    npoints = sky_data.shape[1]
+                pax = 0 if show_x else 1
+                if box is not None:
+                    sky_data = np.where(box['mask'], data[np.ix_(box['sel0'], box['sel1'])], -np.inf)
+                    proj_axis = x_axis[box['sel1']] if show_x else y_axis[box['sel0']]
                 else:
-                    proj_axis = y_axis[y_fit] 
-                    sky = np.max(sky_data, axis=1)
-                    npoints = sky_data.shape[0]
-                    
+                    sky_data = data[np.ix_(y_fit, x_fit)]
+                    proj_axis = x_axis[x_fit] if show_x else y_axis[y_fit]
+                sky = np.max(sky_data, axis=pax)
+                sky = np.where(np.isfinite(sky), sky, 0.0)
+                npoints = sky_data.shape[pax]
+
                 if self.noiseCompare == 'subtract':
                     sky = np.maximum(sky - noiselevel, 0.0)
-                    
-                if np.max(sky) > 0:
-                    norm_val = np.max(sky)
-                else:
-                    norm_val = 1.0
 
-                self.axes[skyax].plot(proj_axis, sky/norm_val, color='b', label='exp')
+                self.axes[skyax].plot(proj_axis, sky/scale, color='b', label='exp')
                 
                 if self.showNoiseFloor and self.noiseCompare != 'subtract':
                     nslvl = np.sqrt(np.log(npoints))*upshift
                     self.axes[skyax].axhline(nslvl, color='0.45', linestyle=':',
                                              linewidth=1.0, label='noise floor')
                                              
-                ssx_fit = (np.max(dd['simax']['x']) >= xfi) & (np.min(dd['simax']['x']) <= xfa)
-                ssy_fit = (np.max(dd['simax']['y']) >= yfi) & (np.min(dd['simax']['y']) <= yfa)
-                if show_x and (np.max(dd['simax']['x'])>= xfi or np.min(dd['simax']['x'])<= xfa):
-                    sproj_axis = dd['simax']['x'][ssx_fit], 
-                    ssky_data = np.max(simdata[np.ix_(ssy_fit, ssx_fit)], axis=0)
-                elif show_y and (np.max(dd['simax']['y'])>= yfi or np.min(dd['simax']['y'])<= yfa):
-                    sproj_axis = dd['simax']['y'][ssy_fit]
-                    ssky_data = np.max(simdata[np.ix_(ssy_fit, ssx_fit)], axis=1)
-                else:
-                    ssky_data = 0.0
+                ssky_data = np.zeros(1)
+                if dd['simdata'] is not None:
+                    if simbox is not None:
+                        swin = np.where(simbox['mask'],
+                                        simdata[np.ix_(simbox['sel0'], simbox['sel1'])], -np.inf)
+                        sproj_axis = simx_axis[simbox['sel1']] if show_x else simy_axis[simbox['sel0']]
+                    else:
+                        sx = np.linspace(simaxEx[0], simaxEx[1], simdata.shape[1])
+                        sy = np.linspace(simaxEx[2], simaxEx[3], simdata.shape[0])
+                        ssx_fit = (sx >= xfi) & (sx <= xfa)
+                        ssy_fit = (sy >= yfi) & (sy <= yfa)
+                        swin = simdata[np.ix_(ssy_fit, ssx_fit)]
+                        sproj_axis = sx[ssx_fit] if show_x else sy[ssy_fit]
+                    if swin.size:
+                        ssky_data = np.max(swin, axis=pax)
+                        ssky_data = np.where(np.isfinite(ssky_data), ssky_data, 0.0)
                 if np.max(ssky_data)>0:
-                    self.axes[skyax].plot(sproj_axis, ssky_data/np.max(ssky_data) , color='r',
+                    self.axes[skyax].plot(sproj_axis, ssky_data, color='r',
                                               linestyle='--', label='sim')
-                    
-                    self.axes[skyax].set_xlim(plo, phi)
+                self.axes[skyax].set_xlim(plo, phi)
                 # Grey the padding, the same wash the 2D maps get.
                 if self.showFitBox:
                     for a, b in ((plo, flo), (fhi, phi)):
@@ -1223,8 +1223,7 @@ class MatplotlibPanel(wx.Panel):
                     self.axes[diagprj].cla()
                 self.projection_axes.append(self.axes[diagprj])
                 if box is not None:
-                    ma = scale*abs(dd['zmax']) or 1.0
-                    skyprj = np.max(activeBox, axis=1)/ma
+                    skyprj = np.max(activeBox, axis=1)/scale
                     nslvl = np.sqrt(np.log(box['nalong']))*upshift
 
                     xw = x_axis[box['sel1']]
@@ -1237,9 +1236,7 @@ class MatplotlibPanel(wx.Panel):
                                                 linestyle=':', linewidth=1.0, label='noise floor')
 
                     if simbox is not None:
-                        simdata = dd['simdata']
-                        sma = np.max(simdata) or 1.0
-                        skyprj1 = np.max(simdata[simbox['idx0'], simbox['idx1']]/sma, axis=1)
+                        skyprj1 = np.max(simdata[simbox['idx0'], simbox['idx1']], axis=1)
                         sxw = simx_axis[simbox['sel1']]
                         sxaX = (np.linspace(sxw[0], sxw[-1], simbox['ndiag'])
                                 - (sxw[0]+sxw[-1])/2)
