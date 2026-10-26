@@ -119,19 +119,23 @@ python pyHYSCORE.py
 1. **Pick a folder.** Use the folder button in the toolbar (or type a path into
    the box at the top of the file browser). The `Filter` box narrows the listing
    to `DSC`, `XML`, or `All`.
-2. **Load data.** Double-click a dataset to load it. Loaded datasets appear in
-   the **Data** tab and get a column of plots.
+2. **Load data.** Double-click a dataset (`.DSC`) to load it as a spectrum, or
+   select it and press **Load**. Double-clicking a session `.xml` loads the
+   session, and a folder opens it. Loaded datasets appear in the **Data** tab
+   and get a column of plots.
 3. **Transform.** Set the FFT parameters at the bottom of the **Data** tab and
-   press the `FFT` toolbar button — or leave `auto FFT` on and they re-transform
-   as you type.
-4. **Describe the spin system.** On the **Sys** tab, set `S`, `g` and `lw`, then
-   `Add Nuc` to add nuclei and set `A`, `Apa`, `Q_K`, `Q_eta`.
-5. **Set the experiment.** On the **Exp** tab, anything left at `-1` is taken
+   press the ▶`FFT` button above the tabs — or leave the `auto FFT` toggle in
+   the toolbar on and they re-transform as you type.
+4. **Describe the spin system.** On the **SHam** tab (spin Hamiltonian), set
+   `S`, `g` and `lw`, then `Add Nuc` to add nuclei and set `A`, `Apa`, `Q_K`,
+   `Q_eta`.
+5. **Set the experiment.** On the **Exp Over.** tab, anything left at `-1` is taken
    from the loaded dataset (field, τ, mwFreq, MaxFreq, nPoints).
-6. **Choose the grid.** On the **Opt** tab, pick a `Grid` method and set either
-   `nKnots` or the **Target Grid Points** box. Start coarse.
-7. **Simulate.** Press the `SIM` toolbar button (or leave `auto SIM` on). Tick
-   `Overlay Sim` to draw the simulation as contours over the data.
+6. **Choose the grid.** On the **Options** tab, pick a `Grid` method and set
+   either `nKnots` or the **Target grid points** card. Start coarse.
+7. **Simulate.** Press the ▶`SIM` button above the tabs (or leave the
+   `auto SIM` toggle in the toolbar on). Tick `Overlay Sim` to draw the
+   simulation as contours over the data.
 8. **Fit.** Open the grid-search window from the toolbar, tick two parameters,
    set ranges, and run.
 9. **Save.** The save button writes the whole session to XML; loading that XML
@@ -141,12 +145,14 @@ python pyHYSCORE.py
 
 ## The tabs
 
+Hover over a tab name to see a one-line description of it.
+
 | Tab | What lives there |
 | --- | --- |
-| **Data** | Loaded datasets — show/hide, reorder, delete, background file and scale, per-dataset f.min/f.max, DSC viewer, and the FFT parameter block. |
-| **Sys** | Spin system: electron spin(s) and nuclei, plus the Function Modifiers panel. |
-| **Exp** | Experimental settings: `mwFreq`, `Field`/`gField`, `tau`, `nPoints`, `MaxFreq`, `ExciteWidth`, `tDead`. |
-| **Opt** | Simulation options: `Grid`, `nKnots`, Target Grid Points, `OriSelType`, `Symmetry`, `ProdRule`, `KillNeg`, `Treshold`, `AmpRatios`. |
+| **Data** | Loaded datasets — show/hide, reorder, delete, background file and scale, per-dataset f.min/f.max, DSC viewer, and the **FFT parameters** card (spin boxes, a drop-down and a checkbox; right-click a decimal box to set its arrow step). |
+| **SHam** | Spin Hamiltonian: electron spin(s) and nuclei, plus the Function Modifiers panel. |
+| **Options** | Simulation options: `Grid`, `nKnots`, `OriSelType`, `Symmetry`, `ProdRule`, `KillNeg`, `Treshold`, `AmpRatios`. Below them, shaded cards: Target grid points (with Update Ori.Sel. Grid), Contours, View pad, and Quadrants. |
+| **Exp Over.** | Experimental settings (stored as `Exp` in sessions): `mwFreq`, `Field`/`gField`, `tau`, `nPoints`, `MaxFreq`, `ExciteWidth`, `tDead`. |
 
 Every parameter has a tooltip explaining its units and meaning; the `nKnots` and
 `Grid` tooltips in particular spell out how the three grid methods differ.
@@ -156,7 +162,7 @@ Every parameter has a tooltip explaining its units and meaning; the `nKnots` and
 | Parameter | Meaning |
 | --- | --- |
 | `Polynom` | Order of the polynomial baseline subtracted before apodization. |
-| `Apodization` | `Hamming`, `Lor-Gau`, or `Gaussian`. |
+| `Apodization` | Drop-down: `Hamming`, `Lor-Gau`, `Gaussian`, or `none` (no window). |
 | `A.Width` | Apodization window width. |
 | `Lor.Width` | Lorentzian α for the Lorentz–Gauss window. |
 | `A.Shift` | Shift of the apodization window. |
@@ -184,28 +190,42 @@ The posterior assumes Gaussian residuals with a separate unknown noise level per
 dataset and integrates those levels out, which makes it immune to dataset
 brightness and to the normalization choice. The full derivation, with references,
 is in [`grid_search_statistics.tex`](grid_search_statistics.tex); the module
-docstring at the top of [`grid_search.py`](grid_search.py) is the working
+docstring at the top of [`spin_system/grid_search.py`](spin_system/grid_search.py) is the working
 summary.
 
 ---
 
 ## Module map
 
+The three programs sit at the top level and share three packages. Start the
+programs from this folder: they import the packages by name, as in
+`from theme import theme` or `from spin_system.SysPar import sysPar`.
+
 | File | Role |
 | --- | --- |
 | `pyHYSCORE.py` | Main application: file browser, plot panel, tabs, session XML, simulation orchestration. |
-| `hyscore_sim.py` | Simulation engine — `optHYSCORE` (options) and `HYSCOREsim` (grids, spin operators, transitions, binning, orientation selection). |
-| `SysPar.py` | `sysPar` / `expPar` — EasySpin-inspired spin-system and experiment parameter containers, plus the isotope table. |
-| `grid_search.py` | The 2D grid-search window: scan worker, fitness map, residual maps, confidence intervals. |
-| `sys_functions.py` | UI-free expression engine behind the function modifiers (safe `eval`, dependency ordering, cycle detection). |
-| `classFunctionModPG.py` | wx front end for the above, embedded in the Sys tab. |
-| `classPropGridPanel.py` | Property-grid panel and the spin-with-step-menu float editor used throughout. |
-| `theme.py` | Light/dark theme, pill widgets, themed matplotlib toolbar, redraw debouncing. |
-| `colormap_editor.py` | Colormap stop editor. |
-| `brukerread.py` | Bruker reader — BES3T (`.DSC`/`.DTA`) and ESP (`.par`/`.spc`). |
-| `mathfunctions.py` | Rotation matrices, tensor transforms, spin operators. |
-| `pyEPR.py`, `EPR_sim.py` | Sibling CW-EPR application sharing `SysPar`, `brukerread` and the property-grid widgets. |
-| `xeprpar.py`, `eprcsvread.py`, `periodic_dialog.py`, `binHYSCORE.py` | Standalone helpers/reference implementations, not imported by the main app. |
+| `pyCWEPR.py` | CW EPR viewer and processor; see [`README_pyCWEPR.md`](README_pyCWEPR.md). |
+| `pyEPR.py` | Older CW-EPR simulation application (uses `spin_system.EPR_sim`). |
+| **`theme/`** | Shared look and widgets |
+| `theme/theme.py` | Light/dark theme, pill widgets, `Card`, themed matplotlib toolbar, spin-box Enter handling, redraw debouncing. |
+| `theme/classPropGridPanel.py` | Property-grid panel and the spin-with-step-menu float editor used throughout. |
+| `theme/classFunctionModPG.py` | wx front end for the function modifiers, embedded in the SHam tab. |
+| `theme/colormap_editor.py` | Colormap stop editor. |
+| `theme/periodic_dialog.py` | Periodic-table dialog (not imported by the apps). |
+| **`spin_system/`** | Spin system, simulation and fitting |
+| `spin_system/SysPar.py` | `sysPar` / `expPar`: EasySpin-inspired spin-system and experiment parameter containers, plus the isotope table. |
+| `spin_system/hyscore_sim.py` | Simulation engine: `optHYSCORE` (options) and `HYSCOREsim` (grids, spin operators, transitions, binning, orientation selection). |
+| `spin_system/EPR_sim.py` | CW-EPR simulation used by `pyEPR.py`. |
+| `spin_system/grid_search.py`, `grid_search_worker.py` | The 2D grid-search window and its scan workers: fitness map, residual maps, confidence intervals. |
+| `spin_system/sys_functions.py` | UI-free expression engine behind the function modifiers (safe `eval`, dependency ordering, cycle detection). |
+| `spin_system/mathfunctions.py` | Rotation matrices, tensor transforms, spin operators. |
+| **`readers/`** | Data file readers |
+| `readers/brukerread.py` | Bruker reader: BES3T (`.DSC`/`.DTA`) and ESP (`.par`/`.spc`). |
+| `readers/eprcsvread.py`, `eprxmlread.py` | Magnettech CSV and data-XML readers. |
+| `readers/xeprpar.py`, `binHYSCORE.py` | Standalone helpers/reference implementations (not imported by the apps). |
+
+A module's `__main__` test block now has to be started as a module from this
+folder, e.g. `python -m theme.classPropGridPanel`.
 
 ## Notes and limitations
 

@@ -11,8 +11,8 @@ from scipy.optimize import curve_fit
 from scipy import special as sp
 #import re
 
-import theme
-from theme import PillButton, PillCheckBox, PillTabBar, ThemedRadioButton
+from theme import theme
+from theme.theme import PillButton, PillCheckBox, PillTabBar, ThemedRadioButton
 
 # Matplotlib imports
 import matplotlib
@@ -26,18 +26,18 @@ from matplotlib.patches import PathPatch
 import matplotlib.pyplot as plt
 # from mpl_toolkits.mplot3d import Axes3D
 
-import brukerread as Mybr
-import mathfunctions as mf
-import classPropGridPanel as MypgPanel
-from SysPar import sysPar, expPar
-from hyscore_sim import optHYSCORE, HYSCOREsim
-from colormap_editor import (ColormapEditorDialog, stops_to_cmap,
-                              colormap_to_stops)
-import grid_search
+from readers import brukerread as Mybr
+from spin_system import mathfunctions as mf
+from theme import classPropGridPanel as MypgPanel
+from spin_system.SysPar import sysPar, expPar
+from spin_system.hyscore_sim import optHYSCORE, HYSCOREsim
+from theme.colormap_editor import (ColormapEditorDialog, stops_to_cmap,
+                                    colormap_to_stops)
+from spin_system import grid_search
 import time
 
 # import wx.lib.agw.customtreectrl as CT
-VERSION=0.9
+VERSION=1.0
 
 # pip install wxPython numpy matplotlib scipy
 """
@@ -242,8 +242,10 @@ class FileBrowserPanel(wx.Panel, listmix.ListCtrlAutoWidthMixin,
     def on_save_session(self, event):
         self.parent.dumpXML()
         
-    def on_load_clicked(self, event):
-        idx = self.list.GetFirstSelected()
+    def on_load_clicked(self, event, idx=None):
+        """Load button: the (first) selected row. idx: a given row instead (double-click)."""
+        if idx is None:
+            idx = self.list.GetFirstSelected()
         if idx == -1:
             wx.MessageBox("Please select a file to load.", "No file selected",
                           wx.OK | wx.ICON_WARNING)
@@ -498,6 +500,8 @@ class FileBrowserPanel(wx.Panel, listmix.ListCtrlAutoWidthMixin,
         name, full, is_dir = self.items[data_id]
         if is_dir:
             self.set_path(full)
+        else:                   # double-click (or Enter) on a file: load it, as the Load button does
+            self.on_load_clicked(None, idx)
 
     def on_destroy(self, event):
         self._save_path_to_file()
@@ -1259,7 +1263,7 @@ class TabulatedPanel(wx.Panel):
         # spin editor's initial step (right-clicking the spin box changes it).
         self.FFTparams = {
             "polynomial":["Polynom", 2, [], 'int'],
-            "apodization":["Apodization", ['Hamming'], ['Hamming', 'Lor-Gau', 'Gaussian'], 'list'],
+            "apodization":["Apodization", 'Hamming', ['Hamming', 'Lor-Gau', 'Gaussian', 'none'], 'choice'],
             "awidth":["A.Width",  1, [], 'float', 0.05],
             "aalpha":["Lor.Width",0.6, [], 'float', 0.05],
             "ashift":["A.Shift",  0.0, [], 'float', 0.05],
@@ -1288,19 +1292,34 @@ class TabulatedPanel(wx.Panel):
         sizer = wx.BoxSizer(wx.VERTICAL)
         self.add_datapanel()
         self.add_syspanel()
-        self.add_exppanel()
         self.add_optpanel()
+        self.add_exppanel()      # pages are shown in the order they are added
 
-        self.nb = PillTabBar(self, self.nb_book, ["Data", "Sys", "Exp", "Opt"])
+        self.nb = PillTabBar(self, self.nb_book, ["Data", "SHam", "Options", "Exp Over."],
+                             tooltips=["Loaded data is here",
+                                       "Spin Hamiltonian parameters",
+                                       "Simulation and visualization options",
+                                       "Global override of experimental parameters"])
+        # One-shot Do FFT / Do SIM above the tabs, left-aligned. Kept as MainFrame
+        # attributes (tb_doFFT ...) like the auto toggles and grid search on its toolbar.
+        mf = self.parent
+        size = wx.Size(self.FromDIP(90), self.FromDIP(30))
+        for attr, label, tip, handler, colour in (
+                ('tb_doFFT', "FFT", "Do FFT", self.on_doFFT, "pill_accent_1"),
+                ('tb_doSIM', "SIM", "Do SIM", self.on_update_sim, "pill_accent_2")):
+            btn = PillButton(self, label, color_key=colour, draw_badge=theme.draw_play_badge, size=size)
+            btn.SetToolTip(tip)
+            btn.Bind(wx.EVT_BUTTON, handler)
+            setattr(mf, attr, btn)
+        mf.tb_gridsearch.Bind(wx.EVT_BUTTON, self.on_open_grid_search)
+        actions = wx.BoxSizer(wx.HORIZONTAL)
+        actions.Add(mf.tb_doFFT, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, self.FromDIP(4))
+        actions.Add(mf.tb_doSIM, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, self.FromDIP(12))
+        sizer.Add(actions, 0, wx.EXPAND | wx.TOP | wx.BOTTOM, self.FromDIP(6))
+        sizer.Add(wx.StaticLine(self, style=wx.LI_HORIZONTAL), 0,      # sets the run buttons apart from the tabs
+                  wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, self.FromDIP(4))
         sizer.Add(self.nb, 0, wx.EXPAND)
         sizer.Add(self.nb_book, 1, wx.EXPAND)
-
-        # Do FFT / Do SIM / auto FFT / auto SIM now live as toolbar icons on
-        # MainFrame (self.parent.tb_doFFT etc.) -- see MainFrame.__init__.
-        # Bind them here now that self.on_doFFT/self.on_update_sim exist.
-        self.parent.tb_doFFT.Bind(wx.EVT_BUTTON, self.on_doFFT)
-        self.parent.tb_doSIM.Bind(wx.EVT_BUTTON, self.on_update_sim)
-        self.parent.tb_gridsearch.Bind(wx.EVT_BUTTON, self.on_open_grid_search)
 
         self.SetSizer(sizer)
 
@@ -1308,7 +1327,6 @@ class TabulatedPanel(wx.Panel):
         self.param_definitions = None
         self.param_controls   = {}
 
-        self.ffttree.Bind(wxpg.EVT_PG_CHANGED, self.on_ffttree)
         #self.filetree.Bind(wxpg.EVT_PG_DOUBLE_CLICK, self.on_filetree) #EVT_G_SELECTED EVT_PG_RIGHT_CLICK
         #self.tree.Bind(CT.EVT_TREE_BEGIN_LABEL_EDIT, self.on_begin_edit)
         #self.tree.Bind(CT.EVT_TREE_END_LABEL_EDIT, self.on_end_edit)        
@@ -1323,7 +1341,7 @@ class TabulatedPanel(wx.Panel):
         # ------------- Opt
         
         self.Opt_panel = wx.Panel(self.nb_book)
-        self.nb_book.AddPage(self.Opt_panel, "Opt") 
+        self.nb_book.AddPage(self.Opt_panel, "Options")
         Optsizer = wx.BoxSizer(wx.VERTICAL)
         
         self.Opt_param = MypgPanel.PropGridPanel(self.Opt_panel, Prop_Dict = {}, onChangeFunc=self.on_Opt)
@@ -1338,14 +1356,10 @@ class TabulatedPanel(wx.Panel):
         # that is comparable. Kept out of the property grid because it is not
         # an Opt parameter -- nKnots remains the stored one, and the two stay
         # in sync in both directions via updateGridInfo().
-        #tgtBox = wx.StaticBoxSizer(
-        #    wx.StaticBox(self.Opt_panel, label="Target Grid Points"), wx.VERTICAL)
-        
-        Optsizer.Add(wx.StaticText(self.Opt_panel, label="\u25a0 Target Grid Points"), 0, wx.LEFT, 0)
-        Optsizer.Add(wx.StaticLine(self.Opt_panel, wx.LI_HORIZONTAL), 0, wx.EXPAND)
-        tgtBox = wx.BoxSizer(wx.VERTICAL)
+        card = theme.Card(self.Opt_panel, "Target grid points")
+        tgtBox = card.body
         self.spin_gridTarget = wx.SpinCtrl(
-            self.Opt_panel, min=1, max=10000000,
+            card, min=1, max=10000000,
             initial=int(self.parent.Opt.nGridPoints() or 1),
             style=wx.SP_ARROW_KEYS | wx.TE_PROCESS_ENTER)
         self.spin_gridTarget.SetToolTip(
@@ -1354,54 +1368,51 @@ class TabulatedPanel(wx.Panel):
         tgtBox.Add(self.spin_gridTarget, 0, wx.EXPAND | wx.ALL, 2)
 
         self.txt_gridActual = wx.TextCtrl(
-            self.Opt_panel, style=wx.TE_READONLY | wx.TE_CENTRE|wx.BORDER_NONE )
+            card, style=wx.TE_READONLY | wx.TE_CENTRE|wx.BORDER_NONE )
         self.txt_gridActual.SetToolTip(
             "Grid actually produced for the current Grid method and nKnots.")
         tgtBox.Add(self.txt_gridActual, 0, wx.EXPAND | wx.ALL, 2)
-        Optsizer.Add(tgtBox, 0, wx.EXPAND | wx.TOP, 4)
 
         self.spin_gridTarget.Bind(wx.EVT_SPINCTRL, self.on_gridTarget)
         self.spin_gridTarget.Bind(wx.EVT_TEXT_ENTER, self.on_gridTarget)
         self.updateGridInfo()
 
-        self.btn_doOriSel   = PillButton(self.Opt_panel, "Update Ori.Sel. Grid", color_key="pill_load",
+        self.btn_doOriSel   = PillButton(card, "Update Ori.Sel. Grid", color_key="pill_load",
                                          draw_badge=theme.draw_play_badge)
-        Optsizer.Add(self.btn_doOriSel, 0, wx.EXPAND)
+        tgtBox.Add(self.btn_doOriSel, 0, wx.EXPAND | wx.ALL, 2)
         self.btn_doOriSel.Bind(wx.EVT_BUTTON, self.parent.on_update_orisel)
+        Optsizer.Add(card, 0, wx.EXPAND | wx.ALL, 4)
 
         # ---- Contours -----------------------------------------------------
         # mirrors MatplotlibPanel.contourLevels/contourWidth/overlayColor; toolbar toggle picks the mode
         mp = self.parent.matplotlib_panel
-        #cntBox = wx.StaticBoxSizer(
-        #    wx.StaticBox(self.Opt_panel, label="Contours"), wx.VERTICAL)
-        Optsizer.Add(wx.StaticText(self.Opt_panel, label="\u25a0 Contours"), 0, wx.LEFT, 0)
-        Optsizer.Add(wx.StaticLine(self.Opt_panel, wx.LI_HORIZONTAL), 0, wx.EXPAND)
-        cntBox = wx.BoxSizer(wx.VERTICAL)
+        card = theme.Card(self.Opt_panel, "Contours")
+        cntBox = card.body
         cntGrid = wx.FlexGridSizer(3, 2, 2, 4)
         cntGrid.AddGrowableCol(1, 1)
         self.spin_contourLevels = wx.SpinCtrl(
-            self.Opt_panel, min=2, max=100, initial=mp.contourLevels,
+            card, min=2, max=100, initial=mp.contourLevels,
             style=wx.SP_ARROW_KEYS | wx.TE_PROCESS_ENTER)
         self.spin_contourLevels.SetToolTip(
             "Number of linear levels between z.min and z.max (also used by the sim overlay).")
         self.spin_contourWidth = wx.SpinCtrlDouble(
-            self.Opt_panel, min=0.1, max=5.0, inc=0.1, initial=mp.contourWidth,
+            card, min=0.1, max=5.0, inc=0.1, initial=mp.contourWidth,
             style=wx.SP_ARROW_KEYS | wx.TE_PROCESS_ENTER)
         self.spin_contourWidth.SetDigits(1)
         self.spin_contourWidth.SetToolTip("Contour line width, points.")
         self.pick_overlayColor = wx.ColourPickerCtrl(
-            self.Opt_panel, colour=wx.Colour(mp.overlayColor))
+            card, colour=wx.Colour(mp.overlayColor))
         self.pick_overlayColor.SetToolTip("Uniform colour of the 'Overlay Sim' contour lines.")
         theme.theme_control(self.spin_contourLevels)
         theme.theme_control(self.spin_contourWidth)
         for label, ctrl in (("Levels", self.spin_contourLevels),
                             ("Line width", self.spin_contourWidth),
                             ("Overlay colour", self.pick_overlayColor)):
-            cntGrid.Add(wx.StaticText(self.Opt_panel, label=label), 0,
+            cntGrid.Add(wx.StaticText(card, label=label), 0,
                         wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 2)
             cntGrid.Add(ctrl, 1, wx.EXPAND)
         cntBox.Add(cntGrid, 0, wx.EXPAND | wx.ALL, 2)
-        Optsizer.Add(cntBox, 0, wx.EXPAND | wx.TOP, 4)
+        Optsizer.Add(card, 0, wx.EXPAND | wx.ALL, 4)
 
         self.spin_contourLevels.Bind(wx.EVT_SPINCTRL, self.on_contour_style)
         self.spin_contourLevels.Bind(wx.EVT_TEXT_ENTER, self.on_contour_style)
@@ -1413,13 +1424,10 @@ class TabulatedPanel(wx.Panel):
         # ---- View pad / Fit box -------------------------------------------
         # display only, state on MatplotlibPanel (viewPad / showFitBox); handlers live there too
         
-        #viewBox = wx.StaticBoxSizer(
-        #    wx.StaticBox(self.Opt_panel, label="View pad, MHz"), wx.HORIZONTAL)
-        Optsizer.Add(wx.StaticText(self.Opt_panel, label="\u25a0 View pad, MHz"), 0, wx.LEFT, 0)
-        Optsizer.Add(wx.StaticLine(self.Opt_panel, wx.LI_HORIZONTAL), 0, wx.EXPAND)
+        card = theme.Card(self.Opt_panel, "View pad, MHz")
         viewBox = wx.BoxSizer(wx.HORIZONTAL)
         self.spin_viewPad = wx.SpinCtrlDouble(
-            self.Opt_panel, min=0.0, max=10000.0, inc=1.0, initial=mp.viewPad,
+            card, min=0.0, max=10000.0, inc=1.0, initial=mp.viewPad,
             style=wx.SP_ARROW_KEYS | wx.TE_PROCESS_ENTER)
         self.spin_viewPad.SetDigits(2)
         self.spin_viewPad.SetToolTip(
@@ -1428,27 +1436,25 @@ class TabulatedPanel(wx.Panel):
             "normalization and the noise floor all stay on f.min..f.max.\n"
             "Clamped to the measured spectrum, and never crosses a quadrant cut.")
         theme.theme_control(self.spin_viewPad)
-        self.chk_FitBox = PillCheckBox(self.Opt_panel, "Fit box")
+        self.chk_FitBox = PillCheckBox(card, "Fit box")
         self.chk_FitBox.SetValue(mp.showFitBox)
         viewBox.Add(self.spin_viewPad, 1, wx.ALL, 3)
         viewBox.Add(self.chk_FitBox, 0, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 3)
-        Optsizer.Add(viewBox, 0, wx.EXPAND | wx.TOP, 4)
+        card.body.Add(viewBox, 0, wx.EXPAND)
+        Optsizer.Add(card, 0, wx.EXPAND | wx.ALL, 4)
         self.spin_viewPad.Bind(wx.EVT_SPINCTRLDOUBLE, mp.on_viewpad)
         self.spin_viewPad.Bind(wx.EVT_KILL_FOCUS, mp.on_viewpad)
         theme.bind_spin_enter(self.spin_viewPad, lambda: mp.on_viewpad(None))   # Enter is unreliable on SpinCtrlDouble
         self.chk_FitBox.Bind(wx.EVT_CHECKBOX, mp.on_check)
 
         # ---- Quadrants ----------------------------------------------------
-        #quadBox = wx.StaticBoxSizer(
-        #    wx.StaticBox(self.Opt_panel, label="Quadrants"), wx.VERTICAL)   # stacked: three across clip at the default pane width
-        quadBox = wx.BoxSizer(wx.VERTICAL)
-        Optsizer.Add(wx.StaticLine(self.Opt_panel, wx.LI_HORIZONTAL), 0, wx.EXPAND)
-        Optsizer.Add(wx.StaticText(self.Opt_panel, label="\u25a0 Quadrants"), 0, wx.LEFT, 0)
+        card = theme.Card(self.Opt_panel, "Quadrants")    # stacked: three across clip at the default pane width
+        quadBox = card.body
         
         self.quadrant_group = []
-        self.button_all4 = ThemedRadioButton(self.Opt_panel, "All 4", self.quadrant_group, True)
-        self.button_horiz = ThemedRadioButton(self.Opt_panel, "±ν₁  (horiz)", self.quadrant_group)
-        self.button_vert = ThemedRadioButton(self.Opt_panel, "±ν₂  (vert)", self.quadrant_group)
+        self.button_all4 = ThemedRadioButton(card, "All 4", self.quadrant_group, True)
+        self.button_horiz = ThemedRadioButton(card, "±ν₁  (horiz)", self.quadrant_group)
+        self.button_vert = ThemedRadioButton(card, "±ν₂  (vert)", self.quadrant_group)
         quadBox.Add(self.button_all4, 0, wx.ALL, 3)
         quadBox.Add(self.button_horiz, 0, wx.ALL, 3)
         quadBox.Add(self.button_vert, 0, wx.ALL, 3)
@@ -1456,7 +1462,7 @@ class TabulatedPanel(wx.Panel):
         self.button_horiz.BindRadio(mp.on_quadrant)
         self.button_vert.BindRadio(mp.on_quadrant)
         self.button_all4.SetValue(True)
-        Optsizer.Add(quadBox, 0, wx.EXPAND | wx.TOP, 4)
+        Optsizer.Add(card, 0, wx.EXPAND | wx.ALL, 4)
 
         self.Opt_panel.SetSizer(Optsizer)
 
@@ -1492,7 +1498,7 @@ class TabulatedPanel(wx.Panel):
     def add_exppanel(self):
         # ------------- Exp
         self.Exp_panel = wx.Panel(self.nb_book)
-        self.nb_book.AddPage(self.Exp_panel, "Exp") 
+        self.nb_book.AddPage(self.Exp_panel, "Exp Over.")   # label only; the data keys stay 'Exp'
         
         Expsizer = wx.BoxSizer(wx.VERTICAL)
         
@@ -1506,7 +1512,7 @@ class TabulatedPanel(wx.Panel):
     def add_syspanel(self):
         # ------------- Sys 
         self.Sys_panel = wx.Panel(self.nb_book)
-        self.nb_book.AddPage(self.Sys_panel, "Sys") 
+        self.nb_book.AddPage(self.Sys_panel, "SHam")
         
         Syssizer = wx.BoxSizer(wx.VERTICAL)
         
@@ -1607,68 +1613,43 @@ class TabulatedPanel(wx.Panel):
         
         sizer.Add(self.filetree, 1, wx.EXPAND | wx.ALL, 0)
         
-        lbl = wx.StaticText(self.data_panel, label=" FFT Parameters:")
-        lbl.SetBackgroundColour(self.Color_BG_FFT_Title)
-        lbl.SetForegroundColour(self.Color_FG_FFT_Title)
-        lfont=lbl.GetFont(); lfont.SetWeight(wx.FONTWEIGHT_BOLD); lbl.SetFont(lfont)              # start with the current font
-
-        sizer.Add(lbl, 0, wx.EXPAND, 0)
-        # FFT tree
-        self.ffttree = wxpg.PropertyGrid(
-            self.data_panel,
-            style=wxpg.PG_DEFAULT_STYLE | 
-                  wxpg.PG_SPLITTER_AUTO_CENTER |wxpg.PG_HIDE_MARGIN |
-                  wxpg.PG_NO_INTERNAL_BORDER|wx.BORDER_NONE
-        )
-        self.ffttree.SetCellBackgroundColour(self.Color_BG_FFT_Main)
-        self.ffttree.SetCellTextColour(self.Color_FG_FFT_Main)
-        self.ffttree.SetMarginColour(self.Color_BG_FFT_Title)
-        #self.filetree.SetSelectionBackgroundColour(wx.Colour(200, 255, 255))
-        
-        self.ffttree.SetCaptionBackgroundColour(self.Color_BG_FFT_Title)
-        self.ffttree.SetCaptionTextColour(self.Color_FG_FFT_Title)
-        #cat2 = self.ffttree.Append(wxpg.PropertyCategory("FFT"))
-        
-
-        for kk in self.FFTparams.keys():
-            if self.FFTparams[kk][3]=='int':
-                self.ffttree.Append(wxpg.IntProperty(self.FFTparams[kk][0], kk, value=self.FFTparams[kk][1]))
-            elif self.FFTparams[kk][3]=='float':
-                # Same spin-with-step-menu editor as "BG Scale" above -- these
-                # are all knobs one nudges and re-transforms, not values typed
-                # once, and the editor commits on Enter as well as on the
-                # arrows (plain FloatProperty needed Enter to be caught by the
-                # grid, which is exactly what it kept swallowing).
-                pro = self.ffttree.Append(
-                    wxpg.FloatProperty(self.FFTparams[kk][0], kk, value=self.FFTparams[kk][1]))
-                self.ffttree.SetPropertyEditor(pro, "SpinFloat")
-                pro.SetAttribute(wxpg.PG_ATTR_SPINCTRL_STEP, self.FFTparams[kk][4])
-            elif self.FFTparams[kk][3]=='bool':
-                self.ffttree.Append(wxpg.BoolProperty(self.FFTparams[kk][0], kk, value=self.FFTparams[kk][1]))
-            elif self.FFTparams[kk][3]=='list':
-                self.ffttree.Append(wxpg.MultiChoiceProperty(self.FFTparams[kk][0], kk, 
-                                                                     choices=self.FFTparams[kk][2],
-                                                                     value = self.FFTparams[kk][1]))
-        nprops = len(self.FFTparams.keys())
-        row_h = self.ffttree.GetRowHeight()
-        self.ffttree.SetMinSize(( -1, nprops*row_h+4 ))
-        #self.ffttree.Layout()
-        #height = self.ffttree.GetBestSize().GetHeight()
-        #self.ffttree.SetSize((-1, 2*height))
-
-        # self.ffttree.AppendIn(cat2, wxpg.IntProperty("Polynom", "polynomial", value=2))
-        # self.ffttree.AppendIn(cat2, wxpg.MultiChoiceProperty("Apodization", "apodization", 
-        #                                                      choices=['Hamming', 'Lor-Gau', 'Gaussian'], 
-        #                                                      value=['Hamming']))
-        # self.ffttree.AppendIn(cat2, wxpg.FloatProperty("A.Width", "awidth", value=0.6))
-        # self.ffttree.AppendIn(cat2, wxpg.FloatProperty("Lor.Width", "aalpha", value=0.6))
-        # self.ffttree.AppendIn(cat2, wxpg.FloatProperty("A.Shift", "ashift", value=0))
-        # self.ffttree.AppendIn(cat2, wxpg.IntProperty("Zero fill", "zfill", value=1))
-        # self.ffttree.AppendIn(cat2, wxpg.BoolProperty("Use 'imaginary'", "imag", value=False))
-        
-
-        
-        sizer.Add(self.ffttree, 0, wx.EXPAND | wx.ALL, 5)
+        # ---- FFT parameters: plain controls on a card, one row per FFTparams entry
+        card = theme.Card(self.data_panel, "FFT parameters")
+        grid = wx.FlexGridSizer(cols=2, vgap=3, hgap=6)
+        grid.AddGrowableCol(1, 1)
+        self.fft_ctrls = {}
+        self.fft_last = None
+        for kk, (label, default, choices, typ, *step) in self.FFTparams.items():
+            if typ == 'int':
+                ctrl = wx.SpinCtrl(card, min=0, max=20, initial=default,
+                                   style=wx.SP_ARROW_KEYS | wx.TE_PROCESS_ENTER)
+                ctrl.Bind(wx.EVT_SPINCTRL, self.on_fft_params)
+                theme.bind_spin_enter(ctrl, lambda: self.on_fft_params(None))
+            elif typ == 'float':
+                ctrl = wx.SpinCtrlDouble(card, min=-1e6, max=1e6, inc=step[0], initial=default,
+                                         style=wx.SP_ARROW_KEYS | wx.TE_PROCESS_ENTER)
+                ctrl.SetDigits(3)
+                ctrl.SetToolTip("Right-click to set the arrow step")
+                ctrl.Bind(wx.EVT_SPINCTRLDOUBLE, self.on_fft_params)
+                theme.bind_spin_enter(ctrl, lambda: self.on_fft_params(None))
+                for evt in (wx.EVT_CONTEXT_MENU, wx.EVT_RIGHT_DOWN):
+                    ctrl.Bind(evt, lambda e, s=ctrl: self.on_step_menu(s))
+            elif typ == 'choice':
+                ctrl = wx.Choice(card, choices=choices)
+                ctrl.SetStringSelection(default)
+                ctrl.Bind(wx.EVT_CHOICE, self.on_fft_params)
+            else:   # 'bool': the checkbox carries its own label
+                ctrl = PillCheckBox(card, label)
+                ctrl.SetValue(default)
+                ctrl.Bind(wx.EVT_CHECKBOX, self.on_fft_params)
+                label = ""
+            if typ in ('int', 'float', 'choice'):
+                theme.theme_control(ctrl)
+            grid.Add(wx.StaticText(card, label=label), 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 2)
+            grid.Add(ctrl, 1, wx.EXPAND)
+            self.fft_ctrls[kk] = ctrl
+        card.body.Add(grid, 0, wx.EXPAND | wx.ALL, 2)
+        sizer.Add(card, 0, wx.EXPAND | wx.ALL, 4)
         
         self.data_panel.SetSizer(sizer)
     def on_add_Nuc(self, event):
@@ -1927,11 +1908,30 @@ class TabulatedPanel(wx.Panel):
             pass
 
 
+    def fft_method(self):
+        """FFT parameters as set on the FFT card. A drop-down gives its label as a one-item list
+        (e.g. ['Hamming']), as the apodization was stored when it was a multi-choice."""
+        return {kk: [ctrl.GetStringSelection()] if self.FFTparams[kk][3] == 'choice' else ctrl.GetValue()
+                for kk, ctrl in self.fft_ctrls.items()}
+
+    def on_step_menu(self, spin):
+        """Right-click on a float spin box: choose its arrow step (as on the property-grid spins)."""
+        menu = wx.Menu()
+        ids = {}
+        for step in (1e-4, 1e-3, 0.01, 0.05, 0.1, 0.5, 1, 10, 100):
+            item = menu.AppendCheckItem(wx.ID_ANY, f"Set step to {step:g}")
+            item.Check(step == spin.GetIncrement())
+            ids[item.GetId()] = step
+        choice = spin.GetPopupMenuSelectionFromUser(menu)
+        menu.Destroy()
+        if choice in ids:
+            v = spin.GetValue()
+            spin.SetDigits(max(3, int(np.ceil(-np.log10(ids[choice])))))
+            spin.SetIncrement(ids[choice])
+            spin.SetValue(v)
+
     def on_doFFT(self, event):
-        fftmethod = {}
-        for kk in self.FFTparams.keys():
-            prop = self.ffttree.GetProperty(kk)
-            fftmethod[kk] = prop.GetValue()
+        fftmethod = self.fft_method()
 
         for ii, dd in enumerate(self.parent.Data):
             self.parent.Data[ii]['fftmethod'] = fftmethod
@@ -1989,11 +1989,12 @@ class TabulatedPanel(wx.Panel):
             # dead until something unrelated triggered a repaint.
             self.parent.matplotlib_panel.update_graph()
 
-    def on_ffttree(self, event):
-        fftmethod = {}
-        for kk in self.FFTparams.keys():
-            prop = self.ffttree.GetProperty(kk)
-            fftmethod[kk] = prop.GetValue()
+    def on_fft_params(self, event):
+        """Any FFT-card control changed. Enter and the spin event can both report one edit: run once."""
+        fftmethod = self.fft_method()
+        if fftmethod == self.fft_last:
+            return
+        self.fft_last = fftmethod
 
         for ii, dd in enumerate(self.parent.Data):
             self.parent.Data[ii]['fftmethod'] = fftmethod
@@ -2159,7 +2160,7 @@ class MainFrame(wx.Frame):
         # to be scattered pill buttons (file browser, Data tab) and the
         # Colormap/View menu bar. FileBrowserPanel and TabulatedPanel bind
         # their own handlers to tb_change_folder/tb_up/tb_save_session/
-        # tb_doFFT/tb_doSIM once *they* exist (built after this toolbar);
+        # (Do FFT / Do SIM / grid search are built by TabulatedPanel);
         # tb_autoFFT/tb_autoSIM need no binding -- other code just reads
         # their .GetValue() on demand.
         self.top_toolbar = wx.Panel(self)
@@ -2182,21 +2183,15 @@ class MainFrame(wx.Frame):
         toolbar_sizer.Add(self.tb_save_session, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
         add_sep()
 
-        self.tb_doFFT = theme.IconButton(
-            self.top_toolbar, theme.draw_text_icon("FFT"), tooltip="Do FFT")
+        # auto-run toggles; the one-shot FFT / SIM buttons sit above the tabs
+        # (TabulatedPanel), next to the parameters they use
         self.tb_autoFFT = theme.IconToggleButton(
             self.top_toolbar, theme.draw_auto_toggle_icon("FFT"),
             tooltip="auto FFT (recompute automatically on change)", value=True)
-        toolbar_sizer.Add(self.tb_doFFT, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
-        toolbar_sizer.Add(self.tb_autoFFT, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
-        add_sep()
-
-        self.tb_doSIM = theme.IconButton(
-            self.top_toolbar, theme.draw_text_icon("SIM"), tooltip="Do SIM")
         self.tb_autoSIM = theme.IconToggleButton(
             self.top_toolbar, theme.draw_auto_toggle_icon("SIM"),
             tooltip="auto SIM (re-simulate automatically on change)", value=True)
-        toolbar_sizer.Add(self.tb_doSIM, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
+        toolbar_sizer.Add(self.tb_autoFFT, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
         toolbar_sizer.Add(self.tb_autoSIM, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
         add_sep()
 
@@ -2380,7 +2375,6 @@ class MainFrame(wx.Frame):
         tp.Color_BG_FFT_Main = wx.Colour(theme.theme_colors()["ctrl_bg"])
         tp.Color_FG_FFT_Main = wx.Colour(theme.theme_colors()["text"])
         theme.theme_propgrid(tp.filetree, caption_key="accent")
-        theme.theme_propgrid(tp.ffttree, caption_key="pill_load")
         theme.theme_propgrid(tp.Sys_param.pg, caption_key="accent")
         theme.theme_propgrid(tp.Exp_param.pg, caption_key="accent")
         theme.theme_propgrid(tp.Opt_param.pg, caption_key="accent")
@@ -2678,10 +2672,7 @@ class MainFrame(wx.Frame):
     def update_FFT(self, fftmethod=None):
         # Build a fallback fftmethod from the UI controls so we always have
         # valid parameters even when called without an explicit argument.
-        ui_fftmethod = {}
-        for kk in self.tabulated_panel.FFTparams.keys():
-            prop = self.tabulated_panel.ffttree.GetProperty(kk)
-            ui_fftmethod[kk] = prop.GetValue()
+        ui_fftmethod = self.tabulated_panel.fft_method()
 
         for ii, dd in enumerate(self.Data):
             # Per-dataset fftmethod: prefer the explicit argument, then the
@@ -3211,11 +3202,8 @@ class MainFrame(wx.Frame):
             # Proceed loading the file chosen by the user
             pathname = fileDialog.GetPath()
             try:
-                fftmethod = {}
-                for kk in self.tabulated_panel.FFTparams.keys():
-                    prop = self.tabulated_panel.ffttree.GetProperty(kk)
-                    fftmethod[kk] = prop.GetValue()
-                    
+                fftmethod = self.tabulated_panel.fft_method()
+
                 data_dict = {'Data': self.Data, 'BGData':self.BGData, 
                              'fftmethod': fftmethod, 
                              'Sys': self.tabulated_panel.Sys_param.parameters, 
@@ -3342,9 +3330,20 @@ class MainFrame(wx.Frame):
                 self.tabulated_panel.updateGridInfo()
             if 'fftmethod' in result.keys():
                 fftmethod = result['fftmethod']
-                for kk in fftmethod.keys():
-                    prop=self.tabulated_panel.ffttree.GetPropertyByName(kk)
-                    prop.SetValue(fftmethod[kk])
+                tp = self.tabulated_panel
+                for kk, v in fftmethod.items():
+                    if kk not in tp.fft_ctrls:
+                        continue
+                    ctrl, typ = tp.fft_ctrls[kk], tp.FFTparams[kk][3]
+                    if typ == 'choice':
+                        # saved as a one-item list (an empty one from the old multi-choice = none)
+                        v = (v[0] if len(v) else 'none') if isinstance(v, (list, tuple)) else v
+                        ctrl.SetStringSelection(str(v))
+                    elif typ == 'bool':
+                        ctrl.SetValue(v in (True, 1, 'True', 'true'))
+                    else:
+                        ctrl.SetValue(int(v) if typ == 'int' else float(v))
+                tp.fft_last = tp.fft_method()
 
             # ---- Restore colormap: saved stops, else by name, else jet -------
             name = str(result.get('cmap_name', 'jet') or 'jet')

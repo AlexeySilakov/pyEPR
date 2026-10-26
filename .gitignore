@@ -2,5 +2,5 @@
 __pycache__/
 testdata/
 .vscode
-*.xml
+backup/
 tmp/

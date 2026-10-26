@@ -10,17 +10,17 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_wxagg import FigureCanvasWxAgg
 from matplotlib.backends.backend_wxagg import NavigationToolbar2WxAgg 
 
-import brukerread as Mybr
-import classPropGridPanel as MypgPanel
+from readers import brukerread as Mybr
+from theme import classPropGridPanel as MypgPanel
 
-from SysPar import sysPar, expPar
-from EPR_sim import optEPR, EPRsim
+from spin_system.SysPar import sysPar, expPar
+from spin_system.EPR_sim import optEPR, EPRsim
 
 import wx.lib.agw.flatnotebook as fnb
 import wx.lib.agw.aui as aui
 
 import time
-import brukerread as Mybr
+from readers import brukerread as Mybr
 
 # ############### for debugging purposes
 # wx.Log.SetActiveTarget(wx.LogStderr())
@@ -1177,7 +1177,7 @@ class MainFrame(wx.Frame):
         ####  add an attempt to read it as a standard ascii file
         ###########################################################################
         if ext == '.csv':
-            from eprcsvread import csvread
+            from readers.eprcsvread import csvread
             ax, data, dsc = csvread(file_path, return_ax=True, return_dsc=True)
             freq = ax['freq1']
         ###########################################################################
