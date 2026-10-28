@@ -9,6 +9,7 @@ from xml.dom import minidom
 
 import wx
 import wx.lib.mixins.listctrl as listmix
+import wx.lib.scrolledpanel as scrolled
 import wx.propgrid as wxpg
 
 import numpy as np
@@ -504,6 +505,22 @@ class MatplotlibPanel(wx.Panel):
             for ln, base in self.drag['lines']:
                 ln.set_ydata(base + d*self.rowheight[ln.axes])
             self.canvas.draw_idle()
+        elif self.drag is not None and self.drag['key'] == 'scale':
+            # Scale drag: the grabbed point follows the mouse, the line's zero (its offset) stays put.
+            # Grabbed near zero there is nothing to follow: then up = larger, one row height = x e^3
+            ax0, ii = self.drag['ax'], self.drag['ii']
+            y = ax0.transData.inverted().transform((event.x, event.y))[1]
+            off0, r0 = self.lineoff[(ax0, ii)], self.drag['y0'] - self.lineoff[(ax0, ii)]
+            if abs(r0) > 0.02*self.rowheight[ax0]:
+                factor = max((y - off0)/r0, 0.01)
+            else:
+                factor = np.exp(3*(y - self.drag['y0'])/self.rowheight[ax0])
+            mf.Data[ii]['scale'] = self.drag['orig']*factor
+            for ln, base in self.drag['lines']:
+                off = self.lineoff[(ln.axes, ii)]
+                ln.set_ydata(off + (base - off)*factor)
+            mf.statusbar.SetStatusText(f"Scale = {mf.Data[ii]['scale']:.4g}", 0)
+            self.canvas.draw_idle()
         elif self.drag is not None and event.inaxes is not None and event.xdata is not None and event.xdata > 0:
             # Live drag: move the stored edge(s), redraw only the dragged patch / limit lines
             dd = mf.Data[mf.current]
@@ -549,7 +566,8 @@ class MatplotlibPanel(wx.Panel):
     def on_press(self, event):
         """Double click on a spectrum line (any row): make it the current spectrum; elsewhere: Home view.
         Left drag on the current spectrum's markup: a region (inside = move, edge = resize) or an
-        integration limit. Shift-drag on empty space in any row adds a region to that row's baseline."""
+        integration limit. Drag on a spectrum line: move it up / down (Y shift); shift-drag on it: scale it.
+        Shift-drag on empty space in any row adds a region to that row's baseline."""
         mf = self.parent
         if (event.button != 1 or event.inaxes is None or event.xdata is None or str(self.toolbar.mode)
                 or mf.current < 0):
@@ -570,15 +588,17 @@ class MatplotlibPanel(wx.Panel):
         dd = mf.Data[mf.current]
         b = float(self.xconv(event.xdata, dd['freq']))
         h = self.hit(event)
-        if (h is None or h[2] == 'move') and not wx.GetKeyState(wx.WXK_SHIFT):
-            # a spectrum line (topmost) under the cursor -- it beats the inside of a region: vertical drag
+        if h is None or h[2] == 'move':
+            # a spectrum line (topmost) under the cursor -- it beats the inside of a region:
+            # vertical drag, or with shift held a scale drag
             hits = [ln for ln in event.inaxes.get_lines()
                     if str(ln.get_gid()).startswith('spec') and ln.contains(event)[0]]
             if hits:
                 gid = max(hits, key=lambda h: h.get_zorder()).get_gid()
                 ii = int(gid[4:])
-                self.drag = {'key': 'line', 'ii': ii, 'ax': event.inaxes, 'y0': event.ydata,
-                             'orig': mf.Data[ii]['yshift'],
+                scale = wx.GetKeyState(wx.WXK_SHIFT)
+                self.drag = {'key': 'scale' if scale else 'line', 'ii': ii, 'ax': event.inaxes, 'y0': event.ydata,
+                             'orig': mf.Data[ii]['scale' if scale else 'yshift'],
                              'lines': [(ln, np.asarray(ln.get_ydata(), dtype=float).copy())
                                        for ax in self.figure.axes for ln in ax.get_lines() if ln.get_gid() == gid]}
                 return
@@ -672,11 +692,12 @@ class MatplotlibPanel(wx.Panel):
             return
         if event.button != 1 or self.drag is None:
             return
-        if self.drag['key'] == 'line':
-            ii, moved = self.drag['ii'], mf.Data[self.drag['ii']]['yshift'] != self.drag['orig']
+        if self.drag['key'] in ('line', 'scale'):
+            key = 'yshift' if self.drag['key'] == 'line' else 'scale'
+            ii, moved = self.drag['ii'], mf.Data[self.drag['ii']][key] != self.drag['orig']
             self.drag = None
             if moved:            # a plain click leaves everything as it was
-                mf.tabulated_panel.filetree.SetPropertyValue(f"yshift {ii}", mf.Data[ii]['yshift'])
+                mf.tabulated_panel.filelist.set_value(ii, key, mf.Data[ii][key])
                 self.update_graph()
             return
         key, j, new = self.drag['key'], self.drag['j'], self.drag['new']
@@ -743,14 +764,16 @@ class MatplotlibPanel(wx.Panel):
             traces['dint'].append((ii, toplot(p['xi'], dd['freq']), p['dint']*fac))
 
         self.rowheight = {}
+        self.lineoff = {}                # (axes, spectrum index) -> vertical offset of that line, for shift-drag scaling
         for ax, row in zip(axes, rows):
             # tallest trace of the row: unit of the stack step and of each spectrum's own Y shift
             height = max([np.ptp(y) for _, _, y in traces[row]], default=0.0) or 1.0
             self.rowheight[ax] = height
             step = self.offset*height
             for kk, (ii, xp, y) in enumerate(traces[row]):
-                col = mf.Data[ii]['color'] or f'C{ii % 10}'
+                col = mf.trace_color(mf.Data[ii])
                 off = kk*step + mf.Data[ii]['yshift']*height
+                self.lineoff[(ax, ii)] = off
                 ax.plot(xp, y + off, color=col, lw=1.6 if ii == cur else 0.9, gid=f'spec{ii}',
                         label=f"{ii + 1}: {mf.Data[ii]['title']}", zorder=3 if ii == cur else 2)
                 if ii != cur:
@@ -822,10 +845,249 @@ class MatplotlibPanel(wx.Panel):
 
         # Readouts
         for ii, p in enumerate(procs):
-            if tp.filetree.GetPropertyByName(f"DI {ii}") is not None:
-                tp.filetree.SetPropertyValue(f"DI {ii}", f"{p['DI']:.6g}")
+            tp.filelist.set_value(ii, 'DI', f"{p['DI']:.6g}")
+        tp.filelist.refresh_headers()     # a colour picked on the plot shows on its swatch too
         tp.lbl_DI.SetLabel(f"DI = {procs[cur]['DI']:.6g}" if cur >= 0 else "DI = –")
         mf.statusbar.SetStatusText("; ".join(warnings) if warnings else "Ready", 0)
+
+
+# --------------------------------------------------------------------------- #
+# Data tab spectrum list: one collapsible entry per spectrum, accordion style
+# --------------------------------------------------------------------------- #
+class SpectrumHeader(wx.Panel):
+    """Title bar of one spectrum entry: [show] [colour] #: title [x], painted by hand.
+    Clicks are reported to the owning SpectrumList as (ii, part, event)."""
+
+    PARTS_TIPS = {'show': "Show / hide this spectrum",
+                  'color': "Line colour: click to pick",
+                  'delete': "Remove this spectrum"}
+
+    def __init__(self, parent, owner, ii):
+        super().__init__(parent, style=wx.BORDER_NONE)
+        self.owner, self.ii = owner, ii
+        self.hover = None
+        self.SetMinSize((-1, self.FromDIP(24)))
+        self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
+        self.SetCursor(wx.Cursor(wx.CURSOR_HAND))
+        self.Bind(wx.EVT_PAINT, self.on_paint)
+        self.Bind(wx.EVT_ERASE_BACKGROUND, lambda e: None)
+        self.Bind(wx.EVT_SIZE, lambda e: (self.Refresh(), e.Skip()))
+        self.Bind(wx.EVT_MOTION, self.on_motion)
+        self.Bind(wx.EVT_LEAVE_WINDOW, lambda e: self.set_hover(None))
+        self.Bind(wx.EVT_LEFT_UP, lambda e: self.owner.on_header(self.ii, self.part_at(e.GetPosition()), e))
+
+    def rects(self):
+        w, h = self.GetClientSize()
+        pad, box = self.FromDIP(6), self.FromDIP(15)
+        y = (h - box)//2
+        show = wx.Rect(pad, y, box, box)
+        color = wx.Rect(show.GetRight() + self.FromDIP(6), y, self.FromDIP(22), box)
+        delete = wx.Rect(w - pad - box, y, box, box)
+        title = wx.Rect(color.GetRight() + self.FromDIP(8), 0, max(0, delete.GetLeft() - color.GetRight() - self.FromDIP(14)), h)
+        return {'show': show, 'color': color, 'delete': delete, 'title': title}
+
+    def part_at(self, pos):
+        for part, r in self.rects().items():
+            if part != 'title' and r.Inflate(2, 2).Contains(pos):
+                return part
+        return 'title'
+
+    def set_hover(self, part):
+        if part != self.hover:
+            self.hover = part
+            self.SetToolTip(self.PARTS_TIPS.get(part, self.owner.title(self.ii)))
+            self.Refresh()
+
+    def on_motion(self, event):
+        self.set_hover(self.part_at(event.GetPosition()))
+        event.Skip()
+
+    def on_paint(self, event):
+        t = theme.theme_colors()
+        dd = self.owner.mf.Data[self.ii]
+        w, h = self.GetClientSize()
+        dc = wx.AutoBufferedPaintDC(self)
+        dc.SetBackground(wx.Brush(self.GetParent().GetBackgroundColour()))
+        dc.Clear()
+        gc = wx.GraphicsContext.Create(dc)
+        if gc is None or w <= 0 or h <= 0:
+            return
+        accent, bg = wx.Colour(t["accent"]), wx.Colour(t["win_bg"])
+        current = self.ii == self.owner.mf.current
+        fill = accent if current else PillCheckBox._blend(bg, accent, 0.55 if self.hover == 'title' else 0.45)
+        white = wx.Colour("#FFFFFF")
+        gc.SetPen(wx.TRANSPARENT_PEN)
+        gc.SetBrush(wx.Brush(fill))
+        gc.DrawRoundedRectangle(0, 0, w, h, self.FromDIP(5))
+        r = self.rects()
+
+        # show checkbox: white box, accent tick when on
+        b = r['show']
+        if dd['show']:
+            gc.SetBrush(wx.Brush(white))
+            gc.DrawRoundedRectangle(b.x, b.y, b.width, b.height, self.FromDIP(4))
+            gc.SetPen(gc.CreatePen(wx.GraphicsPenInfo(fill).Width(max(1.4, b.width*0.14))
+                                   .Cap(wx.CAP_ROUND).Join(wx.JOIN_ROUND)))
+            tick = gc.CreatePath()
+            tick.MoveToPoint(b.x + b.width*0.24, b.y + b.height*0.52)
+            tick.AddLineToPoint(b.x + b.width*0.42, b.y + b.height*0.72)
+            tick.AddLineToPoint(b.x + b.width*0.78, b.y + b.height*0.28)
+            gc.StrokePath(tick)
+        else:
+            gc.SetBrush(wx.TRANSPARENT_BRUSH)
+            gc.SetPen(gc.CreatePen(wx.GraphicsPenInfo(white).Width(1.4)))
+            gc.DrawRoundedRectangle(b.x + 1, b.y + 1, b.width - 2, b.height - 2, self.FromDIP(4))
+
+        # colour swatch
+        c = r['color']
+        gc.SetBrush(wx.Brush(wx.Colour(self.owner.color(self.ii))))
+        gc.SetPen(gc.CreatePen(wx.GraphicsPenInfo(white).Width(2.0 if self.hover == 'color' else 1.2)))
+        gc.DrawRoundedRectangle(c.x + 1, c.y + 1, c.width - 2, c.height - 2, self.FromDIP(3))
+
+        # delete cross, with a soft disc behind it on hover
+        d = r['delete']
+        if self.hover == 'delete':
+            gc.SetPen(wx.TRANSPARENT_PEN)
+            gc.SetBrush(wx.Brush(wx.Colour(t["pill_warn"])))
+            gc.DrawEllipse(d.x - 1, d.y - 1, d.width + 2, d.height + 2)
+        gc.SetPen(gc.CreatePen(wx.GraphicsPenInfo(white).Width(1.6).Cap(wx.CAP_ROUND)))
+        m = d.width*0.3
+        gc.StrokeLine(d.x + m, d.y + m, d.GetRight() + 1 - m, d.GetBottom() + 1 - m)
+        gc.StrokeLine(d.x + m, d.GetBottom() + 1 - m, d.GetRight() + 1 - m, d.y + m)
+
+        # title, shortened with an ellipsis to fit
+        tr = r['title']
+        font = self.GetFont()
+        if current:
+            font = font.Bold()
+        gc.SetFont(font, white)
+        text = self.owner.title(self.ii)
+        if gc.GetTextExtent(text)[0] > tr.width:
+            while text and gc.GetTextExtent(text + "…")[0] > tr.width:
+                text = text[:-1]
+            text += "…"
+        th = gc.GetTextExtent(text)[1]
+        gc.DrawText(text, tr.x, (h - th)/2)
+
+
+class SpectrumList(scrolled.ScrolledPanel):
+    """Accordion of spectra: a SpectrumHeader per spectrum, and below it a small PropertyGrid
+    (properties named "<key> <index>") that only the open entry shows."""
+
+    def __init__(self, parent, tabulated):
+        super().__init__(parent, style=wx.BORDER_NONE)
+        self.tp = tabulated
+        self.mf = tabulated.parent
+        self.headers, self.grids = [], []
+        self.open = None                # index of the expanded entry, None = all collapsed
+        self.sizer = wx.BoxSizer(wx.VERTICAL)
+        self.SetSizer(self.sizer)
+        self.SetupScrolling(scroll_x=False, rate_y=10)
+
+    def title(self, ii):
+        return f"{ii + 1}: {self.mf.Data[ii]['title']}"
+
+    def color(self, ii):
+        return to_hex(self.mf.trace_color(self.mf.Data[ii]))
+
+    def rebuild(self):
+        self.Freeze()
+        self.sizer.Clear(delete_windows=True)
+        self.headers, self.grids = [], []
+        for ii, dd in enumerate(self.mf.Data):
+            header = SpectrumHeader(self, self, ii)
+            self.sizer.Add(header, 0, wx.EXPAND | wx.TOP, 2)
+            grid = wxpg.PropertyGrid(self, style=wxpg.PG_DEFAULT_STYLE | wxpg.PG_SPLITTER_AUTO_CENTER
+                                     | wxpg.PG_HIDE_MARGIN | wxpg.PG_TOOLTIPS | wxpg.PG_NO_INTERNAL_BORDER
+                                     | wx.BORDER_NONE)
+            if not grid.GetEditorByName("SpinFloat"):
+                grid.RegisterEditor(MypgPanel.SpinCtrlDoubleEditor, "SpinFloat")
+            prop = grid.Append(wxpg.StringProperty("f.name", f"fname {ii}", value=dd['fname']))
+            grid.SetPropertyReadOnly(prop)
+            prop = grid.Append(wxpg.FloatProperty("MW Freq [GHz]", f"freq {ii}", value=dd['freq']))
+            prop.SetHelpString("Used for the g axis and for the background frequency ratio.")
+            prop = grid.Append(wxpg.FloatProperty("Scale", f"scale {ii}", value=dd['scale']))
+            grid.SetPropertyEditor(prop, "SpinFloat")
+            prop.SetAttribute(wxpg.PG_ATTR_SPINCTRL_STEP, 0.1)
+            prop.SetHelpString("Display multiplier (applied on top of the Compare normalisation).\n"
+                               "Or shift-drag the spectrum's line on the plot.")
+            prop = grid.Append(wxpg.FloatProperty("Y shift", f"yshift {ii}", value=dd['yshift']))
+            grid.SetPropertyEditor(prop, "SpinFloat")
+            prop.SetAttribute(wxpg.PG_ATTR_SPINCTRL_STEP, 0.1)
+            prop.SetHelpString("Vertical display offset, in units of the tallest trace of each plot row\n"
+                               "(display only). Or drag the spectrum's line up or down on the plot.")
+            prop = grid.Append(wxpg.StringProperty("DI", f"DI {ii}", value=""))
+            grid.SetPropertyReadOnly(prop)
+            grid.SetMinSize((-1, grid.GetRowHeight()*grid.GetRoot().GetChildCount() + 2))
+            grid.Bind(wxpg.EVT_PG_CHANGED, self.tp.on_filetree)
+            grid.Bind(wxpg.EVT_PG_SELECTED, self.tp.on_filetree_selected)
+            grid.Bind(wx.EVT_MOUSEWHEEL, self.on_wheel)    # the grid fits its rows; scroll the list instead
+            theme.theme_propgrid(grid, caption_key="accent")
+            self.sizer.Add(grid, 0, wx.EXPAND | wx.LEFT, self.FromDIP(6))
+            self.headers.append(header)
+            self.grids.append(grid)
+        self.open = self.mf.current if 0 <= self.mf.current < len(self.grids) else None
+        for ii, grid in enumerate(self.grids):
+            grid.Show(ii == self.open)
+        self.SetupScrolling(scroll_x=False, rate_y=10, scrollToTop=False)
+        self.Thaw()
+
+    def expand(self, ii):
+        """Open entry ii (None: none) and close the others."""
+        self.open = ii
+        self.Freeze()
+        for jj, grid in enumerate(self.grids):
+            grid.Show(jj == ii)
+        self.SetupScrolling(scroll_x=False, rate_y=10, scrollToTop=False)
+        self.Thaw()
+        if ii is not None:
+            self.ScrollChildIntoView(self.headers[ii])
+
+    def set_current(self, ii):
+        if ii != self.open:
+            self.expand(ii)
+        self.refresh_headers()
+
+    def refresh_headers(self):
+        for header in self.headers:
+            header.Refresh()
+
+    def set_value(self, ii, key, value):
+        if 0 <= ii < len(self.grids):
+            self.grids[ii].SetPropertyValue(f"{key} {ii}", value)
+
+    def apply_theme(self):
+        for grid in self.grids:
+            theme.theme_propgrid(grid, caption_key="accent")
+        self.refresh_headers()
+
+    def on_wheel(self, event):
+        lines = -event.GetWheelRotation()/event.GetWheelDelta()*event.GetLinesPerAction()
+        x, y = self.GetViewStart()
+        self.Scroll(x, y + int(round(lines)))
+
+    def on_header(self, ii, part, event):
+        mf = self.mf
+        dd = mf.Data[ii]
+        if part == 'show':
+            dd['show'] = not dd['show']
+            self.headers[ii].Refresh()
+            mf.matplotlib_panel.update_graph()
+        elif part == 'color':
+            cdata = wx.ColourData()
+            cdata.SetColour(wx.Colour(self.color(ii)))
+            with wx.ColourDialog(self, cdata) as dlg:
+                if dlg.ShowModal() != wx.ID_OK:
+                    return
+                dd['color'] = dlg.GetColourData().GetColour().GetAsString(wx.C2S_HTML_SYNTAX)
+            mf.matplotlib_panel.update_graph()
+        elif part == 'delete':
+            wx.CallAfter(self.tp.delete_spectra, [ii])    # not from inside the header being destroyed
+        elif part == 'title':
+            if ii == mf.current:
+                self.expand(None if self.open == ii else ii)
+            else:
+                mf.set_current(ii)
 
 
 # --------------------------------------------------------------------------- #
@@ -867,15 +1129,16 @@ class TabulatedPanel(wx.Panel):
         sizerBtns.Add(self.btn_moveUp, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 6)
         sizerBtns.Add(self.btn_moveDown, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 2)
         sizer.Add(sizerBtns, 0, wx.EXPAND | wx.ALL, 3)
+        row_show = wx.BoxSizer(wx.HORIZONTAL)
+        for label, show in (("Show all", True), ("Hide all", False)):
+            btn = PillButton(self.data_panel, label, color_key="pill_calm")
+            btn.SetToolTip(f"{label.split()[0]} every spectrum on the plot.")
+            btn.Bind(wx.EVT_BUTTON, lambda e, s=show: self.on_show_all(s))
+            row_show.Add(btn, 1, wx.ALL, 3)
+        sizer.Add(row_show, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 3)
 
-        self.filetree = wxpg.PropertyGrid(self.data_panel, style=wxpg.PG_DEFAULT_STYLE | wxpg.PG_SPLITTER_AUTO_CENTER
-                                          | wxpg.PG_HIDE_MARGIN | wxpg.PG_TOOLTIPS | wxpg.PG_NO_INTERNAL_BORDER
-                                          | wx.BORDER_NONE)
-        if not self.filetree.GetEditorByName("SpinFloat"):
-            self.filetree.RegisterEditor(MypgPanel.SpinCtrlDoubleEditor, "SpinFloat")
-        self.filetree.Bind(wxpg.EVT_PG_CHANGED, self.on_filetree)
-        self.filetree.Bind(wxpg.EVT_PG_SELECTED, self.on_filetree_selected)
-        sizer.Add(self.filetree, 1, wx.EXPAND)
+        self.filelist = SpectrumList(self.data_panel, self)
+        sizer.Add(self.filelist, 1, wx.EXPAND)
 
         grid = wx.FlexGridSizer(cols=2, vgap=4, hgap=6)
         grid.AddGrowableCol(1)
@@ -1170,27 +1433,7 @@ class TabulatedPanel(wx.Panel):
         if mf.current >= 0:
             self.choice_current.SetSelection(mf.current)
 
-        self.filetree.Clear()
-        for ii, dd in enumerate(mf.Data):
-            cat = self.filetree.Append(wxpg.PropertyCategory(titles[ii], f"cat {ii}"))
-            prop = self.filetree.AppendIn(cat, wxpg.BoolProperty("Show", f"show {ii}", value=dd['show']))
-            prop.SetAttribute(wxpg.PG_BOOL_USE_CHECKBOX, True)
-            prop = self.filetree.AppendIn(cat, wxpg.StringProperty("f.name", f"fname {ii}", value=dd['fname']))
-            self.filetree.SetPropertyReadOnly(prop)
-            prop = self.filetree.AppendIn(cat, wxpg.FloatProperty("MW Freq [GHz]", f"freq {ii}", value=dd['freq']))
-            prop.SetHelpString("Used for the g axis and for the background frequency ratio.")
-            prop = self.filetree.AppendIn(cat, wxpg.FloatProperty("Scale", f"scale {ii}", value=dd['scale']))
-            self.filetree.SetPropertyEditor(prop, "SpinFloat")
-            prop.SetAttribute(wxpg.PG_ATTR_SPINCTRL_STEP, 0.1)
-            prop.SetHelpString("Display multiplier (applied on top of the Compare normalisation).")
-            prop = self.filetree.AppendIn(cat, wxpg.FloatProperty("Y shift", f"yshift {ii}", value=dd['yshift']))
-            self.filetree.SetPropertyEditor(prop, "SpinFloat")
-            prop.SetAttribute(wxpg.PG_ATTR_SPINCTRL_STEP, 0.1)
-            prop.SetHelpString("Vertical display offset, in units of the tallest trace of each plot row\n"
-                               "(display only). Or drag the spectrum's line up or down on the plot.")
-            prop = self.filetree.AppendIn(cat, wxpg.StringProperty("DI", f"DI {ii}", value=""))
-            self.filetree.SetPropertyReadOnly(prop)
-        self.filetree.ExpandAll()
+        self.filelist.rebuild()
 
         self.list_bg.Set([bd['title'] for bd in mf.BGData])
         if mf.BGData:
@@ -1363,8 +1606,20 @@ class TabulatedPanel(wx.Panel):
             if dlg.ShowModal() != wx.ID_OK:
                 return
             selected = dlg.GetSelections()
-        for ii in sorted(selected, reverse=True):
+        self.delete_spectra(selected)
+
+    def on_show_all(self, show):
+        for dd in self.parent.Data:
+            dd['show'] = show
+        self.filelist.refresh_headers()
+        self.parent.matplotlib_panel.update_graph()
+
+    def delete_spectra(self, indices):
+        mf = self.parent
+        for ii in sorted(indices, reverse=True):
             mf.Data.pop(ii)
+            if mf.current > ii:
+                mf.current -= 1
         mf.current = min(mf.current, len(mf.Data) - 1)
         mf.update_everything()
 
@@ -1799,7 +2054,7 @@ class MainFrame(wx.Frame):
     def apply_theme(self):
         theme.set_theme(self.theme_name)
         theme.apply_theme_to_window(self, self.theme_name)
-        theme.theme_propgrid(self.tabulated_panel.filetree, caption_key="accent")
+        self.tabulated_panel.filelist.apply_theme()
         theme.theme_propgrid(self.tabulated_panel.bgtree, caption_key="pill_load")
         theme.style_figure(self.matplotlib_panel.figure, self.matplotlib_panel.figure.axes)
         self.matplotlib_panel.canvas.draw_idle()
@@ -1808,6 +2063,7 @@ class MainFrame(wx.Frame):
     def set_current(self, ii):
         self.current = ii
         self.tabulated_panel.choice_current.SetSelection(ii)
+        self.tabulated_panel.filelist.set_current(ii)
         self.tabulated_panel.update_controls()
         self.matplotlib_panel.update_graph()
 
@@ -1914,7 +2170,8 @@ class MainFrame(wx.Frame):
                 'title': str(ax.get('title') or os.path.basename(path)),
                 'freq': freq, 'show': True, 'scale': 1.0,
                 'yshift': 0.0,                    # vertical display offset, in tallest-trace units of each plot row
-                'color': '',                      # '' = automatic C0..C9 by position
+                'color': '',                      # '' = automatic: C<autocolor>
+                'autocolor': -1,                  # default colour index, fixed when added (-1 = not yet)
                 # [{'bgdata': BG title, 'scale', 'fratio' (-1 = f/f_BG), 'shift' [mT]}]
                 'bglist': [], 'phase': 0.0,
                 # lock-in phase [deg]: data*cos(lockin - lockin0) + quad*sin(lockin - lockin0); quad None = fixed
@@ -1936,8 +2193,20 @@ class MainFrame(wx.Frame):
             n += 1
         target.append(dd)
         if not BG:
+            self.assign_autocolor(dd)
             self.current = len(self.Data) - 1
         self.update_everything()
+
+    def assign_autocolor(self, dd):
+        """Give dd the lowest default colour index no other spectrum holds; it stays with the spectrum,
+        so removing or reordering others never recolours it."""
+        if dd.get('autocolor', -1) >= 0:
+            return
+        used = {d.get('autocolor', -1) for d in self.Data if d is not dd}
+        dd['autocolor'] = next(k for k in range(len(used) + 1) if k not in used)
+
+    def trace_color(self, dd):
+        return dd['color'] or f"C{dd['autocolor'] % 10}"
 
     def bgratio(self, dd, b):
         """(field-axis ratio, background dict or None) for one entry of dd['bglist']."""
@@ -2178,6 +2447,8 @@ class MainFrame(wx.Frame):
                     new.update({k: v for k, v in dd.items() if k in new and k not in ('ax', 'data')})
                     restored[key].append(new)
             self.Data, self.BGData = restored['Data'], restored['BGData']
+            for dd in self.Data:              # sessions saved before 'autocolor': by position, as they looked
+                self.assign_autocolor(dd)
             view = result.get('view') or {}
             mp, tp = self.matplotlib_panel, self.tabulated_panel
             mp.norm = view.get('norm', 'none') if view.get('norm') in ('none', 'max', 'DI') else 'none'
