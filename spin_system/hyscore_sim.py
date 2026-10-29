@@ -332,6 +332,9 @@ class HYSCOREsim():
         # decides; set it to a name to override the Opt setting.
         self.Grid = None
         self.gridSig = None        # signature of the grid currently in self.phi
+        # Amplitude route: 0 = propagators (amplitudes_4p/amplitudes_6p),
+        # 1 = index arrays (amplitudes_4p_idx/amplitudes_6p_idx). Same numbers.
+        self.method = 0
 
     def grid_name(self):
         """Selected grid construction: 'fibonacci', 'sphgrid' or 'spiral'.
@@ -1044,10 +1047,91 @@ class HYSCOREsim():
             return self.Exp.tau
         return t2
 
+    def amplitudes_4p(self, DA, VA, DB, VB, n_ang):
+        """4-pulse HYSCORE amplitudes for one nucleus and orientation, in the
+        (nidx, 2) tAmp/tW layout: column 0 is binned at (W0, W1), column 1 at
+        (W1, W0).
+
+        Same pathway formalism as amplitudes_6p, with the one fixed delay in
+        the preparation (X) and detection (B) operators: X = Ua(tau) Ub(-tau),
+        B = Ua(-tau) Ub(tau), shared by both manifold orders. The two pathways
+        carry the same electron factor, so there is no relative sign here. The
+        scale 4/n matches amplitudes_6p and reproduces the I = 1/2 output of
+        the index expression this replaced.
+        """
+        n = DA.size
+        tau = self.Exp.tau*1e-3      # us, frequencies in MHz
+
+        def U(D, V, t):
+            return (V*np.exp(-2j*np.pi*D*t)) @ V.conj().T
+
+        X = U(DA, VA, tau) @ U(DB, VB, -tau)
+        B = U(DA, VA, -tau) @ U(DB, VB, tau)
+
+        def pathway(Vx, Vy):
+            Wo = Vx.conj().T @ Vy
+            Xe = Vx.conj().T @ X @ Vx
+            Be = Vy.conj().T @ B @ Vy
+            A = np.einsum("tq,jq,jl,lt->jlqt", Be, Wo.conj(), Xe, Wo)*(4.0/n)
+            return A.reshape(n*n, n*n)
+
+        A_ab = pathway(VA, VB)        # rows: alpha pairs (T1), cols: beta pairs (T2)
+        A_ba = pathway(VB, VA).T      # transposed into the same (alpha, beta) order
+
+        wa = np.real(DA[:, None]-DA[None, :]).ravel()
+        wb = np.real(DB[:, None]-DB[None, :]).ravel()
+        tW = np.empty((n**4, 2), dtype=float)
+        tW[:, 0] = np.repeat(wa, n*n)
+        tW[:, 1] = np.tile(wb, n*n)
+
+        tAmp = np.empty((n**4, 2), dtype=complex)
+        tAmp[:, 0] = A_ab.ravel()*self.ak[n_ang]
+        tAmp[:, 1] = A_ba.ravel()*self.ak[n_ang]
+        if self.Exp.tDead:
+            tAmp *= np.exp(-2j*np.pi*(tW[:, 0]+tW[:, 1])*self.Exp.tDead)[:, None]
+        return tAmp, tW
+
+    def amplitudes_4p_idx(self, DA, VA, DB, VB, n_ang):
+        """amplitudes_4p over the n**6 index arrays instead of propagators: a
+        product of six overlap-matrix elements times one scalar exponential of
+        eigenvalue differences, per pathway.
+
+        The alpha-beta pathway takes conj(ampar) with the e1 phase and the
+        beta-alpha pathway ampar with e2. Giving each pathway both phases, or
+        pairing them the other way round, is correct for I = 1/2 only: after
+        the symmetrisation in bin_hyscore the two versions then agree, but for
+        I >= 1 they do not (see hyscore4_fix_for_I_ge_1.md).
+        """
+        n = DA.size
+        tau = self.Exp.tau*1e-3      # us, frequencies in MHz
+        M = VA.conj().T@VB
+        cM = M.conj().T              # M is unitary, so its inverse is M^H
+        wa = np.real(DA[:, None]-DA[None, :])
+        wb = np.real(DB[:, None]-DB[None, :])
+
+        ii, ll, jj, nn, kk, mm = (self.cii[n], self.cll[n], self.cjj[n],
+                                  self.cnn[n], self.ckk[n], self.cmm[n])
+
+        ampar = (M[ii, ll]*cM[ll, jj]*M[jj, nn]*cM[nn, kk]*M[kk, mm]*cM[mm, ii])
+        e1 = np.exp(-2j*np.pi*(wa[ii, jj] + wb[ll, mm])*tau)
+        e2 = np.exp(+2j*np.pi*(wa[kk, jj] + wb[nn, mm])*tau)
+        scale = 4.0/n*self.ak[n_ang]
+
+        tW = np.empty((n**6, 2), dtype=float)
+        tW[:, 0] = wa[ii, kk]
+        tW[:, 1] = wb[ll, nn]
+
+        tAmp = np.empty((n**6, 2), dtype=complex)
+        tAmp[:, 0] = scale*np.conj(ampar)*e1
+        tAmp[:, 1] = scale*ampar*e2
+        if self.Exp.tDead:
+            tAmp *= np.exp(-2j*np.pi*(tW[:, 0]+tW[:, 1])*self.Exp.tDead)[:, None]
+        return tAmp, tW
+
     def amplitudes_6p(self, DA, VA, DB, VB, n_ang):
         """6-pulse HYSCORE amplitudes for one nucleus and orientation, in the
-        (nidx, 2) tAmp/tW layout of the 4-pulse block in compute_transitions:
-        column 0 is binned at (W0, W1), column 1 at (W1, W0).
+        (nidx, 2) tAmp/tW layout: column 0 is binned at (W0, W1), column 1 at
+        (W1, W0).
 
         Pathway formalism of hyscore6_frequency_domain_methodology.md (sec. 4-5):
         A[jl,qt] = (1/n) B'[t,q] W^H[q,j] X'[j,l] W[l,t] at (w^x_jl, w^y_qt),
@@ -1100,6 +1184,68 @@ class HYSCOREsim():
             tAmp *= np.exp(-2j*np.pi*(tW[:, 0]+tW[:, 1])*self.Exp.tDead)[:, None]
         return tAmp, tW
 
+    def amplitudes_6p_idx(self, DA, VA, DB, VB, n_ang):
+        """amplitudes_6p over index arrays instead of propagators.
+
+        Inserting VV^H between neighbouring propagators turns every X' and B'
+        into one overlap chain with a diagonal phase at each link, so all six
+        operators (X'+, X'-, B' for each manifold order) are the same n**5 sum
+
+            Z[p,s] = v0[p] sum_qru S[p,q] v1[q] T[q,r] v2[r] S[r,u] v3[u] T[u,s] v4[s]
+
+        with S, T alternating between M and M^H. Only two overlap chains occur,
+        so gMc and gcM are each shared by three of the operators. The index
+        arrays are leading slices of cii..cmm: those are the base-n digits of
+        the flat counter, so dropping the leading digit(s) leaves exactly the
+        n**5 and n**4 enumerations in the same order.
+
+        Going from alpha-beta to beta-alpha is not an alpha/beta swap: that maps
+        X+ to X- and flips the modulation. X and B are the same operators, only
+        the basis they are projected into changes, which rotates the chain.
+        """
+        n = DA.size
+        tau1 = self.Exp.tau*1e-3     # us, frequencies in MHz
+        tau2 = self.tau2_ns()*1e-3
+
+        M = VA.conj().T@VB
+        cM = M.conj().T
+        wa = np.real(DA[:, None]-DA[None, :])
+        wb = np.real(DB[:, None]-DB[None, :])
+
+        n5, n4 = n**5, n**4
+        pp, ss, qq, rr, uu = (self.ckk[n][:n5], self.cll[n][:n5], self.cnn[n][:n5],
+                              self.cjj[n][:n5], self.cmm[n][:n5])
+        jj, ll, kk, tt = (self.cll[n][:n4], self.cnn[n][:n4],
+                          self.cjj[n][:n4], self.cmm[n][:n4])
+
+        a1 = np.exp(-2j*np.pi*DA*tau1)
+        b1 = np.exp(-2j*np.pi*DB*tau1)
+        a2 = np.exp(-2j*np.pi*DA*tau2)
+        b2 = np.exp(-2j*np.pi*DB*tau2)
+        a1c, b1c, a2c, b2c = a1.conj(), b1.conj(), a2.conj(), b2.conj()
+
+        # the two alternating overlap chains, three operators each
+        gMc = M[pp, qq]*cM[qq, rr]*M[rr, uu]*cM[uu, ss]
+        gcM = cM[pp, qq]*M[qq, rr]*cM[rr, uu]*M[uu, ss]
+
+        Xab = ((gMc*b1[qq]*a1c[rr]*b1c[uu]).reshape(n, n, n**3).sum(axis=2)*a1[:, None]
+               - (gMc*b1[qq]*a1[rr]*b1c[uu]*a1c[ss]).reshape(n, n, n**3).sum(axis=2))
+        Bab = (gcM*a2c[qq]*b2[rr]*a2[uu]).reshape(n, n, n**3).sum(axis=2)*b2c[:, None]
+        Xba = ((gcM*a1[qq]*b1[rr]*a1c[uu]*b1c[ss]).reshape(n, n, n**3).sum(axis=2)
+               - (gcM*a1[qq]*b1c[rr]*a1c[uu]).reshape(n, n, n**3).sum(axis=2)*b1[:, None])
+        Bba = (gMc*b2c[qq]*a2c[rr]*b2[uu]*a2[ss]).reshape(n, n, n**3).sum(axis=2)
+
+        tW = np.empty((n4, 2), dtype=float)
+        tW[:, 0] = wa[jj, ll]
+        tW[:, 1] = wb[kk, tt]
+
+        tAmp = np.empty((n4, 2), dtype=complex)
+        tAmp[:, 0] = (4.0/n)*Bab[tt, kk]*cM[kk, jj]*Xab[jj, ll]*M[ll, tt]*self.ak[n_ang]
+        tAmp[:, 1] = (4.0/n)*Bba[ll, jj]*M[jj, kk]*Xba[kk, tt]*cM[tt, ll]*self.ak[n_ang]
+        if self.Exp.tDead:
+            tAmp *= np.exp(-2j*np.pi*(tW[:, 0]+tW[:, 1])*self.Exp.tDead)[:, None]
+        return tAmp, tW
+
     def compute_transitions(self):
         ### Do all the checks here. TBD
         seq = self.sequence_name()
@@ -1109,73 +1255,30 @@ class HYSCOREsim():
             W = None
             for n_nuc in range(len(self.Sys.I)):
                 if self.Sys.useFor[n_nuc]=='ori.sel.only': continue
-                mult = int(2*self.Sys.I[n_nuc]+1)
-                nidx = len(self.cii[mult])
-                
-                tAmp = np.zeros((nidx, 2), dtype=complex)
-                tW = np.zeros((nidx, 2), dtype=float)
 
                 Ham_A, Ham_B = self.local_sham(n_ang, n_nuc, self.Exp.Field)
                 # For Hermitian matrix
                 DA, VA = np.linalg.eigh(Ham_A)       # eigenvalues + eigenvectors
                 DB, VB = np.linalg.eigh(Ham_B)       # eigenvalues + eigenvectors
                 # np.linalg.eigh returns V whose columns are eigenvectors, so VA[:, i] = |α_i> and VB[:, l] = |β_l>
-                M = VA.conj().T@VB  # check if needed a transpose !
-                # cM=np.linalg.inv(M)
-                cM = M.conj().T # Because VA and VB are unitary (eigenvectors of Hermitian Hamiltonians from eigh), their product M = V_A^H V_B is also unitary. So
-                
-                wa = np.real(DA[:, None] - DA[None, :])   # shape (n, n)
-                wb = np.real(DB[:, None] - DB[None, :])   # shape (n, n)
-                
+
                 if seq == '6-pulse':
-                    tAmp, tW = self.amplitudes_6p(DA, VA, DB, VB, n_ang)
-                    if Amp is None:
-                        Amp, W = tAmp, tW
+                    if self.method:
+                        tAmp, tW = self.amplitudes_6p_idx(DA, VA, DB, VB, n_ang)
                     else:
-                        Amp = np.concatenate((Amp, tAmp), axis=0)
-                        W = np.concatenate((W, tW), axis=0)
-                    continue
-
-                ii, ll, jj, nn, kk, mm = (self.cii[mult],
-                                          self.cll[mult],
-                                          self.cjj[mult],
-                                          self.cnn[mult],
-                                          self.ckk[mult],
-                                          self.cmm[mult])
-
-                ampar = np.array(
-                         M[ii, ll]*
-                         cM[ll, jj]*
-                          M[jj, nn]*
-                         cM[nn, kk]*
-                          M[kk, mm]*
-                         cM[mm, ii]
-                         )
-                
-                # Blind sponts
-                exppar =np.array(np.exp(-2j * np.pi * (wa[ii, jj] + wb[ll, mm]) * self.Exp.tau*1e-3) +
-                          np.exp(+2j * np.pi * (wa[kk, jj] + wb[nn, mm]) * self.Exp.tau*1e-3))*self.ak[n_ang]
-                if self.Exp.tDead:
-                    phasedr = np.exp(-2j * np.pi * (wa[ii, kk] + wb[ll, nn]) * self.Exp.tDead)
-                    tAmp[:, 0] = ampar*exppar*phasedr
-                    tAmp[:, 1] = np.conj(ampar)*exppar*phasedr                    
+                        tAmp, tW = self.amplitudes_6p(DA, VA, DB, VB, n_ang)
                 else:
-                    tAmp[:, 0] = ampar*exppar
-                    tAmp[:, 1] = np.conj(ampar)*exppar
-        
-                tW[:, 0]=wa[ii, kk]
-                tW[:, 1]=wb[ll, nn]
-                
+                    if self.method:
+                        tAmp, tW = self.amplitudes_4p_idx(DA, VA, DB, VB, n_ang)
+                    else:
+                        tAmp, tW = self.amplitudes_4p(DA, VA, DB, VB, n_ang)
+
                 if Amp is None:
-                    Amp = np.array(tAmp, dtype=complex)
+                    Amp, W = tAmp, tW
                 else:
                     Amp = np.concatenate((Amp, tAmp), axis=0)
-                    
-                if W is None:
-                    W = np.array(tW, dtype=float)
-                else:
                     W = np.concatenate((W, tW), axis=0)
-                    
+
             # if self.Opt.ProdRule:
             #     print('tbd')
             

@@ -4,3 +4,4 @@ testdata/
 .vscode
 backup/
 tmp/
+backup_pre_6pulse/
