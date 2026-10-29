@@ -1973,13 +1973,15 @@ class TabulatedPanel(wx.Panel):
     def on_filetree(self, event):
         (key, strval) = event.GetPropertyName().split()
         val = int(strval)
-        if key == 'bgdata':
+        if key in ('bgdata', 'seq'):
             # An EnumProperty's value is the index into its choice list; the
-            # dataset stores the background's title, which is what
-            # update_FFT() matches against.
+            # dataset stores the label -- the background's title, which is
+            # what update_FFT() matches against, or the sequence name.
             self.parent.Data[val][key] = event.GetProperty().GetValueAsString()
         else:
             self.parent.Data[val][key] = event.GetValue()
+        if key in ('seq', 'tau', 'tau2'):
+            self.parent.Data[val]['simactual'] = False
         if self.parent.tb_autoFFT.GetValue():
             self.parent.update_FFT()   # redraws the figure itself at the end
         else:
@@ -2042,6 +2044,21 @@ class TabulatedPanel(wx.Panel):
             self.filetree.AppendIn(cat[ii], wxpg.FloatProperty("MW Freq [GHz]", f"freq {ii}", value=dd['freq']))
             self.filetree.AppendIn(cat[ii], wxpg.FloatProperty("B0 [mT]", f"field {ii}", value=dd['field']))
             self.filetree.AppendIn(cat[ii], wxpg.FloatProperty("tau [ns]", f"tau {ii}",value=dd['tau']))
+            # .get() rather than [] -- sessions saved before 6-pulse support
+            # have neither key
+            seqchoices = ['4-pulse', '6-pulse']
+            seqname = dd.get('seq', '4-pulse')
+            if seqname not in seqchoices:
+                seqname = '4-pulse'
+            seqprop = self.filetree.AppendIn(cat[ii], wxpg.EnumProperty("Sequence", f"seq {ii}",
+                                                                        labels=seqchoices,
+                                                                        value=seqchoices.index(seqname)))
+            seqprop.SetHelpString("HYSCORE pulse sequence of this dataset, used by the\n"
+                                  "simulation unless Exp.Sequence overrides it.")
+            tau2prop = self.filetree.AppendIn(cat[ii], wxpg.FloatProperty("tau2 [ns]", f"tau2 {ii}",
+                                                                          value=dd.get('tau2', -1.0)))
+            tau2prop.SetHelpString("Second fixed delay of 6-pulse HYSCORE; tau above is tau1.\n"
+                                   " -1 = same as tau. Ignored for 4-pulse data.")
             self.filetree.AppendIn(cat[ii], wxpg.FloatProperty("z.max", f"zmax {ii}",value=dd['zmax']))
             self.filetree.AppendIn(cat[ii], wxpg.FloatProperty("z.min", f"zmin {ii}",value=dd['zmin']))
             # f.min/f.max get the spin editor too: they are the analysis
@@ -2636,6 +2653,10 @@ class MainFrame(wx.Frame):
             tData = {'ax':ax, 'data':data, 'dsc':dsc,
                      'bgdata':'none', 'bgscale':1.0,    
                     'freq':freq, 'tau':tau, 'field':field,
+                    # HYSCORE sequence of this dataset, set by hand in the file
+                    # tree; tau2 is the second fixed delay of 6-pulse HYSCORE
+                    # (-1 = same as tau). Exp.Sequence/Exp.tau2 can override both.
+                    'seq':'4-pulse', 'tau2':-1.0,
                     'fname':fname, 'fullpath':path, 'show':True, 
                     'zmax':1.0, 'zmin':0.0, 'title':ax['title'],
                     'fmax':fmax, 'fmin':fmin,
@@ -2826,6 +2847,18 @@ class MainFrame(wx.Frame):
                      'Opt': self.tabulated_panel.Opt_param.parameters.copy(),}
         if methoddic['Exp']['tau']<0:
             methoddic['Exp']['tau'] = data['tau']
+        # 6-pulse: Exp.tau2 >= 0 wins, else the dataset's tau2; HYSCOREsim
+        # turns a remaining -1 into tau. Exp.Sequence other than 'data'
+        # overrides the dataset's own sequence, so a mixed set simulates each
+        # dataset with its own unless forced.
+        if methoddic['Exp'].get('tau2', -1.0)<0:
+            methoddic['Exp']['tau2'] = data.get('tau2', -1.0)
+        seq = methoddic['Exp'].get('Sequence', 'data')
+        if isinstance(seq, (list, tuple)):
+            seq = seq[0] if len(seq) else 'data'
+        if seq not in ('4-pulse', '6-pulse'):
+            seq = data.get('seq', '4-pulse')
+        methoddic['Exp']['Sequence'] = seq
         if methoddic['Exp']['Field']<0:
             methoddic['Exp']['Field'] = data['field']
         if methoddic['Exp']['mwFreq']<0:
@@ -3320,7 +3353,10 @@ class MainFrame(wx.Frame):
             if 'Sys' in result.keys():
                 self.tabulated_panel.Sys_param.SetFromParClean(result['Sys'].copy())
             if 'Exp' in result.keys():
-                self.tabulated_panel.Exp_param.SetFromParClean(result['Exp'].copy())
+                # merged like Opt below, so a session saved before 6-pulse
+                # support still gets the Sequence/tau2 controls at their defaults
+                self.tabulated_panel.Exp_param.SetFromParClean(
+                    self.withDefaults(result['Exp'], self.Exp.getDefaultDict()))
             if 'Opt' in result.keys():
                 # merged, so a session saved before Opt.Grid existed still
                 # gets the Grid dropdown (at its default) instead of losing it

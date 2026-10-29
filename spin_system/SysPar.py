@@ -113,13 +113,15 @@ class sysPar():
         
         if type(self.Q_K)!=type(None):
             if len(self.Q_K)==len(Nucs):
-                if type(self.Q_eta)!=type(None):
+                if type(self.Q_eta)==type(None):
                     Q_eta = [0.0]*len(Nucs)
+                else:
+                    Q_eta = self.Q_eta
                 self.Q = []
                 for ii in range(len(Nucs)):
-                    self.Q.append(np.array([(1.0+Q_eta[ii])*self.Q_K[ii], 
-                                            (1.0-Q_eta[ii])*self.Q_K[ii], 
-                                            -2.0*self.Q_K[ii]]))
+                    self.Q.append(np.array([-(1.0-Q_eta[ii])*self.Q_K[ii],
+                                            -(1.0+Q_eta[ii])*self.Q_K[ii],
+                                            2.0*self.Q_K[ii]]))
             else:
                 raise AttributeError("🤔 lenght of Q_K is different from the lenght of Nucs")
         if type(self.Qpa)==type(None):
@@ -434,6 +436,8 @@ class expPar():
         self.BMin = 300 # mT
         self.BMax = 400 # mT
         self.tau = 120 # ns
+        self.tau2 = -1 # ns; second fixed delay of 6-pulse HYSCORE, <0 -> same as tau
+        self.Sequence = ['data', ['data', '4-pulse', '6-pulse']] # 'data' -> per-dataset choice
         self.Tinv = 40 # ns
         self.ExciteWidth = 0 # MHz
         self.phi = None # for single crystal
@@ -460,7 +464,11 @@ class expPar():
               'gField':'Magnetic Field in g-value. Actual Field calculated from mwFreq. ',
               'BMin':'Start magnetic Field in [mT]. '+ss,
               'BMax':'End magnetic Field in [mT]. '+ss,
-              'tau':'tau, typically a delay between first two MW pulses [ns]. ',
+              'tau':'tau, typically a delay between first two MW pulses [ns]. For 6-pulse HYSCORE this is tau1. ',
+              'tau2':'tau2, second fixed delay of 6-pulse HYSCORE [ns]. "-1" = take from data, or equal to tau',
+              'Sequence':('HYSCORE pulse sequence. \n'+
+                          ' "data" = use the sequence set for each dataset \n'+
+                          ' "4-pulse"/"6-pulse" = override it for all datasets'),
               'ExciteWidth': 'Excitation width in [MHz]',
               }
         if param is None:
@@ -477,6 +485,8 @@ class expPar():
                 'MaxFreq': float(-1), # MHz
                 'Field': float(-1.0),
                 'tau': float(-1.0), # ns
+                'tau2': float(-1.0), # ns
+                'Sequence': ['data', ['data', '4-pulse', '6-pulse']],
                 'ExciteWidth': float(20.0), # MHz
                 'tDead':float(0.0),
                 }
@@ -489,6 +499,8 @@ class expPar():
                 'BMin': 300.0, # mT
                 'BMax': 400.0, # mT
                 'tau': 120.0, # ns
+                'tau2': -1.0, # ns
+                'Sequence': ['data', ['data', '4-pulse', '6-pulse']],
                 'Tinv': 40.0, # ns
                 'ExciteWidth': 0.0, # MHz
                 'phi': None, # for single crystal

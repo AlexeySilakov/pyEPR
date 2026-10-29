@@ -365,7 +365,7 @@ class HYSCOREsim():
 
         Excluded on purpose:
           - parameters that only shape the spectrum once the orientations are
-            known (tau, nPoints, MaxFreq, ProdRule, KillNeg, Treshold, ...)
+            known (tau, tau2, Sequence, nPoints, MaxFreq, ProdRule, KillNeg, Treshold, ...)
           - nuclei flagged useFor='sim.only', which contribute to the spectrum
             but are skipped by computeOrisel_eig and so cannot move the grid.
         """
@@ -1028,8 +1028,81 @@ class HYSCOREsim():
         Ham_B = Zeeman_A + HFI_A + self.Quad[n_nuc]
         return Ham_A, Ham_B
     
+    def sequence_name(self):
+        """'4-pulse' or '6-pulse'. Exp.Sequence is either the resolved string
+        pyHYSCORE passes per dataset, or the [value, [choices]] list of the Exp
+        tab; anything else (a leftover 'data') falls back to 4-pulse."""
+        s = getattr(self.Exp, 'Sequence', '4-pulse')
+        if isinstance(s, (list, tuple)):
+            s = s[0] if len(s) else '4-pulse'
+        return '6-pulse' if s == '6-pulse' else '4-pulse'
+
+    def tau2_ns(self):
+        """Second fixed delay of 6-pulse HYSCORE [ns]; <0 or None -> tau."""
+        t2 = getattr(self.Exp, 'tau2', None)
+        if t2 is None or t2 < 0:
+            return self.Exp.tau
+        return t2
+
+    def amplitudes_6p(self, DA, VA, DB, VB, n_ang):
+        """6-pulse HYSCORE amplitudes for one nucleus and orientation, in the
+        (nidx, 2) tAmp/tW layout of the 4-pulse block in compute_transitions:
+        column 0 is binned at (W0, W1), column 1 at (W1, W0).
+
+        Pathway formalism of hyscore6_frequency_domain_methodology.md (sec. 4-5):
+        A[jl,qt] = (1/n) B'[t,q] W^H[q,j] X'[j,l] W[l,t] at (w^x_jl, w^y_qt),
+        with the fixed delays only in the preparation (X) and detection (B)
+        operators. Checked against a full density-matrix simulation for
+        I = 1/2, 1, 3/2 (agreement ~1e-15). The +/- pathways carry electron
+        factors -1/+1 (the relative sign is essential) and share frequency
+        pairs, so they are summed before binning. The overall factor 4 makes
+        the scale identical to the 4-pulse block (exact for I=1/2), so 4- and
+        6-pulse datasets are directly comparable.
+
+        Here Ham_A plays alpha and Ham_B beta; the totals do not depend on that
+        choice. For the beta-alpha pathways only the T1/T2 manifolds swap, X
+        and B stay the same -- swapping alpha/beta everywhere is wrong for I>=1.
+        """
+        n = DA.size
+        tau1 = self.Exp.tau*1e-3     # us, frequencies in MHz
+        tau2 = self.tau2_ns()*1e-3
+
+        def U(D, V, t):
+            return (V*np.exp(-2j*np.pi*D*t)) @ V.conj().T
+
+        Ua1, Ua_1 = U(DA, VA, tau1), U(DA, VA, -tau1)
+        Ub1, Ub_1 = U(DB, VB, tau1), U(DB, VB, -tau1)
+        Xp = Ub1 @ Ua1 @ Ub_1 @ Ua_1          # + pathways
+        Xm = Ua1 @ Ub1 @ Ua_1 @ Ub_1          # - pathways
+        B = U(DB, VB, -tau2) @ U(DA, VA, -tau2) @ U(DB, VB, tau2) @ U(DA, VA, tau2)
+
+        def pathway(Vx, Vy):
+            # electron factors -1 (+ pathway), +1 (- pathway), times the scale 4
+            Wo = Vx.conj().T @ Vy
+            Xe = Vx.conj().T @ (Xm-Xp) @ Vx
+            Be = Vy.conj().T @ B @ Vy
+            A = np.einsum("tq,jq,jl,lt->jlqt", Be, Wo.conj(), Xe, Wo)*(4.0/n)
+            return A.reshape(n*n, n*n)
+
+        A_ab = pathway(VA, VB)        # rows: alpha pairs (T1), cols: beta pairs (T2)
+        A_ba = pathway(VB, VA).T      # transposed into the same (alpha, beta) order
+
+        wa = np.real(DA[:, None]-DA[None, :]).ravel()
+        wb = np.real(DB[:, None]-DB[None, :]).ravel()
+        tW = np.empty((n**4, 2), dtype=float)
+        tW[:, 0] = np.repeat(wa, n*n)
+        tW[:, 1] = np.tile(wb, n*n)
+
+        tAmp = np.empty((n**4, 2), dtype=complex)
+        tAmp[:, 0] = A_ab.ravel()*self.ak[n_ang]
+        tAmp[:, 1] = A_ba.ravel()*self.ak[n_ang]
+        if self.Exp.tDead:
+            tAmp *= np.exp(-2j*np.pi*(tW[:, 0]+tW[:, 1])*self.Exp.tDead)[:, None]
+        return tAmp, tW
+
     def compute_transitions(self):
         ### Do all the checks here. TBD
+        seq = self.sequence_name()
         for n_ang in range(len(self.phi)):
 
             Amp = None
@@ -1054,13 +1127,22 @@ class HYSCOREsim():
                 wa = np.real(DA[:, None] - DA[None, :])   # shape (n, n)
                 wb = np.real(DB[:, None] - DB[None, :])   # shape (n, n)
                 
+                if seq == '6-pulse':
+                    tAmp, tW = self.amplitudes_6p(DA, VA, DB, VB, n_ang)
+                    if Amp is None:
+                        Amp, W = tAmp, tW
+                    else:
+                        Amp = np.concatenate((Amp, tAmp), axis=0)
+                        W = np.concatenate((W, tW), axis=0)
+                    continue
+
                 ii, ll, jj, nn, kk, mm = (self.cii[mult],
                                           self.cll[mult],
                                           self.cjj[mult],
                                           self.cnn[mult],
                                           self.ckk[mult],
                                           self.cmm[mult])
-                                         
+
                 ampar = np.array(
                          M[ii, ll]*
                          cM[ll, jj]*

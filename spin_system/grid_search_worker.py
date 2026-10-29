@@ -163,6 +163,8 @@ def dataset_records(active_data, region_cache):
         recs.append({
             'title': dd.get('title', dd.get('fname', '?')),
             'tau': dd['tau'],
+            'tau2': dd.get('tau2', -1.0),
+            'seq': dd.get('seq', '4-pulse'),
             'field': dd['field'],
             'freq': dd['freq'],
             'fmax': dd['fmax'],
@@ -354,6 +356,15 @@ def run_gridpoint(hs, Sys, exp_template, opt_template, records, error_log=None,
         Exp.setDict(copy.deepcopy(exp_template))
         if Exp.tau < 0:
             Exp.tau = rec['tau']
+        # same resolution as pyHYSCORE.actuateSimMethod: Exp.tau2 >= 0 wins,
+        # else the dataset's; Exp.Sequence other than 'data' overrides the
+        # dataset's own sequence
+        if Exp.tau2 is None or Exp.tau2 < 0:
+            Exp.tau2 = rec.get('tau2', -1.0)
+        seq = Exp.Sequence[0] if isinstance(Exp.Sequence, (list, tuple)) else Exp.Sequence
+        if seq not in ('4-pulse', '6-pulse'):
+            seq = rec.get('seq', '4-pulse')
+        Exp.Sequence = seq
         if Exp.Field < 0:
             Exp.Field = rec['field']
         if Exp.mwFreq < 0:
