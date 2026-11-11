@@ -1088,7 +1088,7 @@ class HYSCOREsim():
         tAmp[:, 0] = A_ab.ravel()*self.ak[n_ang]
         tAmp[:, 1] = A_ba.ravel()*self.ak[n_ang]
         if self.Exp.tDead:
-            tAmp *= np.exp(-2j*np.pi*(tW[:, 0]+tW[:, 1])*self.Exp.tDead)[:, None]
+            tAmp *= np.exp(-2j*np.pi*(tW[:, 0]+tW[:, 1])*self.Exp.tDead*1e-3)[:, None]
         return tAmp, tW
 
     def amplitudes_4p_idx(self, DA, VA, DB, VB, n_ang):
@@ -1125,13 +1125,19 @@ class HYSCOREsim():
         tAmp[:, 0] = scale*np.conj(ampar)*e1
         tAmp[:, 1] = scale*ampar*e2
         if self.Exp.tDead:
-            tAmp *= np.exp(-2j*np.pi*(tW[:, 0]+tW[:, 1])*self.Exp.tDead)[:, None]
+            tAmp *= np.exp(-2j*np.pi*(tW[:, 0]+tW[:, 1])*self.Exp.tDead*1e-3)[:, None]
         return tAmp, tW
 
-    def amplitudes_6p(self, DA, VA, DB, VB, n_ang):
+    def amplitudes_6p(self, DA, VA, DB, VB, n_ang, split=False):
         """6-pulse HYSCORE amplitudes for one nucleus and orientation, in the
         (nidx, 2) tAmp/tW layout: column 0 is binned at (W0, W1), column 1 at
         (W1, W0).
+
+        split=True keeps the four eCTPs in their own columns -- alpha-beta X-,
+        alpha-beta X+, beta-alpha X-, beta-alpha X+ -- which the product rule
+        needs, as it multiplies nuclei within one pathway and only then sums
+        the pathways. Columns 0..1 are then binned at (W0, W1) and columns
+        2..3 at (W1, W0); their sum is the split=False result.
 
         Pathway formalism of hyscore6_frequency_domain_methodology.md (sec. 4-5):
         A[jl,qt] = (1/n) B'[t,q] W^H[q,j] X'[j,l] W[l,t] at (w^x_jl, w^y_qt),
@@ -1160,16 +1166,13 @@ class HYSCOREsim():
         Xm = Ua1 @ Ub1 @ Ua_1 @ Ub_1          # - pathways
         B = U(DB, VB, -tau2) @ U(DA, VA, -tau2) @ U(DB, VB, tau2) @ U(DA, VA, tau2)
 
-        def pathway(Vx, Vy):
+        def pathway(Vx, Vy, Xop):
             # electron factors -1 (+ pathway), +1 (- pathway), times the scale 4
             Wo = Vx.conj().T @ Vy
-            Xe = Vx.conj().T @ (Xm-Xp) @ Vx
+            Xe = Vx.conj().T @ Xop @ Vx
             Be = Vy.conj().T @ B @ Vy
             A = np.einsum("tq,jq,jl,lt->jlqt", Be, Wo.conj(), Xe, Wo)*(4.0/n)
             return A.reshape(n*n, n*n)
-
-        A_ab = pathway(VA, VB)        # rows: alpha pairs (T1), cols: beta pairs (T2)
-        A_ba = pathway(VB, VA).T      # transposed into the same (alpha, beta) order
 
         wa = np.real(DA[:, None]-DA[None, :]).ravel()
         wb = np.real(DB[:, None]-DB[None, :]).ravel()
@@ -1177,14 +1180,23 @@ class HYSCOREsim():
         tW[:, 0] = np.repeat(wa, n*n)
         tW[:, 1] = np.tile(wb, n*n)
 
-        tAmp = np.empty((n**4, 2), dtype=complex)
-        tAmp[:, 0] = A_ab.ravel()*self.ak[n_ang]
-        tAmp[:, 1] = A_ba.ravel()*self.ak[n_ang]
+        # pathway(VA, VB): rows alpha pairs (T1), cols beta pairs (T2);
+        # pathway(VB, VA) transposed into that same (alpha, beta) order
+        if split:
+            tAmp = np.empty((n**4, 4), dtype=complex)
+            tAmp[:, 0] = pathway(VA, VB, Xm).ravel()*self.ak[n_ang]
+            tAmp[:, 1] = -pathway(VA, VB, Xp).ravel()*self.ak[n_ang]
+            tAmp[:, 2] = pathway(VB, VA, Xm).T.ravel()*self.ak[n_ang]
+            tAmp[:, 3] = -pathway(VB, VA, Xp).T.ravel()*self.ak[n_ang]
+        else:
+            tAmp = np.empty((n**4, 2), dtype=complex)
+            tAmp[:, 0] = pathway(VA, VB, Xm-Xp).ravel()*self.ak[n_ang]
+            tAmp[:, 1] = pathway(VB, VA, Xm-Xp).T.ravel()*self.ak[n_ang]
         if self.Exp.tDead:
-            tAmp *= np.exp(-2j*np.pi*(tW[:, 0]+tW[:, 1])*self.Exp.tDead)[:, None]
+            tAmp *= np.exp(-2j*np.pi*(tW[:, 0]+tW[:, 1])*self.Exp.tDead*1e-3)[:, None]
         return tAmp, tW
 
-    def amplitudes_6p_idx(self, DA, VA, DB, VB, n_ang):
+    def amplitudes_6p_idx(self, DA, VA, DB, VB, n_ang, split=False):
         """amplitudes_6p over index arrays instead of propagators.
 
         Inserting VV^H between neighbouring propagators turns every X' and B'
@@ -1202,6 +1214,9 @@ class HYSCOREsim():
         Going from alpha-beta to beta-alpha is not an alpha/beta swap: that maps
         X+ to X- and flips the modulation. X and B are the same operators, only
         the basis they are projected into changes, which rotates the chain.
+
+        split=True returns the four eCTPs in their own columns, as in
+        amplitudes_6p.
         """
         n = DA.size
         tau1 = self.Exp.tau*1e-3     # us, frequencies in MHz
@@ -1228,34 +1243,60 @@ class HYSCOREsim():
         gMc = M[pp, qq]*cM[qq, rr]*M[rr, uu]*cM[uu, ss]
         gcM = cM[pp, qq]*M[qq, rr]*cM[rr, uu]*M[uu, ss]
 
-        Xab = ((gMc*b1[qq]*a1c[rr]*b1c[uu]).reshape(n, n, n**3).sum(axis=2)*a1[:, None]
-               - (gMc*b1[qq]*a1[rr]*b1c[uu]*a1c[ss]).reshape(n, n, n**3).sum(axis=2))
+        Xab_m = (gMc*b1[qq]*a1c[rr]*b1c[uu]).reshape(n, n, n**3).sum(axis=2)*a1[:, None]
+        Xab_p = (gMc*b1[qq]*a1[rr]*b1c[uu]*a1c[ss]).reshape(n, n, n**3).sum(axis=2)
         Bab = (gcM*a2c[qq]*b2[rr]*a2[uu]).reshape(n, n, n**3).sum(axis=2)*b2c[:, None]
-        Xba = ((gcM*a1[qq]*b1[rr]*a1c[uu]*b1c[ss]).reshape(n, n, n**3).sum(axis=2)
-               - (gcM*a1[qq]*b1c[rr]*a1c[uu]).reshape(n, n, n**3).sum(axis=2)*b1[:, None])
+        Xba_m = (gcM*a1[qq]*b1[rr]*a1c[uu]*b1c[ss]).reshape(n, n, n**3).sum(axis=2)
+        Xba_p = (gcM*a1[qq]*b1c[rr]*a1c[uu]).reshape(n, n, n**3).sum(axis=2)*b1[:, None]
         Bba = (gMc*b2c[qq]*a2c[rr]*b2[uu]*a2[ss]).reshape(n, n, n**3).sum(axis=2)
 
         tW = np.empty((n4, 2), dtype=float)
         tW[:, 0] = wa[jj, ll]
         tW[:, 1] = wb[kk, tt]
 
-        tAmp = np.empty((n4, 2), dtype=complex)
-        tAmp[:, 0] = (4.0/n)*Bab[tt, kk]*cM[kk, jj]*Xab[jj, ll]*M[ll, tt]*self.ak[n_ang]
-        tAmp[:, 1] = (4.0/n)*Bba[ll, jj]*M[jj, kk]*Xba[kk, tt]*cM[tt, ll]*self.ak[n_ang]
+        if split:
+            tAmp = np.empty((n4, 4), dtype=complex)
+            tAmp[:, 0] = (4.0/n)*Bab[tt, kk]*cM[kk, jj]*Xab_m[jj, ll]*M[ll, tt]*self.ak[n_ang]
+            tAmp[:, 1] = -(4.0/n)*Bab[tt, kk]*cM[kk, jj]*Xab_p[jj, ll]*M[ll, tt]*self.ak[n_ang]
+            tAmp[:, 2] = (4.0/n)*Bba[ll, jj]*M[jj, kk]*Xba_m[kk, tt]*cM[tt, ll]*self.ak[n_ang]
+            tAmp[:, 3] = -(4.0/n)*Bba[ll, jj]*M[jj, kk]*Xba_p[kk, tt]*cM[tt, ll]*self.ak[n_ang]
+        else:
+            Xab, Xba = Xab_m-Xab_p, Xba_m-Xba_p
+            tAmp = np.empty((n4, 2), dtype=complex)
+            tAmp[:, 0] = (4.0/n)*Bab[tt, kk]*cM[kk, jj]*Xab[jj, ll]*M[ll, tt]*self.ak[n_ang]
+            tAmp[:, 1] = (4.0/n)*Bba[ll, jj]*M[jj, kk]*Xba[kk, tt]*cM[tt, ll]*self.ak[n_ang]
         if self.Exp.tDead:
-            tAmp *= np.exp(-2j*np.pi*(tW[:, 0]+tW[:, 1])*self.Exp.tDead)[:, None]
+            tAmp *= np.exp(-2j*np.pi*(tW[:, 0]+tW[:, 1])*self.Exp.tDead*1e-3)[:, None]
         return tAmp, tW
 
     def compute_transitions(self):
         ### Do all the checks here. TBD
         seq = self.sequence_name()
+        nucs = [ii for ii in range(len(self.Sys.I))
+                if self.Sys.useFor[ii] != 'ori.sel.only']
+        # nNucs equivalent nuclei of a type, each an independent spin sharing
+        # that type's tensors
+        counts = [max(1, int(self.Sys.nNucs[ii]))
+                  if self.Sys.nNucs is not None else 1 for ii in nucs]
+        # Product rule (Kasumaj & Stoll, JMR 190 (2008) 233, Eq. 14): within one
+        # electron coherence transfer pathway the nuclei multiply rather than
+        # add, which is what produces the inter-nuclear combination peaks and
+        # the cross-suppression of weakly modulating nuclei. A lone nucleus has
+        # nothing to multiply with, so it keeps the plain route, where nNucs
+        # scales that type's amplitudes instead.
+        prod = bool(self.Opt.ProdRule) and sum(counts) > 1
         for n_ang in range(len(self.phi)):
+            if prod and not self.ak[n_ang]: continue
+
+            # what one pathway column amounts to without any modulation; the
+            # sign is the electron factor of that pathway
+            ref = 4.0*self.ak[n_ang]
+            if prod and seq == '6-pulse':
+                ref = ref*np.array([1.0, -1.0, 1.0, -1.0])
 
             Amp = None
             W = None
-            for n_nuc in range(len(self.Sys.I)):
-                if self.Sys.useFor[n_nuc]=='ori.sel.only': continue
-
+            for n_nuc, nrep in zip(nucs, counts):
                 Ham_A, Ham_B = self.local_sham(n_ang, n_nuc, self.Exp.Field)
                 # For Hermitian matrix
                 DA, VA = np.linalg.eigh(Ham_A)       # eigenvalues + eigenvectors
@@ -1264,27 +1305,45 @@ class HYSCOREsim():
 
                 if seq == '6-pulse':
                     if self.method:
-                        tAmp, tW = self.amplitudes_6p_idx(DA, VA, DB, VB, n_ang)
+                        tAmp, tW = self.amplitudes_6p_idx(DA, VA, DB, VB, n_ang, split=prod)
                     else:
-                        tAmp, tW = self.amplitudes_6p(DA, VA, DB, VB, n_ang)
+                        tAmp, tW = self.amplitudes_6p(DA, VA, DB, VB, n_ang, split=prod)
                 else:
                     if self.method:
                         tAmp, tW = self.amplitudes_4p_idx(DA, VA, DB, VB, n_ang)
                     else:
                         tAmp, tW = self.amplitudes_4p(DA, VA, DB, VB, n_ang)
 
-                if Amp is None:
-                    Amp, W = tAmp, tW
+                if prod:
+                    # normalised modulation of this nucleus, 1 when it does not
+                    # modulate, so that the product carries one pathway factor
+                    tAmp = tAmp/ref
+                    big = np.abs(tAmp).max(axis=1)
+                    keep = big > self.Opt.Treshold*big.max()
+                    tAmp, tW = tAmp[keep], tW[keep]
+                    # nrep equivalent nuclei are nrep independent factors
+                    for _ in range(nrep):
+                        if Amp is None:
+                            Amp, W = tAmp, tW
+                            continue
+                        Amp = (Amp[:, None, :]*tAmp[None, :, :]).reshape(-1, Amp.shape[1])
+                        W = (W[:, None, :]+tW[None, :, :]).reshape(-1, 2)
+                        big = np.abs(Amp).max(axis=1)
+                        keep = big > self.Opt.Treshold*big.max()
+                        Amp, W = Amp[keep], W[keep]
+                elif Amp is None:
+                    Amp, W = tAmp*nrep, tW
                 else:
-                    Amp = np.concatenate((Amp, tAmp), axis=0)
+                    Amp = np.concatenate((Amp, tAmp*nrep), axis=0)
                     W = np.concatenate((W, tW), axis=0)
 
-            # if self.Opt.ProdRule:
-            #     print('tbd')
-            
-            self.bin_hyscore(W[:, 0], W[:, 1], Amp[:, 0], self.Exp.MaxFreq)
-            self.bin_hyscore(W[:, 1], W[:, 0], Amp[:, 1], self.Exp.MaxFreq)
-            
+            if prod:
+                Amp = Amp*ref
+
+            half = Amp.shape[1]//2
+            self.bin_hyscore(W[:, 0], W[:, 1], Amp[:, :half].sum(axis=1), self.Exp.MaxFreq)
+            self.bin_hyscore(W[:, 1], W[:, 0], Amp[:, half:].sum(axis=1), self.Exp.MaxFreq)
+
   # def bin_hyscore(self, omega_a, omega_b, amp, max_freq):
   #
   #     # ---------- sanity checks ----------

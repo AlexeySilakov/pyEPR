@@ -41,6 +41,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap, to_rgb, to_hex
 from matplotlib.backends.backend_wxagg import FigureCanvasWxAgg as FigureCanvas
 from matplotlib.figure import Figure
+from theme.theme import report_fault
 
 DEFAULT_CMAP_FILE = pathlib.Path(__file__).parent / ".colormap_editor_default.json"
 _SENTINEL = object()
@@ -154,7 +155,8 @@ class ColormapEditorDialog(wx.Dialog):
                 self._load_stops([(float(p), str(c)) for p, c in data["stops"]])
                 self._default_label.SetLabel(f"Default: {data['name']}")
                 return
-            except Exception:
+            except Exception as fault:
+                report_fault("colormap editor: reading the saved default colormap", fault)
                 initial_cmap = "jet"
 
         # Priority 3: seed from a named standard colormap
@@ -288,8 +290,8 @@ class ColormapEditorDialog(wx.Dialog):
         try:
             data = json.loads(DEFAULT_CMAP_FILE.read_text())
             self._default_label.SetLabel(f"Default: {data['name']}")
-        except Exception:
-            pass
+        except Exception as fault:
+            report_fault("colormap editor: reading the default colormap name", fault)
 
         # Apply initial theme colours
         self._apply_theme()
@@ -419,8 +421,8 @@ class ColormapEditorDialog(wx.Dialog):
         try:
             cmap = stops_to_cmap(self._stops, self.get_colormap_name())
             self._cb_img.set_cmap(cmap)
-        except Exception:
-            pass
+        except Exception as fault:
+            report_fault("colormap editor: rebuilding the colormap preview", fault)
         self._canvas.draw()
 
     def _refresh_colorbar(self):
@@ -499,7 +501,8 @@ class ColormapEditorDialog(wx.Dialog):
         try:
             r, g, b = [int(hx.lstrip('#')[k:k+2], 16) for k in (0, 2, 4)]
             init_col = wx.Colour(r, g, b)
-        except Exception:
+        except Exception as fault:
+            report_fault("colormap editor: parsing a stop's hex colour", fault)
             init_col = wx.Colour(128, 128, 128)
         cdlg = wx.ColourDialog(self)
         cdlg.GetColourData().SetColour(init_col)
@@ -564,8 +567,8 @@ class ColormapEditorDialog(wx.Dialog):
         if self._spin_popup is not None:
             try:
                 self._spin_popup.Destroy()
-            except Exception:
-                pass
+            except Exception as fault:
+                report_fault("colormap editor: destroying the value popup", fault)
             self._spin_popup = None
 
     # ── toolbar ───────────────────────────────────────────────────────────────
@@ -597,7 +600,8 @@ class ColormapEditorDialog(wx.Dialog):
             insert_at = idx  # inserts before the last stop, i.e. after second-to-last
         try:
             hex_col = to_hex(stops_to_cmap(self._stops)(new_pos)[:3])
-        except Exception:
+        except Exception as fault:
+            report_fault("colormap editor: sampling the colormap for a new stop", fault)
             hex_col = "#808080"
         self._stops.insert(insert_at, [new_pos, hex_col])
         self._active_idx = insert_at   # select the newly added stop

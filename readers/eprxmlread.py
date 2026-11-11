@@ -56,7 +56,8 @@ def xmlread(fname):
               'quad': None if Q is None else np.interp(x, BA[order], Q[keep][order]), 'phase0': phase0}
         try:
             ax['mwpower'] = float(dsc.get('Recipe.MicrowavePower', ['0'])[0])
-        except ValueError:
-            pass
+        except ValueError as fault:
+            print(f"[eprxmlread] 'Recipe.MicrowavePower' of measurement '{meas.get('Name')}' in "
+                  f"'{fname}' is not a number ({fault}); the MW power stays 0")
         out.append((ax, np.interp(x, BA[order], A[order]), dsc))
     return out

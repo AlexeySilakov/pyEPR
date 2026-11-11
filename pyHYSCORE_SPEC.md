@@ -107,8 +107,8 @@ cheap to spawn and lets the engine be tested headlessly.
 | Hyperfine `A`, quadrupole `Q`, `Q_K`, linewidth `lw`, `ExciteWidth`, all spectral frequencies | **MHz** | |
 | Microwave frequency `mwFreq` | **GHz** | ×10³ when compared with MHz |
 | Field `Field`, `BMin`, `BMax` | **mT** | `gField` is a g-value; if set, `Field` is derived (§6.5) |
-| `tau` | **ns** | ×10⁻³ → µs when multiplied by MHz |
-| `tDead` | **ns** | ×10⁻³ → µs (v0.9 used it unconverted — fix) |
+| `tau`, `tau2` | **ns** | ×10⁻³ → µs when multiplied by MHz |
+| `tDead` | **ns** | ×10⁻³ → µs (v0.9 used it unconverted; fixed in place 2026-10-30) |
 | Time axes of loaded data | **µs** | converted from ns on load |
 | Euler angles `Apa`, `Qpa`, `AFrame`, `QFrame`, `gFrame` | **degrees** | radians internally |
 | Nuclear `gamma` | **MHz/mT** | `nu350mT/350` from the isotope table |
@@ -163,10 +163,12 @@ Methods (public): `set(**kw)`, `setDict(d)`, `setNucs(Nucs)`, `setFromCtrl(param
 
 **Quadrupole from (K, η)** — use the EasySpin convention:
 $$Q = K\,\mathrm{diag}\big(-(1-\eta),\; -(1+\eta),\; 2\big),\qquad K=\frac{e^2qQ}{4I(2I-1)h}.$$
-v0.9 builds `[(1+η)K, (1−η)K, −2K]` (= EasySpin with K→−K, η→−η) and also has a
-logic bug that zeroes η when it is given and raises `NameError` when it is not.
-**[AUTHOR DECISION]** confirm EasySpin convention before implementing; do not
-replicate the bug either way. `Q` is only built for `I ≥ 1`.
+v0.9 built `[(1+η)K, (1−η)K, −2K]` (= EasySpin with K→−K, η→−η) and also had a
+logic bug that zeroed η when it was given and raised `NameError` when it was not.
+The author confirmed the EasySpin convention above, and both were fixed in place
+on 2026-10-30. Note that `Q_K` therefore now carries the opposite sign of
+$e^2qQ$ from v0.9, so stored fits and grid-search ranges from before that date
+need their signs reconsidered. `Q` is only built for `I ≥ 1`.
 
 **GUI parameter dictionary** (what `PropGridPanel.parameters` holds and what
 `setFromCtrl` consumes, also what is saved in sessions):
@@ -203,7 +205,9 @@ Fields and GUI defaults (`getDefaultDict`):
 | `mwFreq` | −1 | GHz |
 | `Field` | −1 | mT |
 | `gField` | None | if set: `Field = mwFreq/gField · h_ov_beta_mTMHz · 1e3` |
-| `tau` | −1 | ns |
+| `tau` | −1 | ns; τ for 4-pulse, τ₁ for 6-pulse |
+| `tau2` | −1 | ns; second fixed delay of 6-pulse HYSCORE, < 0 → same as `tau` |
+| `Sequence` | `'data'` | `data`, `4-pulse`, `6-pulse` (stored as `[value, choices]`); `data` takes each dataset's own setting |
 | `nPoints` | 256 | simulation grid size per axis (−1 → dataset FFT length) |
 | `MaxFreq` | −1 | simulated half-range, MHz (−1 → dataset `fmax`) |
 | `ExciteWidth` | 20 | FWHM of the excitation profile, MHz |
@@ -223,16 +227,17 @@ Also present (non-GUI): `BMin`, `BMax`, `Tinv`, `phi`, `theta`, `Harmonic`.
 | `KillNeg` | True | suppress negative-time half after broadening (§6.4) |
 | `ProdRule` | True | product rule for >1 nucleus (§6.3) |
 | `AmpRatios` | 1.0 | per-nucleus amplitude multipliers (scalar or list) |
-| `Treshold` | 1e-3 | drop orientations with normalised weight below this (§12.1 item 6) |
+| `Treshold` | 1e-3 | drop orientations with normalised weight below this (§12.1 item 6), and product-rule amplitudes below `Treshold·max|a|` (§6.3) |
 | `Verbosity` | False | print timings |
 
 Methods (public): `set`, `setFromCtrl`, `getDefaultDict`, `getToolTips`,
 `nGridPoints(grid, nKnots)`, `nKnotsForGridPoints(target, grid)`,
 `diagonalBox(axis0, axis1, fmin, fmax, antidiagspan)` (§8.1).
 
-v0.9 declares `ProdRule`, `AmpRatios`, `Treshold`, `Symmetry` but never uses them;
-the rebuild must either implement them as specified here or remove them from the
-GUI. Implementing is preferred.
+v0.9 declared `ProdRule`, `AmpRatios`, `Treshold`, `Symmetry` without using any of
+them. `ProdRule` and `Treshold` were implemented in place on 2026-10-30 (§6.3);
+`AmpRatios` and `Symmetry` are still unused, and the rebuild must either implement
+them as specified here or remove them from the GUI. Implementing is preferred.
 
 ---
 
@@ -314,42 +319,108 @@ a_{ijklmn}= M_{il}\,M^*_{jl}\,M_{jn}\,M^*_{kn}\,M_{km}\,M^*_{im}
 $$
 
 (v0.9: `M[i,l]*cM[l,j]*M[j,n]*cM[n,k]*M[k,m]*cM[m,i]` with `cM = M.conj().T`),
-the τ-dependent ("blind-spot") factor
+the two τ-dependent ("blind-spot") phases
 
 $$
-b_{ijklmn}(\tau)= e^{-2\pi i(\omega^\alpha_{ij}+\omega^\beta_{lm})\tau}+e^{+2\pi i(\omega^\alpha_{kj}+\omega^\beta_{nm})\tau},
+e_1 = e^{-2\pi i(\omega^\alpha_{ij}+\omega^\beta_{lm})\tau},\qquad
+e_2 = e^{+2\pi i(\omega^\alpha_{kj}+\omega^\beta_{nm})\tau},
 $$
 
 the optional dead-time phase $p=e^{-2\pi i(\omega^\alpha_{ik}+\omega^\beta_{ln})t_\mathrm{dead}}$,
-and the orientation weight $w(\mathbf l)$ (§7). It contributes two peaks:
+and the orientation weight $w(\mathbf l)$ (§7). It contributes two peaks, one per
+electron coherence transfer pathway, normalised by $4/d$:
 
-| peak at (ν₁, ν₂) | complex amplitude |
-|---|---|
-| $(\omega^\alpha_{ik},\ \omega^\beta_{ln})$ | $a\,b\,p\,w$ |
-| $(\omega^\beta_{ln},\ \omega^\alpha_{ik})$ | $a^*\,b\,p\,w$ |
+| pathway | peak at (ν₁, ν₂) | complex amplitude |
+|---|---|---|
+| αβ | $(\omega^\alpha_{ik},\ \omega^\beta_{ln})$ | $(4/d)\,a^*\,e_1\,p\,w$ |
+| βα | $(\omega^\beta_{ln},\ \omega^\alpha_{ik})$ | $(4/d)\,a\,e_2\,p\,w$ |
+
+**Each pathway carries one phase, not both**, and $e_1$ goes with $a^*$ while
+$e_2$ goes with $a$. v0.9 gave both pathways $b = e_1 + e_2$ and swapped $a$ and
+$a^*$ between them. For $I=\tfrac12$ that is invisible: §4.6 symmetrises every
+peak about the diagonal and the two versions then agree to rounding. For
+$I\ge 1$ peak *positions* stay right but relative *intensities* are wrong — by
+tens of percent on ¹⁴N — which corrupts any intensity fit. Fixed in place on
+2026-10-30; see `hyscore4_fix_for_I_ge_1.md` for the evidence. The $4/d$ makes
+I = ½ output identical to v0.9's and puts 4- and 6-pulse data on one scale.
 
 #### 4.5.1 Mandatory contraction (performance-critical)
 
 The naive sum runs over $d^6$ index tuples per orientation ($d=2I+1$:
-64, 729, 4096, 46 656, 262 144 for I = ½…7/2). Because $b$ is a sum of two
-products that each separate in $j$ and in $m$, contract $j$ and $m$ first:
+64, 729, 4096, 46 656, 262 144 for I = ½…7/2). Each pathway separates in $j$ and
+in $m$, so contract those two indices first:
 
 $$
 \begin{aligned}
-X^{(1)}_{iln}&=\textstyle\sum_j M^*_{jl}M_{jn}\,e^{-2\pi i\omega^\alpha_{ij}\tau}, &
-Y^{(1)}_{ikl}&=\textstyle\sum_m M_{km}M^*_{im}\,e^{-2\pi i\omega^\beta_{lm}\tau},\\
+X^{(1)}_{iln}&=\textstyle\sum_j M_{jl}M^*_{jn}\,e^{-2\pi i\omega^\alpha_{ij}\tau}, &
+Y^{(1)}_{ikl}&=\textstyle\sum_m M^*_{km}M_{im}\,e^{-2\pi i\omega^\beta_{lm}\tau},\\
 X^{(2)}_{kln}&=\textstyle\sum_j M^*_{jl}M_{jn}\,e^{+2\pi i\omega^\alpha_{kj}\tau}, &
 Y^{(2)}_{ikn}&=\textstyle\sum_m M_{km}M^*_{im}\,e^{+2\pi i\omega^\beta_{nm}\tau},
 \end{aligned}
 $$
 
 $$
-\mathcal A_{ikln}= M_{il}\,M^*_{kn}\,\big(X^{(1)}_{iln}Y^{(1)}_{ikl}+X^{(2)}_{kln}Y^{(2)}_{ikn}\big).
+\mathcal A^{\alpha\beta}_{ikln}= \tfrac4d\,M^*_{il}\,M_{kn}\,X^{(1)}_{iln}Y^{(1)}_{ikl},
+\qquad
+\mathcal A^{\beta\alpha}_{ikln}= \tfrac4d\,M_{il}\,M^*_{kn}\,X^{(2)}_{kln}Y^{(2)}_{ikn},
 $$
+
+binned at $(\omega^\alpha_{ik},\omega^\beta_{ln})$ and
+$(\omega^\beta_{ln},\omega^\alpha_{ik})$ respectively. The $M$ factors of the αβ
+pathway are conjugated relative to the βα pathway, which is what $a^*$ versus $a$
+above amounts to; $\mathcal A^{\alpha\beta}$ is *not* the conjugate of
+$\mathcal A^{\beta\alpha}$, because conjugating $X^{(2)}$ exchanges $i$ and $k$.
 
 This gives the identical spectrum with $d^4$ peaks and $O(d^5)$ work. Implement
 with `np.einsum(..., optimize=True)` **batched over orientations** (leading axis
-`o`). Verify against the brute $d^6$ sum in a test for I = ½ and I = 1 (§17).
+`o`). Verify against the brute $d^6$ sum in a test for I = ½ and I = 1 (§17) —
+and note that an I = ½ test alone passes for the wrong pairing too, so the I = 1
+case is the one that carries the check. Better still, verify against a full
+density-matrix simulation as `tmp/check_amplitudes.py` does.
+
+### 4.5.2 6-pulse HYSCORE, and the pathway form of both sequences
+
+Sequence (π/2)ᵧ–τ₁–(π)ᵧ–τ₁–(π/2)ₓ–t₁–(π)ₓ–t₂–(π/2)ₓ–τ₂–(π)ₓ–τ₂–echo: the 4-pulse
+sequence with each fixed τ period replaced by a refocused block. Selected by
+`Exp.Sequence`, with the second fixed delay in `Exp.tau2`.
+
+Both sequences fit one template, so they are **one code path with different
+operators**, not two implementations. With ideal pulses the echo is a sum over
+electron coherence transfer pathways; let $x$ be the manifold during $t_1$ and
+$y$ the manifold during $t_2$, and $U_x(t)=V_x e^{-2\pi i D_x t}V_x^\dagger$:
+
+$$E^{xy}(t_1,t_2)=\tfrac1d\,\mathrm{tr}\big[B\,U_y(t_2)U_x(t_1)\,X\,U_x(-t_1)U_y(-t_2)\big]$$
+
+$X$ is the preparation operator (everything before $t_1$), $B$ the detection
+operator (everything after $t_2$, cycled to the front under the trace):
+
+| sequence, pathway | electron factor | $X$ | $B$ |
+|---|---|---|---|
+| 4-pulse, αβ and βα | $+1$ | $U_\alpha(\tau)U_\beta(-\tau)$ | $U_\alpha(-\tau)U_\beta(\tau)$ |
+| 6-pulse, αβ₊ and βα₊ | $-1$ | $U_\beta(\tau_1)U_\alpha(\tau_1)U_\beta(-\tau_1)U_\alpha(-\tau_1)$ | $U_\beta(-\tau_2)U_\alpha(-\tau_2)U_\beta(\tau_2)U_\alpha(\tau_2)$ |
+| 6-pulse, αβ₋ and βα₋ | $+1$ | $U_\alpha(\tau_1)U_\beta(\tau_1)U_\alpha(-\tau_1)U_\beta(-\tau_1)$ | as above |
+
+Only the *relative* sign of the ± pathways is physical; it is what cancels the
+$t$-independent part and leaves the modulation. With $W=V_x^\dagger V_y$,
+$X'=V_x^\dagger X V_x$ and $B'=V_y^\dagger B V_y$, the trace becomes $d^4$
+amplitudes at frequency pairs $(\omega^x_{jl},\,\omega^y_{qt})$:
+
+$$\mathcal A_{jl,qt}=\tfrac4d\,B'_{tq}\,(W^\dagger)_{qj}\,X'_{jl}\,W_{lt}
+\qquad\text{(`np.einsum("tq,jq,jl,lt->jlqt", B', W.conj(), X', W)`)}$$
+
+For 4-pulse this reproduces §4.5 exactly and costs $d^4$ amplitudes with $O(d^4)$
+work — no $d^6$ expansion and no contraction to derive, which is why it is the
+better route for I ≥ 3/2. The $4/d$ is the §4.5 normalisation. Nothing depends on
+$t_1$ or $t_2$: the fixed delays enter only through $X$ and $B$, so blind spots
+are already inside the amplitudes.
+
+**The one trap.** Going from αβ to βα swaps *only* the manifolds during $t_1$ and
+$t_2$ — evaluate the same $X$ and $B$ in the other basis. Exchanging α and β
+everywhere, inside $X$ and $B$ too, maps $X_+ \leftrightarrow X_-$ and is right
+for I = ½ only; for I ≥ 1 it is wrong by a third of the signal.
+
+For the product rule the ± pathways must stay apart until the nuclei have been
+multiplied (§6.3). Derivation and validation: `hyscore6_frequency_domain_methodology.md`.
 
 ### 4.6 Stick spectrum → binned map
 
@@ -519,8 +590,9 @@ README claims arbitrary S; the engine never supported it).
    2. `Dα, Vα = np.linalg.eigh(Hα)`; same for β (eigh is batched natively).
    3. `M = Vα.conj().transpose(0,2,1) @ Vβ`; `ωα = Dα[:, :, None] − Dα[:, None, :]`,
       likewise `ωβ`.
-   4. Contracted amplitudes `𝒜[o,i,k,l,n]` (§4.5.1), times `ak[o]`, times the
-      dead-time phase, times `AmpRatios[k]`.
+   4. Amplitudes: for 4-pulse either the contraction (§4.5.1) or the pathway
+      template (§4.5.2); for 6-pulse the template, which is the only route that
+      covers it. Times `ak[o]`, the dead-time phase and `AmpRatios[k]`.
    5. Peak frequencies `ωα[o,i,k]`, `ωβ[o,l,n]` broadcast to the same shape.
 4. Combine nuclei (§6.3), bin (§4.6), broaden (§4.7).
 
@@ -541,12 +613,24 @@ memory stays bounded for I ≥ 5/2.
   orientation, applied separately to the (α→ν₁, β→ν₂) and (β→ν₁, α→ν₂) branches.
   Equivalent nuclei (`nNucs > 1`) are combined with themselves the same way.
   Peak counts multiply, so prune amplitudes below `Treshold·max|a|` after each
-  combination. **[AUTHOR DECISION]** confirm the exact normalisation of the
-  product-rule expression (½ prefactor per branch) against a reference
-  (EasySpin `saffron`) before enabling by default; ship with `ProdRule = False`
-  as default until validated.
-- `nNucs` is ignored by v0.9's simulation; the rebuild applies it through the
-  product rule, or (sum rule) multiplies that nucleus's amplitudes by `nNucs`.
+  combination. The product runs over the *eCTPs*, not over the total signals:
+  4-pulse HYSCORE has two (αβ, βα), 6-pulse HYSCORE four (αβ±, βα±), so the
+  6-pulse amplitude routines must keep their ± pathways apart while combining and
+  sum them only at the end — adding them first destroys the phase cancellation
+  that removes the inter-nuclear combination peaks. Each nucleus enters as its
+  modulation normalised to 1 in the absence of modulation (divide by `4·ak` and
+  the pathway's electron factor), so the pathway factor is carried exactly once.
+- `nNucs` applies through the product rule, or (sum rule) multiplies that
+  nucleus's amplitudes by `nNucs`. It covers copies sharing one tensor in one
+  orientation; symmetry-related nuclei need their own `Nucs` entries.
+
+*Implemented in place 2026-10-30, and the normalisation validated — against a
+full density-matrix simulation of the whole multi-nucleus system (ideal pulses,
+coherence-order projection after every pulse) rather than EasySpin `saffron`.
+Exact for ¹H+¹³C, ¹H+¹⁴N, ¹H+¹³C+¹⁴N and 2×¹H+¹³C, both sequences, both
+amplitude routes: reference/engine is one constant over the (T₁,T₂) grid,
+spread ≤ 6e-14. `ProdRule` therefore stays `True` by default. Reproduces Fig. 7
+of Kasumaj & Stoll, JMR 190 (2008) 233 — see `kasumaj_fig7.py`.*
 
 ### 6.4 Notes on what is *not* in the model
 
@@ -997,7 +1081,8 @@ For dataset k at θ: $e_k$, $s_k$, $N_k$, $\mathrm{SSE}_k$, $\mathrm{null}_k=\lV
 
 1. **No Python loop over orientations.** Batch `eigh`, matrix products and
    `einsum` along a leading orientation axis.
-2. **Use the d⁴ contraction (§4.5.1)**, never the d⁶ index expansion.
+2. **Use the d⁴ contraction (§4.5.1) or the pathway template (§4.5.2)**, never
+   the d⁶ index expansion — it is 6× the work already at I = 5/2.
 3. **Bin with `np.bincount`** (real and imaginary separately), never `np.add.at`,
    never `np.concatenate` inside a loop — preallocate or concatenate once.
 4. **Cache everything that depends only on Sys** (`preCompute`): operators,
@@ -1211,13 +1296,13 @@ Rules for the rebuild:
 
 | # | Location (v0.9) | Defect | Required behaviour |
 |---|---|---|---|
-| 1 | `SysPar.setNucs` | Q_eta zeroed when given / NameError when absent; non-EasySpin sign | §3.1 |
+| 1 | `SysPar.setNucs` | Q_eta zeroed when given / NameError when absent; non-EasySpin sign | §3.1 — **fixed in place** |
 | 2 | `hyscore_sim.compute_weights` (`g_eff+HFC`) | multiplicity list built outside the per-nucleus loop | §7.2 |
 | 3 | `build_spin_operators` | `Qpa[ii].np.pi` typo in 3×3 Q branch | §4.1 |
 | 4 | `compute_transitions` | per-orientation Python loop, d⁶ expansion, `concatenate` in loop, `np.add.at` | §6.2, §12.1 |
-| 5 | `optHYSCORE` | `ProdRule`, `AmpRatios`, `Treshold`, `Symmetry` unused; `nNucs` ignored in simulation | §3.3, §6.3 |
+| 5 | `optHYSCORE` | `ProdRule`, `AmpRatios`, `Treshold`, `Symmetry` unused; `nNucs` ignored in simulation | §3.3, §6.3 — **fixed in place** for `ProdRule`, `Treshold`, `nNucs`; `AmpRatios` and `Symmetry` still open |
 | 6 | `computeOrisel_eig` | nuclear Zeeman sign opposite to simulation; |m.e.| not squared; double Python loop | §7.3 |
-| 7 | `tDead` | used in µs while documented nowhere | ns, §2 |
+| 7 | `tDead` | used in µs while documented nowhere | ns, §2 — **fixed in place** |
 | 8 | `brukerread` | undefined `file_path`, undefined `name`; 3D return for 2D data | §9.1 |
 | 9 | `loadData` | `DSCR` vs `DSRC` key; digit-filter parsing of field/tau | §9.2 |
 | 10 | `update_FFT` | per-row `polyfit` loops; full meshgrid windows; axis step from `X[2]-X[1]` | §9.5 |
@@ -1244,8 +1329,10 @@ The author tests the GUI personally; automated tests cover the engine.
 4. `nKnotsForGridPoints` returns the closest rung (brute-force comparison).
 5. I = ½ frequencies equal $|\mp\tfrac12A^{\mathsf T}\mathbf n-\nu_I\mathbf l|$ for random
    orientations/tensors.
-6. Contracted amplitudes (§4.5.1) equal the brute d⁶ sum to 1e-10 for I = ½ and
-   I = 1 with random Hamiltonians.
+6. Contracted amplitudes (§4.5.1) equal the brute d⁶ sum, and the pathway
+   template (§4.5.2) equals both, to 1e-10 for I = ½ and I = 1 with random
+   Hamiltonians. Both sequences against a full density-matrix simulation for
+   I = ½, 1, 3/2: reference/route is one constant over the (t₁,t₂) grid.
 7. Single ¹H, isotropic A < 2ν_I, no orientation selection: peaks at
    (ν_α, ν_β) = (ν_I + A/2, |ν_I − A/2|) and its mirror in the (+,+) quadrant, within one bin.
 8. `bincount` binning equals the `np.add.at` reference.
@@ -1294,7 +1381,11 @@ items). Do not start the next phase before the author confirms.
   correlating nuclear frequencies of the α and β electron-spin manifolds.
 - **Orientation selection** — only molecules whose EPR line falls within the
   microwave excitation bandwidth contribute; modelled by the weights `ak`.
-- **Blind spots** — τ-dependent suppression of cross peaks (the factor *b*, §4.5).
+- **Blind spots** — τ-dependent suppression of cross peaks (the phases *e₁*, *e₂*
+  of §4.5, or equivalently the operators *X* and *B* of §4.5.2).
+- **eCTP** — electron coherence transfer pathway: the sequence of electron
+  coherence orders during the free-evolution periods. 4-pulse HYSCORE has two,
+  6-pulse four (§4.5.2); the product rule multiplies nuclei within one (§6.3).
 - **Skyline projection** — maximum (not sum) along one axis of the 2D map.
 - **Tilted box / analysis box** — §8.1; the only region ever fitted.
 - **Credible level / HPD** — §11.5 item 4.

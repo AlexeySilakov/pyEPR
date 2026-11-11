@@ -516,7 +516,8 @@ class PropGridPanel(wx.Panel):
             hit = self.pg.HitTest(event.GetPosition())
             prop = hit.GetProperty() if hit is not None else None
             txt = prop.GetHelpString() if prop is not None else ''
-        except Exception:
+        except Exception as fault:
+            theme.report_fault("hit-testing the property grid for a tooltip", fault)
             txt = ''
         if txt == self.lastTip:
             return
@@ -640,7 +641,8 @@ class PropGridPanel(wx.Panel):
                 if hasChoices:
                     try:
                         value = par[key][1].index(par[key][0])
-                    except:
+                    except Exception as fault:
+                        theme.report_fault(f"finding the stored value of '{key}' in its choice list", fault)
                         value=0
                     choices= par[key][1]
                 else:

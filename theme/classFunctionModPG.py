@@ -456,8 +456,9 @@ class FunctionModPanel(wx.lib.scrolledpanel.ScrolledPanel):
             event.Skip()      # EVT_KILL_FOCUS must keep propagating
         try:
             self.set_variable_value(spin, float(spin.GetTextValue()))
-        except (TypeError, ValueError):
-            pass
+        except (TypeError, ValueError) as fault:
+            theme.report_fault(f"committing the typed text {spin.GetTextValue()!r} to a "
+                               f"function-modifier variable", fault)
         self.recompute_all()
 
     def set_variable_step(self, spin, step):

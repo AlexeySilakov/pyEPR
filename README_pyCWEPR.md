@@ -16,7 +16,7 @@ Requirements: `pip install wxPython numpy scipy matplotlib`
 
 | File | Contents |
 |---|---|
-| `pyCWEPR.py` | The program: `MainFrame`, `FileBrowserPanel`, `MatplotlibPanel`, `TabulatedPanel`, processing (`MainFrame.process`), session XML |
+| `pyCWEPR.py` | The program: `MainFrame`, `FileBrowserPanel`, `MatplotlibPanel`, `TabulatedPanel`, `PowerSaturationFrame`, processing (`MainFrame.process`), session XML |
 | `theme/` | Shared with pyHYSCORE: `theme.py` (pill widgets, `Card`, `draw_curve_icon`, spin-box Enter handling), `classPropGridPanel.py`, `classFunctionModPG.py` |
 | `spin_system/sys_functions.py` | Expression engine used by `classFunctionModPG` |
 | `readers/` | `brukerread.py` (Bruker BES3T/ESP), `eprcsvread.py` (Magnettech CSV), `eprxmlread.py` (Magnettech data XML: `xmlread`, same `ax, data, dsc` shape as `csvread`) |
@@ -27,15 +27,16 @@ See the module map in [`README.md`](README.md) for the full folder layout.
 ## Window layout
 
 ```
-┌ toolbar: [folder][up] | [save] | [deriv][abs][DI] …… [B/g][grid][theme] ┐
+┌ toolbar: [folder][up][load all] | [save] | [deriv][abs][DI] | [saturation] …… [B/g][grid][theme] ┐
 │◂│ file browser │ plot (checkboxes, canvas, nav toolbar) │ tabs │▸│
 └ status: [message] [cursor B / g / y readout] ┘
 ```
 
 ## Input formats
 
-* **Magnettech MS-5000 `*_result.csv`**: the field axis is in mT and the MW
-  frequency comes from `Additional.Frequency`.
+* **Magnettech MS-5000 `*_result.csv`**: the field axis is in mT, the MW
+  frequency comes from `Additional.Frequency` and the MW power from
+  `Recipe.MicrowavePower` (already in mW).
 * **Plain CSV / TXT** (any `.csv` that is not a Magnettech result, or `.txt`,
   `.dat`, `.asc`). Columns are separated by `,`, `;`, tab or spaces; with `;`
   or tab a decimal comma also works.
@@ -43,10 +44,14 @@ See the module map in [`README.md`](README.md) for the full folder layout.
     optional row of column names comes next, then the numbers.
   * The first column is the field, in mT, or in G if its name says so. The
     spectrum is the column whose name contains "deriv", or else the second
-    column. `# MW frequency [GHz]: …` sets the frequency.
+    column. `# MW frequency [GHz]: …` sets the frequency and
+    `# MW power [mW]: …` the power.
   * This is the format **Export ASCII** writes, so exported files load back.
 * **Bruker `.DSC/.DTA`** (and ESP `.par/.spc` through `brukerread`): a field
-  axis in G is converted to mT. Complex data uses the real channel.
+  axis in G is converted to mT. Complex data uses the real channel. The MW
+  power comes from `Power` (`W`, `mW`, `uW` or `nW`, converted to mW) or from
+  the ESP `MP`; an attenuation alone (`PowerAtten`, in dB) says nothing about
+  the absolute power, so it leaves the power at 0.
 * **XML**
   * A *Magnettech data XML* (`<ESRXmlFile>`, saved next to the `_result.csv`)
     holds time traces, not a spectrum. The field trace B(t) maps the
@@ -70,6 +75,13 @@ See the module map in [`README.md`](README.md) for the full folder layout.
 
 Ctrl- or Shift-click selects several files in the browser. **Load** and **+ BG**
 then load all of them.
+
+**Load all** (toolbar) loads every file the browser lists, so the filter decides
+what comes in. It redraws once at the end instead of after every file, and a
+file that will not read is skipped and named in one list afterwards. Because a
+Magnettech measurement is both a `.csv` and an `.xml`, a filter that passes both
+loads it twice; the confirmation says so and names the count, and the CSV or XML
+filter loads each measurement once.
 
 **Header** (in the file browser) shows a file's parameters in a popup without
 loading the file. **Header** on the Data and Background tabs does the same for
@@ -117,8 +129,13 @@ when loaded, which can shift their DI values slightly.
 * In the Phase and Integrate tabs each group of controls sits on its own
   shaded card. **Right-click** a phase or integration-range number box to
   choose its arrow step.
-* **Data**: Show, MW frequency, display Scale, display Y shift and a
-  read-only DI for each spectrum. Also: delete, header, and reorder (▲▼).
+* **Data**: Show, MW frequency, **MW power [mW]**, display Scale, display Y
+  shift and a read-only DI for each spectrum. Also: delete, header, and
+  reorder (▲▼).
+  * The MW power comes from the file header where the format states one, and
+    is 0 otherwise; it can be typed in. It is what the power saturation window
+    places each spectrum on the power axis by, and it is saved in sessions and
+    in **Export ASCII**.
   * **Compare** sets the normalisation: As is / Max (derivative peak-to-peak
     = 1) / DI (double integral = 1).
   * **Stack offset**: vertical step between overlaid spectra.
@@ -228,7 +245,8 @@ when loaded, which can shift their DI values slightly.
   * Drag a dashed line to move that integration limit. A limit wins over a
     region edge at the same place.
 * **Double-click a spectrum line**, in any row, to make it the current
-  spectrum. Where lines overlap, a non-current one is chosen. **Double-click
+  spectrum. Where lines overlap, a non-current one is chosen. This one works
+  whether or not Zoom/Pan is on. **Double-click
   empty space** to go back to the Home view, like the plot toolbar's Home.
 * **Ctrl-Z** switches on zoom-to-rectangle for one zoom. After that zoom the
   mouse goes back to normal. In a text box, Ctrl-Z stays undo.
@@ -253,8 +271,67 @@ when loaded, which can shift their DI values slightly.
   * A fixed range survives redraws and is saved in sessions. Tick Autoscale
     to release it.
 
+## Power saturation window
+
+The toolbar's saturation button opens a separate window that plots a signal
+measure of every spectrum against √(MW power) and fits it. It keeps the theme,
+the shaded cards and the plot toolbar of the main window, and the options sit on
+cards in a left pane whose width the splitter sets.
+
+* The points come from the same processed results the main plot draws, so a
+  background, phase, baseline or integration-range change updates them at once.
+  Display Scale, Y shift and the Compare normalisation are display-only and stay
+  out of the curve.
+* The spectra are the ones the main window **shows**: unticking a spectrum there
+  takes its point out of the plot and the fit at once. A spectrum whose MW power
+  is 0 has no place on the power axis and stays out, with a note under the cards.
+* **Signal**: first the **trace** -- derivative, absorption or double integral --
+  then the **measure** on it: the value **at a field** you type, or its
+  **maximum** (the default, on the double integral). "Max" of the absorption is
+  the usual "max absorption", and "Max" of the double integral is the DI of a
+  curve that rises to a plateau. The field box is greyed out unless the measure
+  is "At field"; a spectrum that does not reach the chosen field stays out and
+  says so.
+* **Plot**: y is either the signal S or S/√P. S vs √P rises and bends over;
+  S/√P vs √P is flat until saturation sets in and then falls. **Right-click an
+  axis** for a logarithmic or linear scale -- x and y separately.
+* **Saturation fit** of the Portis/Castner saturation law, typeset on the card
+  (matplotlib mathtext, drawn in the theme's text colour at the window's DPI, so
+  it follows a theme switch and stays sharp):
+
+      S = A·√P / (1 + P/P_sat)^ε
+
+  * ε is the saturation exponent: **1.5** for a homogeneously broadened line
+    (the packet shrinks *and* broadens with power) and **0.5** for a fully
+    inhomogeneous one (the envelope width is fixed, so only the packets
+    saturate). Values in between mean partial inhomogeneity, which is the usual
+    case for a nitroxide carrying unresolved hyperfine structure.
+  * P_sat is the scale power of the saturation. The readout under the buttons
+    also gives the **half-saturation power** P½ = P_sat·(2^(1/ε) − 1), the power
+    at which the signal is half of the unsaturated A·√P; that is the quantity
+    the spin-label accessibility literature reports, and it is the one to
+    compare between samples, because it does not move with ε.
+  * Each parameter has a value box (type or step it; the curve follows at once,
+    which is the hand fit) and a **fix** box that holds it out of the automatic
+    fit. The arrow step is about 1% of the value until you set one by
+    **right-clicking** the box, as on the other number boxes of the program; a
+    step set that way is kept when a fit changes the value. The field box takes
+    the same menu.
+  * **Fit** runs a bounded least-squares fit of the free parameters on **S/√P**,
+    whichever y axis is drawn: dividing by √P flattens the unsaturated points,
+    so they -- not the saturated ones -- set the amplitude A. **Guess** reads
+    starting values off the points. Below the buttons: the number of points, the
+    RMSD and R² (both in that same S/√P space) and P½.
+* **Save CSV** writes one comma-separated file: `#` lines with the signal, the
+  equation, every parameter (marked when fixed), the derived P½, the space the
+  fit worked in, the RMSD, R² and the point count, then the points (title, P, √P, signal, signal/√P, the model there) and
+  the dense model curve in four more columns beside them, cells empty where one
+  block is shorter. It opens in Excel and Origin; with pandas use
+  `read_csv(f, comment='#')`.
+
 ## Not (yet) included
 
 * Automatic phase or background-scale fitting. All corrections are manual.
 * DI normalisation by acquisition parameters (modulation, power, Q, gain,
-  temperature). Only the raw DI is reported, as requested.
+  temperature). Only the raw DI is reported, as requested -- the power
+  saturation window divides by √P itself where that is what is wanted.

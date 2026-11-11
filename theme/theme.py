@@ -105,6 +105,18 @@ def get_theme():
     return _CURRENT_THEME
 
 
+_REPORTED_FAULTS = set()
+
+
+def report_fault(where, fault):
+    """Name a swallowed fault in the command window, once per site and message: these guards sit
+    in per-widget loops, so printing every time would repeat for every widget of every repaint."""
+    key = (where, type(fault).__name__, str(fault))
+    if key not in _REPORTED_FAULTS:
+        _REPORTED_FAULTS.add(key)
+        print(f"[theme] {where} failed: {type(fault).__name__}: {fault}")
+
+
 def strip_native_visual_style(win):
     """On Windows, native edit/combo controls (TextCtrl, SpinCtrl,
     Choice, ComboBox...) draw their border/chrome via UxTheme, which
@@ -121,8 +133,8 @@ def strip_native_visual_style(win):
         hwnd = win.GetHandle()
         if hwnd:
             ctypes.windll.uxtheme.SetWindowTheme(hwnd, "", "")
-    except Exception:
-        pass
+    except Exception as fault:
+        report_fault("stripping the native visual style of a control", fault)
 
 
 def _theme_listctrl_header(lc, t):
@@ -138,8 +150,8 @@ def _theme_listctrl_header(lc, t):
         attr.SetBackgroundColour(wx.Colour(t["ctrl_bg"]))
         attr.SetTextColour(wx.Colour(t["text"]))
         lc.SetHeaderAttr(attr)
-    except Exception:
-        pass
+    except Exception as fault:
+        report_fault("colouring a list control's column header", fault)
 
 
 def theme_control(w):
@@ -159,8 +171,8 @@ def theme_control(w):
     try:
         w.SetBackgroundColour(wx.Colour(t["ctrl_bg"]))
         w.SetForegroundColour(wx.Colour(t["text"]))
-    except Exception:
-        pass
+    except Exception as fault:
+        report_fault("colouring a native control", fault)
     # wx.SpinCtrl/SpinCtrlDouble are composites on MSW: the visible text
     # area is a *separate* child TextCtrl (GetBackgroundColour on the
     # outer control always reports the native default no matter what you
@@ -173,8 +185,8 @@ def theme_control(w):
                 try:
                     child.SetBackgroundColour(wx.Colour(t["ctrl_bg"]))
                     child.SetForegroundColour(wx.Colour(t["text"]))
-                except Exception:
-                    pass
+                except Exception as fault:
+                    report_fault("colouring a spin control's text field", fault)
 
 
 def bind_spin_enter(spin, handler=None):
@@ -228,8 +240,8 @@ def bind_spin_enter(spin, handler=None):
                     else getattr(spin, 'GetTextValue', lambda: None)())
             try:
                 spin.SetValue(type(spin.GetValue())(float(text)))
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as fault:
+                report_fault(f"committing the typed text {text!r} to a spin control", fault)
             if handler is not None:
                 handler()
     # Bind on exactly ONE window: a compound control's child key event
@@ -273,49 +285,49 @@ def apply_theme_to_window(win, theme):
             try:
                 w.SetBackgroundColour(ctrl_bg)
                 w.SetForegroundColour(fg)
-            except Exception:
-                pass
+            except Exception as fault:
+                report_fault("colouring a list control", fault)
             _theme_listctrl_header(w, t)
         elif isinstance(w, wx.Gauge):
             try:
                 w.SetBackgroundColour(win_bg)
                 w.SetForegroundColour(wx.Colour(t["accent"]))
-            except Exception:
-                pass
+            except Exception as fault:
+                report_fault("colouring a gauge", fault)
         elif isinstance(w, (wx.TextCtrl, wx.SpinCtrl, wx.SpinCtrlDouble,
                             wx.Choice, wx.ComboBox, wx.StaticText)):
             strip_native_visual_style(w)
             w.SetBackgroundColour(ctrl_bg)
             try:
                 w.SetForegroundColour(fg)
-            except Exception:
-                pass
+            except Exception as fault:
+                report_fault("setting the text colour of an entry field", fault)
         elif isinstance(w, (wx.Button, wx.ToggleButton, wx.RadioButton)):
             strip_native_visual_style(w)
             w.SetBackgroundColour(win_bg)
             try:
                 w.SetForegroundColour(fg)
-            except Exception:
-                pass
+            except Exception as fault:
+                report_fault("setting the text colour of a button", fault)
         elif isinstance(w, wx.SplitterWindow):
             try:
                 w.SetBackgroundColour(border)
-            except Exception:
-                pass
+            except Exception as fault:
+                report_fault("colouring a splitter sash", fault)
             w.SetBackgroundColour(win_bg)
         else:
             # panels, static text, static-box frames, checkboxes, radios...
             w.SetBackgroundColour(win_bg)
             try:
                 w.SetForegroundColour(fg)
-            except Exception:
-                pass
+            except Exception as fault:
+                report_fault("setting the text colour of a panel", fault)
         if isinstance(w, wx.StaticBox):
             try:
                 w.SetForegroundColour(fg)
                 w.SetBackgroundColour(win_bg)
-            except Exception:
-                pass
+            except Exception as fault:
+                report_fault("colouring a static box", fault)
         # Labels, sliders and flat buttons sit on a Card's shading; entry fields stay ctrl_bg to stand out
         if isinstance(w.GetParent(), Card) and not isinstance(
                 w, (wx.TextCtrl, wx.SpinCtrl, wx.SpinCtrlDouble, wx.Choice, wx.ComboBox)):
@@ -324,8 +336,8 @@ def apply_theme_to_window(win, theme):
             walk(child)
         try:
             w.Refresh()
-        except Exception:
-            pass
+        except Exception as fault:
+            report_fault("refreshing a widget after recolouring", fault)
     walk(win)
     # No native-wx.StatusBar case here: those ignore SetForegroundColour on
     # MSW and are not used any more -- see StatusStrip, which the walk above
@@ -509,8 +521,8 @@ def _load_icon(name):
     try:
         if os.path.isfile(path):
             return wx.Image(path, wx.BITMAP_TYPE_PNG)
-    except Exception:
-        pass
+    except Exception as fault:
+        report_fault(f"loading the icon image '{path}'", fault)
     return None
 
 
@@ -1115,7 +1127,8 @@ class SegmentedPill(wx.Panel):
     def _on_paint(self, _evt):
         w, h = self.GetClientSize()
         tc = theme_colors()
-        key = (w, h, tc["win_bg"], tc["tab_inactive"], tc["accent"],
+        bg_key = "card_bg" if isinstance(self.GetParent(), Card) else "win_bg"   # what shows beside the track
+        key = (w, h, tc[bg_key], tc["tab_inactive"], tc["accent"],
               tc["tab_inactive_icon"], tuple(self._choices), self._selection, self._hover)
         bmp, fresh = _cached_paint_bitmap(self, key)
         if bmp is None:
@@ -1132,7 +1145,7 @@ class SegmentedPill(wx.Panel):
         if gc is None:
             mdc.SelectObject(wx.NullBitmap)
             return
-        mdc.SetBackground(wx.Brush(wx.Colour(tc["win_bg"])))
+        mdc.SetBackground(wx.Brush(wx.Colour(tc[bg_key])))
         mdc.Clear()
 
         inactive_fill = wx.Colour(tc["tab_inactive"])
@@ -1683,6 +1696,70 @@ def draw_save_icon(gc, w, h, color):
     gc.DrawRectangle(0.29 * w, 0.54 * h, 0.42 * w, 0.29 * h)
 
 
+def draw_loadall_icon(gc, w, h, color):
+    """Down arrow into an open folder (load every listed file of the folder)."""
+    gc.SetBrush(wx.TRANSPARENT_BRUSH)
+    gc.SetPen(gc.CreatePen(wx.GraphicsPenInfo(color).Width(1.5).Join(wx.JOIN_ROUND)))
+    folder = gc.CreatePath()
+    folder.MoveToPoint(0.08 * w, 0.58 * h)
+    folder.AddLineToPoint(0.08 * w, 0.88 * h)
+    folder.AddLineToPoint(0.92 * w, 0.88 * h)
+    folder.AddLineToPoint(0.92 * w, 0.58 * h)
+    gc.StrokePath(folder)
+    gc.SetPen(gc.CreatePen(wx.GraphicsPenInfo(color).Width(2.0)
+                           .Cap(wx.CAP_ROUND).Join(wx.JOIN_ROUND)))
+    gc.StrokeLine(0.5 * w, 0.10 * h, 0.5 * w, 0.62 * h)
+    arrow = gc.CreatePath()
+    arrow.MoveToPoint(0.27 * w, 0.40 * h)
+    arrow.AddLineToPoint(0.5 * w, 0.66 * h)
+    arrow.AddLineToPoint(0.73 * w, 0.40 * h)
+    gc.StrokePath(arrow)
+
+
+def draw_saturation_icon(gc, w, h, color):
+    """Axes with a curve that rises and levels off (the power saturation window)."""
+    gc.SetBrush(wx.TRANSPARENT_BRUSH)
+    gc.SetPen(gc.CreatePen(wx.GraphicsPenInfo(color).Width(1.2).Cap(wx.CAP_ROUND)))
+    axes = gc.CreatePath()
+    axes.MoveToPoint(0.14 * w, 0.12 * h)
+    axes.AddLineToPoint(0.14 * w, 0.86 * h)
+    axes.AddLineToPoint(0.90 * w, 0.86 * h)
+    gc.StrokePath(axes)
+    gc.SetPen(gc.CreatePen(wx.GraphicsPenInfo(color).Width(1.9)
+                           .Cap(wx.CAP_ROUND).Join(wx.JOIN_ROUND)))
+    curve = gc.CreatePath()
+    for k in range(25):                      # sqrt(P)/(1 + P), the shape of a saturating signal
+        t = k / 24.0
+        p = 7.0 * t * t
+        y = math.sqrt(p) / (1.0 + 0.55 * p) / 0.96
+        if k == 0:
+            curve.MoveToPoint(0.14 * w + t * 0.74 * w, 0.86 * h - y * 0.68 * h)
+        else:
+            curve.AddLineToPoint(0.14 * w + t * 0.74 * w, 0.86 * h - y * 0.68 * h)
+    gc.StrokePath(curve)
+
+
+def draw_deconvolution_icon(gc, w, h, color):
+    """A broad faint peak with a narrow solid one inside it (the lineshape deconvolution window)."""
+    bottom, left, span = 0.84 * h, 0.10 * w, 0.80 * w
+    for width, wide, alpha in ((1.1, 0.30, 0.45), (1.9, 0.11, 1.0)):
+        gc.SetBrush(wx.TRANSPARENT_BRUSH)
+        gc.SetPen(gc.CreatePen(wx.GraphicsPenInfo(
+            wx.Colour(color.Red(), color.Green(), color.Blue(), int(255 * alpha)))
+            .Width(width).Cap(wx.CAP_ROUND).Join(wx.JOIN_ROUND)))
+        peak = gc.CreatePath()
+        for k in range(33):                  # a Gaussian of the given relative width, peak-normalised
+            t = k / 32.0
+            y = math.exp(-((t - 0.5) ** 2) / (2.0 * wide * wide))
+            if k == 0:
+                peak.MoveToPoint(left + t * span, bottom - y * 0.68 * h)
+            else:
+                peak.AddLineToPoint(left + t * span, bottom - y * 0.68 * h)
+        gc.StrokePath(peak)
+    gc.SetPen(gc.CreatePen(wx.GraphicsPenInfo(color).Width(1.1).Cap(wx.CAP_ROUND)))
+    gc.StrokeLine(left, bottom, left + span, bottom)
+
+
 def draw_gridsearch_icon(gc, w, h, color):
     """3x3 heatmap-like grid with a magnifying glass over it (2D Sys
     parameter grid search / fitness map)."""
@@ -1967,16 +2044,16 @@ class CanvasRedrawDebouncer:
         if self._suspended:
             try:
                 del self.canvas.draw
-            except AttributeError:
-                pass
+            except AttributeError as fault:
+                report_fault("restoring the canvas draw method after a resize", fault)
             self._suspended = False
 
     def _on_settle(self, event):
         self._resume()
         try:
             self.canvas.draw()
-        except RuntimeError:
-            pass  # canvas was destroyed while the settle timer was pending
+        except RuntimeError as fault:
+            report_fault("redrawing the canvas after a resize (it may have been destroyed)", fault)
 
     def _on_destroy(self, event):
         self._timer.Stop()
@@ -2021,8 +2098,8 @@ class ResizeFreezeGuard:
             self._frozen = False
             try:
                 self.window.Thaw()
-            except RuntimeError:
-                pass  # window was destroyed
+            except RuntimeError as fault:
+                report_fault("thawing the window after a resize (it may have been destroyed)", fault)
 
     def _on_settle(self, event):
         self._thaw()

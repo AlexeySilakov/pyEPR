@@ -123,6 +123,20 @@ def parse_par(par):
     if 'CenterField' in par:
         res['cf'] = _to_number(strip_unit(par['CenterField'])) * 1e-4
 
+    # MW power in mW: 'Power 2.000e+01 mW' (BES3T .dsc) or 'MP' in mW (ESP .par). Only the
+    # attenuation ('PowerAtten', in dB) says nothing about the absolute power, so that stays 0.
+    res['mwpower'] = 0.0
+    power = str(safeget(par, 'Power', safeget(par, 'MP', ''))).strip()
+    if power:
+        unit = power.split()[-1].lower() if ' ' in power else 'mw'
+        factor = {'nw': 1e-6, 'uw': 1e-3, 'µw': 1e-3, 'mw': 1.0, 'w': 1e3}.get(unit, 0.0)
+        try:
+            res['mwpower'] = _to_number(strip_unit(power)) * factor
+        except ValueError as fault:
+            print(f"[brukerread] MW power '{power}' is not a number ({fault}); it stays 0")
+        if factor == 0.0:
+            print(f"[brukerread] MW power '{power}' is not in W, mW, uW or nW; it stays 0")
+
     if 'IKKF' in par:
         res['complex'] = _is_equal(par['IKKF'], 'CPLX')
     elif 'XQAD' in par:
@@ -481,13 +495,14 @@ def brukerread(filename, return_ax=False, return_dsc=False):
         if isfield(dsc, typ_key):
             axtype = dsc[typ_key]
             if axtype == 'IGD':
-                gf_file = os.path.join(ppath, f'{name}.{typ}GF')
+                # the companion axis file sits beside the .DTA, named <stem>.XGF / <stem>.YGF
+                gf_file = f'{ppath}.{typ}GF'
                 try:
                     with open(gf_file, 'rb') as f:
                         # The GF files contain 64‑bit floats (float64)
                         ax[typ.lower()] = np.fromfile(f, dtype=np.dtype(endian + 'f8'))
-                except Exception:
-                    print(f'Error reading axis file: {gf_file}', file=sys.stderr)
+                except OSError as fault:
+                    print(f'Error reading axis file {gf_file}: {fault}', file=sys.stderr)
 
     # ----- Fallback axes if they are still empty -------------------------------
     if ax.get('x', np.array([], dtype=float)).size != data.shape[0]:

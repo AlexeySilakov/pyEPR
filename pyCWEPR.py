@@ -1222,16 +1222,15 @@ class TabulatedPanel(wx.Panel):
         self.phase_panel = wx.Panel(self.nb_book)
         self.nb_book.AddPage(self.phase_panel, "Phase")
         sizer = wx.BoxSizer(wx.VERTICAL)
-        # Two identical blocks: 'lockin' recombines the lock-in quadratures (first step, Magnettech XML only),
-        # 'phase' mixes in the Hilbert-transform dispersion (after background and derivative baseline)
+        # Two identical blocks: 'lockin' and 'phase' 
         self.slider_phase = {}
         self.spin_phase = {}
         self.lbl_lockin0 = self.btn_lockin0 = None
         for key, label, info in (
                 ('lockin', "Lock-in (modulation) phase θ",
-                 "Magnettech XML Quad-detect enabled Bruker DSC"),
+                 "Magnettech XML and Quad-detect enabled Bruker DSC"),
                 ('phase', "Absorption / dispersion phase φ",
-                 "Mixes in the dispersion (Hilbert transform):\n"
+                 "Hilbert transform of signal (H[s]):\n"
                  "   y = s·cos φ − H[s]·sin φ\n")):
             parent = theme.Card(self.phase_panel, label)
             box = parent.body
@@ -1270,7 +1269,7 @@ class TabulatedPanel(wx.Panel):
         # ---------------- Integrate tab
         self.int_panel = wx.ScrolledWindow(self.nb_book)     # scrolls once there are many fit ranges
         self.int_panel.SetScrollRate(0, 10)
-        self.nb_book.AddPage(self.int_panel, "Integrate")
+        self.nb_book.AddPage(self.int_panel, "Baseline/Int")
         sizer = wx.BoxSizer(wx.VERTICAL)
         card = theme.Card(self.int_panel, "Integration range")
         grid = wx.FlexGridSizer(cols=2, vgap=4, hgap=6)
@@ -1294,8 +1293,8 @@ class TabulatedPanel(wx.Panel):
         # Three identical baseline blocks: 'bl1' on the derivative, 'bl2' on the absorption, 'bl3' on the double integral
         self.spin_order = {}
         self.region_rows = {}
-        for key, label in (('bl1', "Derivative baseline (before 1st integration)"),
-                           ('bl2', "Absorption baseline (before 2nd integration)"),
+        for key, label in (('bl1', "Derivative baseline (raw CW EPR data)"),
+                           ('bl2', "Absorption baseline (after 1st integration)"),
                            ('bl3', "Double-integral baseline (after 2nd integration)")):
             card = theme.Card(self.int_panel, label)
             box = card.body
@@ -1327,10 +1326,10 @@ class TabulatedPanel(wx.Panel):
 
         hint = wx.StaticText(self.int_panel, label=(
             "On the plot (Zoom/Pan off):\n"
-            "• drag a grey region to move it, or its edge to resize\n"
-            "• Shift-drag in any row to add one to that row's baseline\n"
-            "• right-click a region to delete it\n"
-            "• drag a dashed line to change the integration range"))
+            "• Drag a dashed line to change the integration range\n"
+            "• Drag a grey region to move or resize BL region\n"
+            "• Shift-drag in any plot to add BL region\n"
+            "• Right-click deletes BL region\n"))
         sizer.Add(hint, 0, wx.EXPAND | wx.ALL, 6)
 
         self.lbl_DI = wx.StaticText(self.int_panel, label="DI = –")
