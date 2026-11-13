@@ -900,7 +900,13 @@ class HYSCOREsim():
         # vvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvv    
         for ii in range(ndiffnucs):
             # Spin quantum number of this nucleus (MATLAB index is 1‑based)
-            if self.Sys.useFor[ii]=='ori.sel.only': continue
+            if self.Sys.useFor[ii]=='ori.sel.only':
+                # placeholders: HFIx/HFIy/HFIz/Quad stay indexed by nucleus, which is how local_sham reads them
+                self.HFIx.append(None)
+                self.HFIy.append(None)
+                self.HFIz.append(None)
+                self.Quad.append(None)
+                continue
 
             s = self.Sys.I[ii]                     # Sys.I is expected to be a list/array
             mult = int(2 * s + 1)              # dimension of the local space

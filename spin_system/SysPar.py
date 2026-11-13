@@ -215,8 +215,10 @@ class sysPar():
                     raise AttributeError(f"😭 property {sk} is not a part of the Sys class")
                 attr = getattr(self, sk)
 
+                # a nucleus block without its own nNucs entry is one nucleus, not zero
+                fill = 1 if sk=='nNucs' else 0
                 if type(attr)==type(None):
-                    attr = [0]*nPars
+                    attr = [fill]*nPars
 
                 # Grow anything still sized for a smaller system. Most
                 # attributes are cleared by set_All_None() above and get their
@@ -228,9 +230,9 @@ class sysPar():
                 if len(attr) < need:
                     pad = need-len(attr)
                     if type(attr)==np.ndarray:
-                        attr = np.concatenate([attr, np.zeros(pad, dtype=attr.dtype)])
+                        attr = np.concatenate([attr, np.full(pad, fill, dtype=attr.dtype)])
                     else:
-                        attr = list(attr) + [0]*pad
+                        attr = list(attr) + [fill]*pad
 
                 if type(inDict[key][sk])==list: ### from control it may come with choices as a second part of the list
                     attr[inval]=inDict[key][sk][0]

@@ -1694,14 +1694,15 @@ class TabulatedPanel(wx.Panel):
 
         isotopes = list(self.parent.Sys.isotopes().keys())
         selected_idx = isotopes.index(nucname)
+        # float arrays: the property grid writes edits back into them, and an integer array cuts 1.5 down to 1
         nucdict = {'Nucs':[isotopes[selected_idx], isotopes],
                                  'nNucs':1,
-                                 'A':np.array([0, 0, 0]),
-                                 'Apa':np.array([0, 0, 0])}
+                                 'A':np.array([0, 0, 0], dtype=float),
+                                 'Apa':np.array([0, 0, 0], dtype=float)}
         _,I,_=self.parent.Sys.isotopes(isotopes[selected_idx])
         if I[0]>0.5:
-           nucdict['Q']=np.array([0, 0, 0])
-           nucdict['Qpa']=np.array([0, 0, 0])
+           nucdict['Q']=np.array([0, 0, 0], dtype=float)
+           nucdict['Qpa']=np.array([0, 0, 0], dtype=float)
         nucdict['useFor'] = ['sim.only', ['sim.only', 'ori.sel.only', 'all']]
         return nucdict
 
@@ -3351,6 +3352,11 @@ class MainFrame(wx.Frame):
             if 'BGData' in result.keys():
                 self.BGData = result['BGData'].copy()
             if 'Sys' in result.keys():
+                # sessions saved while added nuclei carried integer arrays: made float, or edits would still be cut
+                for block in result['Sys'].values():
+                    for key, val in (block.items() if isinstance(block, dict) else ()):
+                        if isinstance(val, np.ndarray) and val.dtype.kind in 'iu':
+                            block[key] = val.astype(float)
                 self.tabulated_panel.Sys_param.SetFromParClean(result['Sys'].copy())
             if 'Exp' in result.keys():
                 # merged like Opt below, so a session saved before 6-pulse
