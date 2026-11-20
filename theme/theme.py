@@ -1868,6 +1868,25 @@ def draw_grid_icon(gc, w, h, color, on):
         gc.StrokeLine(bx, by + f * bh, bx + bw, by + f * bh)
 
 
+def draw_legend_icon(gc, w, h, color, on):
+    """Plot-legend toggle glyph: a frame holding three legend entries (a line sample, then a
+    thinner 'label' bar). Same glyph in both states (accent fill shows on/off)."""
+    s = min(w, h)
+    bw, bh = s * 0.62, s * 0.50
+    bx, by = (w - bw) / 2.0, (h - bh) / 2.0
+    gc.SetBrush(wx.TRANSPARENT_BRUSH)
+    gc.SetPen(gc.CreatePen(wx.GraphicsPenInfo(color).Width(1.3)))
+    gc.DrawRoundedRectangle(bx, by, bw, bh, s * 0.05)
+    sample = gc.CreatePen(wx.GraphicsPenInfo(color).Width(1.8).Cap(wx.CAP_ROUND))
+    label = gc.CreatePen(wx.GraphicsPenInfo(color).Width(1.0).Cap(wx.CAP_ROUND))
+    for k in range(3):
+        y = by + bh * (k + 1) / 4.0
+        gc.SetPen(sample)
+        gc.StrokeLine(bx + bw * 0.14, y, bx + bw * 0.36, y)
+        gc.SetPen(label)
+        gc.StrokeLine(bx + bw * 0.48, y, bx + bw * (0.86 - 0.12 * (k % 2)), y)
+
+
 def draw_curve_icon(f):
     """Returns a draw_icon(gc, w, h, color, on) callable for IconToggleButton plotting y = f(t) for
     t in [-1, 1], with f in [-1, 1] -- the pyCWEPR plot-row toggles pass the row's line shape

@@ -1,8 +1,10 @@
+import io
 import os
 import re
 import ast
 import copy
 import base64
+import fnmatch
 import traceback
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
@@ -16,6 +18,7 @@ import numpy as np
 from scipy.interpolate import CubicSpline
 from scipy.signal import hilbert
 from scipy.integrate import cumulative_trapezoid
+from scipy.optimize import curve_fit
 
 from matplotlib.backend_tools import Cursors
 from matplotlib.colors import to_hex
@@ -107,6 +110,14 @@ class AxisRangeDialog(wx.Dialog):
 # --------------------------------------------------------------------------- #
 # File Browser Panel
 # --------------------------------------------------------------------------- #
+TITLE_FILTER_TIP = ("Keep only the files whose title matches this, on top of the extension filter.\n"
+                    "Case does not matter, and folders always stay. A plain word matches anywhere\n"
+                    "in the title, so 'nitroxide' finds 'Nitroxide 20 K'. Use * ? [ ] to say exactly\n"
+                    "where: 'T1*' only at the start, '*20 K' only at the end. * on its own, the default,\n"
+                    "keeps everything -- including the files that carry no title.\n"
+                    "Press Enter or click away to apply.")
+
+
 class FileBrowserPanel(wx.Panel, listmix.ColumnSorterMixin):
 
     def __init__(self, parent, mainWindow):
@@ -125,13 +136,22 @@ class FileBrowserPanel(wx.Panel, listmix.ColumnSorterMixin):
         self.lbl_path.Bind(wx.EVT_KILL_FOCUS, self.on_path_entered)
         vbox.Add(self.lbl_path, 0, wx.EXPAND)
 
-        hbox_filter = wx.BoxSizer(wx.HORIZONTAL)
-        hbox_filter.Add(wx.StaticText(self, label="Filter:"), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
+        grid = wx.FlexGridSizer(cols=2, vgap=4, hgap=5)
+        grid.AddGrowableCol(1)
+        grid.Add(wx.StaticText(self, label="Filter:"), 0, wx.ALIGN_CENTER_VERTICAL)
         self.choice_filter = wx.ComboBox(self, choices=list(self.filters), value=self.current_filter,
                                          style=wx.CB_READONLY | wx.BORDER_NONE)
+        self.choice_filter.SetToolTip("Which file extensions the list shows.")
         self.choice_filter.Bind(wx.EVT_COMBOBOX, self.on_filter_changed)
-        hbox_filter.Add(self.choice_filter, 1)
-        vbox.Add(hbox_filter, 0, wx.EXPAND | wx.ALL, 5)
+        grid.Add(self.choice_filter, 1, wx.EXPAND)
+        grid.Add(wx.StaticText(self, label="Title:"), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.txt_keyword = wx.TextCtrl(self, value="*", style=wx.TE_PROCESS_ENTER | wx.BORDER_NONE)
+        self.txt_keyword.SetToolTip(TITLE_FILTER_TIP)
+        self.txt_keyword.Bind(wx.EVT_TEXT_ENTER, self.on_filter_changed)
+        self.txt_keyword.Bind(wx.EVT_KILL_FOCUS, self.on_filter_changed)
+        grid.Add(self.txt_keyword, 1, wx.EXPAND)
+        self.applied = (self.current_filter, '*')    # (extension filter, title pattern) of the shown list
+        vbox.Add(grid, 0, wx.EXPAND | wx.ALL, 5)
 
         self.list = wx.ListCtrl(self, style=wx.LC_REPORT | wx.LC_VRULES | wx.LC_HRULES | wx.BORDER_NONE)
         self.list.InsertColumn(0, "Name", width=300)
@@ -170,10 +190,12 @@ class FileBrowserPanel(wx.Panel, listmix.ColumnSorterMixin):
         # ColumnSorterMixin: two sortable columns, keys in self.itemDataMap
         listmix.ColumnSorterMixin.__init__(self, 2)
         self.items = []          # (name, full_path, is_dir); row data id = index here
+        self.item_images = []
         self.itemDataMap = {}
 
         self.parent.tb_change_folder.Bind(wx.EVT_BUTTON, self.on_change_folder)
         self.parent.tb_up.Bind(wx.EVT_BUTTON, self.on_up_clicked)
+        self.parent.tb_load_all.Bind(wx.EVT_BUTTON, self.on_load_all)
         self.parent.tb_save_session.Bind(wx.EVT_BUTTON, lambda e: self.parent.dumpXML())
         self.list.Bind(wx.EVT_LIST_ITEM_ACTIVATED, self.on_item_activated)
         self.Bind(wx.EVT_WINDOW_DESTROY, lambda e: self.save_path())
@@ -183,8 +205,8 @@ class FileBrowserPanel(wx.Panel, listmix.ColumnSorterMixin):
                 stored = f.readline().strip()
             if os.path.isdir(stored):
                 self.path = stored
-        except OSError:
-            pass
+        except OSError as fault:
+            print(f"[pyCWEPR] Could not read the last folder from {self.ini_file}: {fault}")
         self.lbl_path.SetValue(self.path)
         self.lbl_path.SetInsertionPointEnd()
         self.refresh_file_list()
@@ -207,14 +229,19 @@ class FileBrowserPanel(wx.Panel, listmix.ColumnSorterMixin):
         dirs = sorted([n for n in raw if os.path.isdir(os.path.join(self.path, n))], key=str.lower)
         files = sorted([n for n in raw if not os.path.isdir(os.path.join(self.path, n))
                         and (exts is None or n.lower().endswith(exts))], key=str.lower)
-        # a Bruker .DSC/.DTA pair is one dataset; a Magnettech .csv and .xml of the same name are two
-        same = lambda p: os.path.splitext(p)[0].lower() + ('.dsc' if p.lower().endswith(('.dsc', '.dta'))
-                                                           else os.path.splitext(p)[1].lower())
-        loaded = {same(dd['fullpath']) for dd in self.parent.Data}
-        loadedBG = {same(dd['fullpath']) for dd in self.parent.BGData}
+        same = self.same_key
+        loaded, loadedBG = self.loaded_keys()
+        # title filter: a plain word matches anywhere in the title; * ? [ ] say where
+        keyword = self.txt_keyword.GetValue().strip()
+        pattern = keyword.lower() or '*'
+        if not any(c in pattern for c in '*?['):
+            pattern = f'*{pattern}*'
+        self.applied = (self.current_filter, keyword)
+        hidden = 0
 
         self.list.DeleteAllItems()
         self.items = []
+        self.item_images = []    # icon of each item when not loaded (see update_markers)
         self.itemDataMap = {}
         for name in dirs + files:
             full = os.path.join(self.path, name)
@@ -254,6 +281,10 @@ class FileBrowserPanel(wx.Panel, listmix.ColumnSorterMixin):
                     print(f"[pyCWEPR] Could not read title from '{full}': {e}")
             else:
                 image_id = self.file_img_id
+            if not is_dir and pattern != '*' and not fnmatch.fnmatch(title.lower(), pattern):
+                hidden += 1
+                continue
+            self.item_images.append(image_id)
             if same(full) in loaded:
                 image_id = self.loaded_img_id
             if same(full) in loadedBG:
@@ -276,6 +307,31 @@ class FileBrowserPanel(wx.Panel, listmix.ColumnSorterMixin):
                     self.list.Focus(ridx)
                     self.list.EnsureVisible(ridx)
                     focused = True
+        if hidden:
+            self.parent.statusbar.SetStatusText(f"Title '{keyword}' hides {hidden} of {len(files)} files", 0)
+        elif self.parent.statusbar.GetStatusText(0).startswith("Title '"):
+            self.parent.statusbar.SetStatusText("Ready", 0)     # an earlier keyword's note no longer holds
+
+    @staticmethod
+    def same_key(p):
+        """A Bruker .DSC/.DTA pair is one dataset; a Magnettech .csv and .xml of the same name are two."""
+        return os.path.splitext(p)[0].lower() + ('.dsc' if p.lower().endswith(('.dsc', '.dta'))
+                                                 else os.path.splitext(p)[1].lower())
+
+    def loaded_keys(self):
+        return ({self.same_key(dd['fullpath']) for dd in self.parent.Data},
+                {self.same_key(dd['fullpath']) for dd in self.parent.BGData})
+
+    def update_markers(self):
+        """Re-mark loaded / background files without re-listing the folder (no file is opened)."""
+        loaded, loadedBG = self.loaded_keys()
+        for ridx in range(self.list.GetItemCount()):
+            k = self.list.GetItemData(ridx)
+            key = self.same_key(self.items[k][1])
+            image_id = (self.loadedBG_img_id if key in loadedBG else self.loaded_img_id if key in loaded
+                        else self.item_images[k])
+            if self.list.GetItem(ridx).GetImage() != image_id:
+                self.list.SetItemImage(ridx, image_id)
 
     # ColumnSorterMixin contract
     def GetListCtrl(self):
@@ -299,14 +355,49 @@ class FileBrowserPanel(wx.Panel, listmix.ColumnSorterMixin):
         if len(items) == 1 and items[0][2]:      # a single folder: open it
             self.set_path(items[0][1])
             return
-        for name, full, is_dir in items:
-            if not is_dir:
-                self.parent.loadData(full, BG=False)
+        self.load_files([full for name, full, is_dir in items if not is_dir], BG=False)
 
     def on_loadBG_clicked(self, event):
-        for name, full, is_dir in self.selected_items():
-            if not is_dir:
-                self.parent.loadData(full, BG=True)
+        self.load_files([full for name, full, is_dir in self.selected_items() if not is_dir], BG=True)
+
+    def load_files(self, paths, BG=False):
+        """Load several files with one refresh of the tabs, plot and browser at the end (not one per file).
+        A single file that fails says so at once; with several, the failures come in one list afterwards."""
+        if not paths:
+            return
+        mf = self.parent
+        failed = []
+        with wx.BusyCursor():
+            for full in paths:
+                fault = mf.loadData(full, BG=BG, report=len(paths) == 1, refresh=False)
+                if fault is not None:
+                    failed.append(f"{os.path.basename(full)}: {type(fault).__name__}: {fault}")
+            mf.update_everything()
+        if len(paths) > 1:
+            mf.statusbar.SetStatusText(f"Loaded {len(paths) - len(failed)} of {len(paths)} files"
+                                       + (f", {len(failed)} failed" if failed else ""), 0)
+        if failed and len(paths) > 1:
+            wx.MessageBox("These files were skipped:\n\n" + "\n".join(failed[:20])
+                          + ("\n…" if len(failed) > 20 else ""), "Load", wx.OK | wx.ICON_WARNING)
+
+    def on_load_all(self, event):
+        """Load every file the list shows (the filter decides which) as data, folders and failures skipped."""
+        files = [full for name, full, is_dir in self.items if not is_dir]
+        if not files:
+            wx.MessageBox(f"This folder holds no '{self.current_filter}' files.", "Load all",
+                          wx.OK | wx.ICON_INFORMATION)
+            return
+        # Magnettech writes each measurement as a .csv and an .xml: with a filter that passes both, it loads twice
+        stems = lambda ext: {os.path.splitext(f)[0] for f in files if f.lower().endswith(ext)}
+        both = stems('.csv') & stems('.xml')
+        notes = [f"{len(files)} files from '{self.path}' will be loaded."]
+        if both:
+            notes.append(f"{len(both)} of them are present as both .csv and .xml and so load twice -- "
+                         f"set the filter to CSV or XML to load each measurement once.")
+        if (len(files) > 20 or both) and wx.MessageBox("\n\n".join(notes) + "\n\nContinue?", "Load all",
+                                                       wx.YES_NO | wx.ICON_QUESTION) != wx.YES:
+            return
+        self.load_files(files, BG=False)
 
     def on_header_clicked(self, event):
         items = self.selected_items()
@@ -348,8 +439,11 @@ class FileBrowserPanel(wx.Panel, listmix.ColumnSorterMixin):
             dlg.ShowModal()
 
     def on_filter_changed(self, event):
+        """Either half of the filter changed: the extension list, or the title keyword."""
         self.current_filter = self.choice_filter.GetStringSelection()
-        self.refresh_file_list()
+        if (self.current_filter, self.txt_keyword.GetValue().strip()) != self.applied:
+            self.refresh_file_list()     # clicking away from an unchanged keyword re-reads nothing
+        event.Skip()                     # the keyword box reaches here on kill-focus, which must carry on
 
     def on_change_folder(self, event):
         with wx.DirDialog(self, "Select a folder", defaultPath=self.path,
@@ -405,10 +499,13 @@ class MatplotlibPanel(wx.Panel):
         self.showAbs = True
         self.showDI = True
         self.showGrid = False
+        self.showLegend = True    # spectrum legend in the top row (top toolbar toggle)
         self.norm = 'none'        # 'none' | 'max' | 'DI'
         self.xaxis = 'field'      # 'field' | 'g'
         self.offset = 0.0         # stacking step, fraction of the largest trace in a row
         self.layout = None        # (rows, xaxis) of the last draw: x-zoom survives redraws while it holds
+        self.axes_layout = None   # (rows, xaxis) the current axes were built for: reused while it holds
+        self.hit_cache = {}       # spectrum line -> its points in display pixels (see spec_hits); cleared on draw
         self.drag = None          # region / integration-limit drag in progress (see on_press)
         self.axrows = {}          # axes -> row name of the last draw
         self.artists = {}         # (key, j) -> patches / lines of the current spectrum's markup
@@ -423,6 +520,7 @@ class MatplotlibPanel(wx.Panel):
         self.canvas.mpl_connect('figure_leave_event', lambda e: self.parent.statusbar.SetStatusText("", 1))
         self.canvas.mpl_connect('button_press_event', self.on_press)
         self.canvas.mpl_connect('button_release_event', self.on_release)
+        self.canvas.mpl_connect('draw_event', lambda e: self.hit_cache.clear())    # pixels move with the view
         mainWindow.Bind(wx.EVT_CHAR_HOOK, self.on_key)
 
         self.chk_RawBG = PillCheckBox(self, "Raw & BG")
@@ -467,6 +565,34 @@ class MatplotlibPanel(wx.Panel):
         """Field [mT] <-> plot x. g = G_FACTOR*f/B is its own inverse; field axis or no frequency: unchanged."""
         return G_FACTOR*f/x if self.xaxis == 'g' and f > 0 else x
 
+    def spec_hits(self, event, radius=5.0):
+        """Spectrum lines (gid 'spec<i>') of event.inaxes passing within `radius` px of the mouse.
+        Same answer as Line2D.contains for these x-monotonic traces, but each line's pixel coordinates are
+        computed once per draw and searched by bisection, so hovering stays cheap with many spectra."""
+        ax = event.inaxes
+        if ax is None:
+            return []
+        ex, ey, r = event.x, event.y, radius
+        hits = []
+        for ln in ax.get_lines():
+            if not str(ln.get_gid()).startswith('spec'):
+                continue
+            pts = self.hit_cache.get(ln)
+            if pts is None:
+                xy = ln.get_transform().transform(np.column_stack([ln.get_xdata(), ln.get_ydata()]))
+                xs, ys = xy[:, 0], xy[:, 1]
+                if xs.size > 1 and xs[0] > xs[-1]:
+                    xs, ys = xs[::-1], ys[::-1]
+                pts = self.hit_cache[ln] = (np.ascontiguousarray(xs), np.ascontiguousarray(ys))
+            xs, ys = pts
+            if xs.size == 0 or ex < xs[0] - r or ex > xs[-1] + r:
+                continue
+            i0, i1 = np.searchsorted(xs, (ex - r, ex + r))
+            band = np.concatenate([ys[i0:i1], np.interp((max(ex - r, xs[0]), min(ex + r, xs[-1])), xs, ys)])
+            if np.nanmin(band) - r <= ey <= np.nanmax(band) + r:
+                hits.append(ln)
+        return hits
+
     def hit(self, event):
         """Markup of the current spectrum under the mouse, as (key, j, part): key 'int' (integration
         limit j, part 'line') or 'bl1'/'bl2'/'bl3' (region j, part 'lo'/'hi' = an edge, 'move' = inside).
@@ -493,17 +619,50 @@ class MatplotlibPanel(wx.Panel):
                 return (key, j, 'move')
         return None
 
+    def start_line_drag(self, mode, ii, ax, y0):
+        """(Re)start a drag of spectrum ii's lines from height y0 in ax: mode 'line' (Y shift) or 'scale'.
+        Called again mid-drag when Shift is pressed or released, so the drag continues from where the
+        lines are now in the other mode."""
+        mf = self.parent
+        old = self.drag
+        if old is not None and old['key'] == 'line':
+            # the Y shift moved every row's line: the zero a scale drag keeps fixed moved with it
+            d = mf.Data[ii]['yshift'] - old['orig']
+            for a in self.rowheight:
+                if (a, ii) in self.lineoff:
+                    self.lineoff[(a, ii)] += d*self.rowheight[a]
+        gid = f'spec{ii}'
+        self.drag = {'key': mode, 'ii': ii, 'ax': ax, 'y0': y0,
+                     'orig': mf.Data[ii]['scale' if mode == 'scale' else 'yshift'],
+                     # (yshift, scale) at the press: release compares both, whichever modes were used
+                     'start': old['start'] if old is not None else (mf.Data[ii]['yshift'], mf.Data[ii]['scale']),
+                     'lines': [(ln, np.asarray(ln.get_ydata(), dtype=float).copy())
+                               for a in self.figure.axes for ln in a.get_lines() if ln.get_gid() == gid]}
+
     def on_mouse_move(self, event):
         mf = self.parent
+        if (self.drag is not None and self.drag['key'] in ('line', 'scale')
+                and (self.drag['ax'], self.drag['ii']) not in self.lineoff):
+            print(f"[pyCWEPR] The plot was rebuilt during a {self.drag['key']} drag of spectrum "
+                  f"{self.drag['ii'] + 1}: its axes and offsets are gone, so the drag was dropped")
+            self.drag = None
+        if self.drag is not None and self.drag['key'] in ('line', 'scale'):
+            # Shift decides the mode live: switching rebases the drag at the current mouse height
+            mode = 'scale' if wx.GetKeyState(wx.WXK_SHIFT) else 'line'
+            if mode != self.drag['key']:
+                ax0 = self.drag['ax']
+                self.start_line_drag(mode, self.drag['ii'], ax0, ax0.transData.inverted().transform((event.x, event.y))[1])
+                self.canvas.set_cursor(Cursors.SELECT_REGION if mode == 'scale' else Cursors.RESIZE_VERTICAL)
         if self.drag is not None and self.drag['key'] == 'line':
             # Vertical line drag: mouse height read in the row where it started, so leaving that row is fine;
             # every row's line of this spectrum moves by the same number of tallest-trace units
             ax0 = self.drag['ax']
             y = ax0.transData.inverted().transform((event.x, event.y))[1]
             d = (y - self.drag['y0'])/self.rowheight[ax0]
-            mf.Data[self.drag['ii']]['yshift'] = self.drag['orig'] + d
+            mf.Data[self.drag['ii']]['yshift'] = float(self.drag['orig'] + d)
             for ln, base in self.drag['lines']:
                 ln.set_ydata(base + d*self.rowheight[ln.axes])
+            mf.statusbar.SetStatusText(f"Y shift = {mf.Data[self.drag['ii']]['yshift']:.4g}   (hold Shift to scale)", 0)
             self.canvas.draw_idle()
         elif self.drag is not None and self.drag['key'] == 'scale':
             # Scale drag: the grabbed point follows the mouse, the line's zero (its offset) stays put.
@@ -515,11 +674,11 @@ class MatplotlibPanel(wx.Panel):
                 factor = max((y - off0)/r0, 0.01)
             else:
                 factor = np.exp(3*(y - self.drag['y0'])/self.rowheight[ax0])
-            mf.Data[ii]['scale'] = self.drag['orig']*factor
+            mf.Data[ii]['scale'] = float(self.drag['orig']*factor)
             for ln, base in self.drag['lines']:
                 off = self.lineoff[(ln.axes, ii)]
                 ln.set_ydata(off + (base - off)*factor)
-            mf.statusbar.SetStatusText(f"Scale = {mf.Data[ii]['scale']:.4g}", 0)
+            mf.statusbar.SetStatusText(f"Scale = {mf.Data[ii]['scale']:.4g}   (release Shift to shift)", 0)
             self.canvas.draw_idle()
         elif self.drag is not None and event.inaxes is not None and event.xdata is not None and event.xdata > 0:
             # Live drag: move the stored edge(s), redraw only the dragged patch / limit lines
@@ -546,8 +705,7 @@ class MatplotlibPanel(wx.Panel):
             self.canvas.draw_idle()
         elif not str(self.toolbar.mode) and event.inaxes is not None:
             h = self.hit(event)
-            if (h is None or h[2] == 'move') and any(str(ln.get_gid()).startswith('spec') and ln.contains(event)[0]
-                                                     for ln in event.inaxes.get_lines()):
+            if (h is None or h[2] == 'move') and self.spec_hits(event):
                 self.canvas.set_cursor(Cursors.RESIZE_VERTICAL)     # a spectrum line: drag up / down
             else:
                 self.canvas.set_cursor(Cursors.POINTER if h is None else
@@ -566,7 +724,8 @@ class MatplotlibPanel(wx.Panel):
     def on_press(self, event):
         """Double click on a spectrum line (any row): make it the current spectrum; elsewhere: Home view.
         Left drag on the current spectrum's markup: a region (inside = move, edge = resize) or an
-        integration limit. Drag on a spectrum line: move it up / down (Y shift); shift-drag on it: scale it.
+        integration limit. Drag on a spectrum line: move it up / down (Y shift), or scale it while Shift is held
+        (pressing / releasing Shift mid-drag switches between the two).
         Shift-drag on empty space in any row adds a region to that row's baseline."""
         mf = self.parent
         if (event.button != 1 or event.inaxes is None or event.xdata is None or str(self.toolbar.mode)
@@ -574,8 +733,7 @@ class MatplotlibPanel(wx.Panel):
             return
         if event.dblclick:
             self.drag = None             # the first click of the pair may have started one
-            hits = [ln for ln in event.inaxes.get_lines()
-                    if str(ln.get_gid()).startswith('spec') and ln.contains(event)[0]]
+            hits = self.spec_hits(event)
             # where lines overlap, prefer one that is not current yet (the current one is drawn on top)
             hits = [h for h in hits if h.get_gid() != f'spec{mf.current}'] or hits
             if hits:
@@ -591,16 +749,11 @@ class MatplotlibPanel(wx.Panel):
         if h is None or h[2] == 'move':
             # a spectrum line (topmost) under the cursor -- it beats the inside of a region:
             # vertical drag, or with shift held a scale drag
-            hits = [ln for ln in event.inaxes.get_lines()
-                    if str(ln.get_gid()).startswith('spec') and ln.contains(event)[0]]
+            hits = self.spec_hits(event)
             if hits:
-                gid = max(hits, key=lambda h: h.get_zorder()).get_gid()
-                ii = int(gid[4:])
-                scale = wx.GetKeyState(wx.WXK_SHIFT)
-                self.drag = {'key': 'scale' if scale else 'line', 'ii': ii, 'ax': event.inaxes, 'y0': event.ydata,
-                             'orig': mf.Data[ii]['scale' if scale else 'yshift'],
-                             'lines': [(ln, np.asarray(ln.get_ydata(), dtype=float).copy())
-                                       for ax in self.figure.axes for ln in ax.get_lines() if ln.get_gid() == gid]}
+                ii = int(max(hits, key=lambda h: h.get_zorder()).get_gid()[4:])
+                self.drag = None
+                self.start_line_drag('scale' if wx.GetKeyState(wx.WXK_SHIFT) else 'line', ii, event.inaxes, event.ydata)
                 return
         new = h is None
         if new:
@@ -652,8 +805,7 @@ class MatplotlibPanel(wx.Panel):
         if event.button == 3 and event.inaxes is not None and not str(self.toolbar.mode):
             h = self.hit(event)
             region = h if h is not None and h[0] != 'int' else None
-            hits = [ln for ln in event.inaxes.get_lines()
-                    if str(ln.get_gid()).startswith('spec') and ln.contains(event)[0]]
+            hits = self.spec_hits(event)
             if not hits:
                 if region is not None:
                     del mf.Data[mf.current][region[0] + 'regions'][region[1]]
@@ -662,11 +814,21 @@ class MatplotlibPanel(wx.Panel):
                 return
             # A spectrum line under the cursor (topmost wins): its colour, plus delete if inside a region
             ln = max(hits, key=lambda h: h.get_zorder())
-            dd = mf.Data[int(ln.get_gid()[4:])]
+            ii = int(ln.get_gid()[4:])
+            dd = mf.Data[ii]
             menu = wx.Menu()
             item_pick = menu.Append(wx.ID_ANY, f"Colour of '{dd['title']}'…")
             item_auto = menu.Append(wx.ID_ANY, "Default colour")
             item_auto.Enable(bool(dd['color']))
+            # display scale / Y shift back to their defaults: each alone, or both
+            menu.AppendSeparator()
+            resets = {}
+            for label, keys in ((f"Reset scale  ({dd['scale']:.4g} → 1)", ('scale',)),
+                                (f"Reset Y shift  ({dd['yshift']:.4g} → 0)", ('yshift',)),
+                                ("Reset scale and Y shift", ('scale', 'yshift'))):
+                item = menu.Append(wx.ID_ANY, label)
+                item.Enable(any(dd[k] != (1.0 if k == 'scale' else 0.0) for k in keys))
+                resets[item.GetId()] = keys
             id_del = None
             if region is not None:
                 menu.AppendSeparator()
@@ -677,6 +839,10 @@ class MatplotlibPanel(wx.Panel):
             if choice == id_del:
                 del mf.Data[mf.current][region[0] + 'regions'][region[1]]
                 mf.tabulated_panel.update_controls()
+            elif choice in resets:
+                for key in resets[choice]:
+                    dd[key] = 1.0 if key == 'scale' else 0.0
+                    mf.tabulated_panel.filelist.set_value(ii, key, dd[key])
             elif choice == id_pick:
                 cdata = wx.ColourData()
                 cdata.SetColour(wx.Colour(to_hex(ln.get_color())))
@@ -693,11 +859,12 @@ class MatplotlibPanel(wx.Panel):
         if event.button != 1 or self.drag is None:
             return
         if self.drag['key'] in ('line', 'scale'):
-            key = 'yshift' if self.drag['key'] == 'line' else 'scale'
-            ii, moved = self.drag['ii'], mf.Data[self.drag['ii']][key] != self.drag['orig']
+            ii = self.drag['ii']
+            moved = (mf.Data[ii]['yshift'], mf.Data[ii]['scale']) != self.drag['start']
             self.drag = None
             if moved:            # a plain click leaves everything as it was
-                mf.tabulated_panel.filelist.set_value(ii, key, mf.Data[ii][key])
+                for key in ('yshift', 'scale'):
+                    mf.tabulated_panel.filelist.set_value(ii, key, mf.Data[ii][key])
                 self.update_graph()
             return
         key, j, new = self.drag['key'], self.drag['j'], self.drag['new']
@@ -724,24 +891,38 @@ class MatplotlibPanel(wx.Panel):
         rows = ((['deriv'] if self.showDeriv else []) + (['abs'] if self.showAbs else [])
                 + (['dint'] if self.showDI else [])) or ['deriv']
         layout = (tuple(rows), self.xaxis)
+        gmode = self.xaxis == 'g'
         keep = layout == self.layout and len(self.figure.axes) == len(rows)
+        same_axes = (tuple(rows), self.xaxis) == self.axes_layout and len(self.figure.axes) == len(rows)
         xlim = self.figure.axes[0].get_xlim() if keep else None
-        self.figure.clear()
-        axes = [self.figure.add_subplot(len(rows), 1, 1)]
-        for kk in range(1, len(rows)):
-            axes.append(self.figure.add_subplot(len(rows), 1, kk + 1, sharex=axes[0]))
+        if same_axes:
+            # Same rows: keep the axes (building axes, ticks and spines is most of a redraw), drop the artists
+            axes = list(self.figure.axes)
+            for ax in axes:
+                legend = ax.get_legend()
+                if legend is not None:
+                    legend.remove()
+                for art in [*ax.lines, *ax.patches, *ax.texts, *ax.collections]:
+                    art.remove()
+                ax.set_autoscale_on(True)
+                ax.relim()
+        else:
+            self.figure.clear()
+            axes = [self.figure.add_subplot(len(rows), 1, 1)]
+            for kk in range(1, len(rows)):
+                axes.append(self.figure.add_subplot(len(rows), 1, kk + 1, sharex=axes[0]))
+            if gmode:
+                axes[0].invert_xaxis()       # once per axes: invert_xaxis toggles
+            self.axes_layout = layout
         self.layout = layout
         self.axrows = dict(zip(axes, rows))
         self.artists = {}
+        self.hit_cache = {}
 
-        # every spectrum (the DI readouts need them all); loaded data first, so math spectra reuse their sources
-        mf.proc_cache = {}
-        for dd in sorted(mf.Data, key=lambda d: d['math'] is not None):
-            mf.proc_cache[id(dd)] = mf.process(dd)
-        procs = [mf.proc_cache[id(dd)] for dd in mf.Data]
-        mf.proc_cache = {}
+        # every spectrum (the DI readouts need them all); unchanged ones come from the process() cache
+        mf.prune_proc_cache()
+        procs = [mf.process(dd) for dd in mf.Data]
         warnings = sorted({w for p in procs for w in p['warn']})
-        gmode = self.xaxis == 'g'
         toplot = self.xconv
         if gmode and any(dd['show'] and dd['freq'] <= 0 for dd in mf.Data):
             warnings.append("spectra without MW frequency stay on the field axis -- set 'MW Freq' in the Data tab")
@@ -760,8 +941,8 @@ class MatplotlibPanel(wx.Panel):
                 fac /= abs(p['DI'])
             facs[ii] = fac
             traces['deriv'].append((ii, toplot(p['x'], dd['freq']), p['y']*fac))
-            traces['abs'].append((ii, toplot(p['xi'], dd['freq']), (p['abs'] - p['bl2'])*fac))
-            traces['dint'].append((ii, toplot(p['xi'], dd['freq']), p['dint']*fac))
+            traces['abs'].append((ii, toplot(p['x'], dd['freq']), (p['abs'] - p['bl2'])*fac))
+            traces['dint'].append((ii, toplot(p['x'], dd['freq']), p['dint']*fac))
 
         self.rowheight = {}
         self.lineoff = {}                # (axes, spectrum index) -> vertical offset of that line, for shift-drag scaling
@@ -787,18 +968,18 @@ class MatplotlibPanel(wx.Panel):
                     ax.plot(xp, p['y0']*fac + off, color=col, lw=0.6, alpha=0.6)
                     ax.plot(xp, p['bl1']*fac + off, color='k', lw=0.8, ls=':', label='deriv. baseline')
                 if row == 'abs' and self.showBaselines and dd['bl2order'] >= 0:
-                    ax.plot(toplot(p['xi'], dd['freq']), p['abs']*fac + off, color=col, lw=0.6, alpha=0.6)
-                    ax.plot(toplot(p['xi'], dd['freq']), p['bl2']*fac + off, color='k', lw=0.8, ls=':',
+                    ax.plot(toplot(p['x'], dd['freq']), p['abs']*fac + off, color=col, lw=0.6, alpha=0.6)
+                    ax.plot(toplot(p['x'], dd['freq']), p['bl2']*fac + off, color='k', lw=0.8, ls=':',
                             label='abs. baseline')
                 if row == 'dint' and self.showBaselines and dd['bl3order'] >= 0:
-                    ax.plot(toplot(p['xi'], dd['freq']), p['dint0']*fac + off, color=col, lw=0.6, alpha=0.6)
-                    ax.plot(toplot(p['xi'], dd['freq']), p['bl3']*fac + off, color='k', lw=0.8, ls=':',
+                    ax.plot(toplot(p['x'], dd['freq']), p['dint0']*fac + off, color=col, lw=0.6, alpha=0.6)
+                    ax.plot(toplot(p['x'], dd['freq']), p['bl3']*fac + off, color='k', lw=0.8, ls=':',
                             label='DI baseline')
                 if row == 'dint':
                     # the level DI is read at (last point of the corrected double integral), with its value
-                    level = p['dint'][-1]*fac + off
+                    level = p['DI']*fac + off
                     ax.axhline(level, color=col, lw=0.8, ls='-.', alpha=0.8, gid='DIlevel')
-                    ax.annotate(f"DI = {p['DI']:.5g}", (toplot(p['xi'][-1], dd['freq']), level),
+                    ax.annotate(f"DI = {p['DI']:.5g}", (toplot(p['hi'], dd['freq']), level),
                                 xytext=(-4, 3), textcoords='offset points', ha='right', va='bottom',
                                 color=col, fontsize='small')
                 key = {'deriv': 'bl1', 'abs': 'bl2', 'dint': 'bl3'}.get(row)
@@ -813,13 +994,12 @@ class MatplotlibPanel(wx.Panel):
         for ax, row in zip(axes, rows):
             ax.set_ylabel({'deriv': "dχ''/dB", 'abs': "Absorption", 'dint': "Double integral"}[row])
         axes[-1].set_xlabel("g" if gmode else "B, mT")
-        if traces['deriv']:
-            axes[0].legend(fontsize='small', frameon=False, loc='best')
-        else:
+        if traces['deriv'] and self.showLegend:
+            # 'best' scans every point of every line for a free corner: fine for a few, slow for many
+            axes[0].legend(fontsize='small', frameon=False, loc='best' if len(traces['deriv']) <= 6 else 'upper right')
+        elif not traces['deriv']:
             axes[0].text(0.5, 0.5, "Load a spectrum from the file browser", ha='center', va='center',
                          transform=axes[0].transAxes)
-        if gmode:
-            axes[0].invert_xaxis()
         theme.style_figure(self.figure, axes)
 
         # Home = the full autoscaled view. A fixed x range (axis right-click) or a kept x-zoom limits x, and
@@ -849,6 +1029,8 @@ class MatplotlibPanel(wx.Panel):
         tp.filelist.refresh_headers()     # a colour picked on the plot shows on its swatch too
         tp.lbl_DI.SetLabel(f"DI = {procs[cur]['DI']:.6g}" if cur >= 0 else "DI = –")
         mf.statusbar.SetStatusText("; ".join(warnings) if warnings else "Ready", 0)
+        if mf.power_window is not None:      # the saturation points come from these very results
+            mf.power_window.refresh(procs)
 
 
 # --------------------------------------------------------------------------- #
@@ -866,7 +1048,8 @@ class SpectrumHeader(wx.Panel):
         super().__init__(parent, style=wx.BORDER_NONE)
         self.owner, self.ii = owner, ii
         self.hover = None
-        self.SetMinSize((-1, self.FromDIP(24)))
+        self.painted = None             # state() at the last paint
+        self.SetMinSize((self.FromDIP(80), self.FromDIP(24)))    # a small width: long titles end in '…'
         self.SetBackgroundStyle(wx.BG_STYLE_PAINT)
         self.SetCursor(wx.Cursor(wx.CURSOR_HAND))
         self.Bind(wx.EVT_PAINT, self.on_paint)
@@ -902,8 +1085,15 @@ class SpectrumHeader(wx.Panel):
         self.set_hover(self.part_at(event.GetPosition()))
         event.Skip()
 
+    def state(self):
+        """What the header shows: a repaint is needed only when this changes (see SpectrumList.refresh_headers)."""
+        dd = self.owner.mf.Data[self.ii]
+        return (dd['show'], self.owner.color(self.ii), self.owner.title(self.ii), self.ii == self.owner.mf.current,
+                theme.theme_colors()["accent"])
+
     def on_paint(self, event):
         t = theme.theme_colors()
+        self.painted = self.state()
         dd = self.owner.mf.Data[self.ii]
         w, h = self.GetClientSize()
         dc = wx.AutoBufferedPaintDC(self)
@@ -963,9 +1153,14 @@ class SpectrumHeader(wx.Panel):
         gc.SetFont(font, white)
         text = self.owner.title(self.ii)
         if gc.GetTextExtent(text)[0] > tr.width:
-            while text and gc.GetTextExtent(text + "…")[0] > tr.width:
-                text = text[:-1]
-            text += "…"
+            lo, hi = 0, len(text)           # longest prefix that fits with the ellipsis, by bisection
+            while lo < hi:
+                mid = (lo + hi + 1)//2
+                if gc.GetTextExtent(text[:mid] + "…")[0] <= tr.width:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            text = text[:lo] + "…"
         th = gc.GetTextExtent(text)[1]
         gc.DrawText(text, tr.x, (h - th)/2)
 
@@ -979,6 +1174,7 @@ class SpectrumList(scrolled.ScrolledPanel):
         self.tp = tabulated
         self.mf = tabulated.parent
         self.headers, self.grids = [], []
+        self.shown = {}
         self.open = None                # index of the expanded entry, None = all collapsed
         self.sizer = wx.BoxSizer(wx.VERTICAL)
         self.SetSizer(self.sizer)
@@ -992,54 +1188,78 @@ class SpectrumList(scrolled.ScrolledPanel):
 
     def rebuild(self):
         self.Freeze()
-        self.sizer.Clear(delete_windows=True)
-        self.headers, self.grids = [], []
-        for ii, dd in enumerate(self.mf.Data):
-            header = SpectrumHeader(self, self, ii)
-            self.sizer.Add(header, 0, wx.EXPAND | wx.TOP, 2)
-            grid = wxpg.PropertyGrid(self, style=wxpg.PG_DEFAULT_STYLE | wxpg.PG_SPLITTER_AUTO_CENTER
-                                     | wxpg.PG_HIDE_MARGIN | wxpg.PG_TOOLTIPS | wxpg.PG_NO_INTERNAL_BORDER
-                                     | wx.BORDER_NONE)
-            if not grid.GetEditorByName("SpinFloat"):
-                grid.RegisterEditor(MypgPanel.SpinCtrlDoubleEditor, "SpinFloat")
-            prop = grid.Append(wxpg.StringProperty("f.name", f"fname {ii}", value=dd['fname']))
-            grid.SetPropertyReadOnly(prop)
-            prop = grid.Append(wxpg.FloatProperty("MW Freq [GHz]", f"freq {ii}", value=dd['freq']))
-            prop.SetHelpString("Used for the g axis and for the background frequency ratio.")
-            prop = grid.Append(wxpg.FloatProperty("Scale", f"scale {ii}", value=dd['scale']))
-            grid.SetPropertyEditor(prop, "SpinFloat")
-            prop.SetAttribute(wxpg.PG_ATTR_SPINCTRL_STEP, 0.1)
-            prop.SetHelpString("Display multiplier (applied on top of the Compare normalisation).\n"
-                               "Or shift-drag the spectrum's line on the plot.")
-            prop = grid.Append(wxpg.FloatProperty("Y shift", f"yshift {ii}", value=dd['yshift']))
-            grid.SetPropertyEditor(prop, "SpinFloat")
-            prop.SetAttribute(wxpg.PG_ATTR_SPINCTRL_STEP, 0.1)
-            prop.SetHelpString("Vertical display offset, in units of the tallest trace of each plot row\n"
-                               "(display only). Or drag the spectrum's line up or down on the plot.")
-            prop = grid.Append(wxpg.StringProperty("DI", f"DI {ii}", value=""))
-            grid.SetPropertyReadOnly(prop)
-            grid.SetMinSize((-1, grid.GetRowHeight()*grid.GetRoot().GetChildCount() + 2))
-            grid.Bind(wxpg.EVT_PG_CHANGED, self.tp.on_filetree)
-            grid.Bind(wxpg.EVT_PG_SELECTED, self.tp.on_filetree_selected)
-            grid.Bind(wx.EVT_MOUSEWHEEL, self.on_wheel)    # the grid fits its rows; scroll the list instead
-            theme.theme_propgrid(grid, caption_key="accent")
-            self.sizer.Add(grid, 0, wx.EXPAND | wx.LEFT, self.FromDIP(6))
-            self.headers.append(header)
-            self.grids.append(grid)
-        self.open = self.mf.current if 0 <= self.mf.current < len(self.grids) else None
-        for ii, grid in enumerate(self.grids):
-            grid.Show(ii == self.open)
-        self.SetupScrolling(scroll_x=False, rate_y=10, scrollToTop=False)
-        self.Thaw()
+        try:
+            self.sizer.Clear(delete_windows=True)
+            self.headers, self.grids = [], []
+            self.shown = {}                 # (ii, key) -> value last put in the grid by set_value
+            for ii, dd in enumerate(self.mf.Data):
+                header = SpectrumHeader(self, self, ii)
+                self.sizer.Add(header, 0, wx.EXPAND | wx.TOP, 2)
+                # no auto-centred splitter: the names column is only as wide as its longest name (below)
+                grid = wxpg.PropertyGrid(self, style=wxpg.PG_DEFAULT_STYLE
+                                         | wxpg.PG_HIDE_MARGIN | wxpg.PG_TOOLTIPS | wxpg.PG_NO_INTERNAL_BORDER
+                                         | wx.BORDER_NONE)
+                if not grid.GetEditorByName("SpinFloat"):
+                    grid.RegisterEditor(MypgPanel.SpinCtrlDoubleEditor, "SpinFloat")
+                prop = grid.Append(wxpg.StringProperty("f.name", f"fname {ii}", value=dd['fname']))
+                grid.SetPropertyReadOnly(prop)
+                prop = grid.Append(wxpg.FloatProperty("MW Freq [GHz]", f"freq {ii}", value=dd['freq']))
+                prop.SetHelpString("Used for the g axis and for the background frequency ratio.")
+                prop = grid.Append(wxpg.FloatProperty("MW power [mW]", f"power {ii}", value=dd['power']))
+                prop.SetHelpString("Microwave power from the file header; 0 means the file states none.\n"
+                                   "Used by the power saturation window.")
+                prop = grid.Append(wxpg.FloatProperty("Scale", f"scale {ii}", value=dd['scale']))
+                grid.SetPropertyEditor(prop, "SpinFloat")
+                prop.SetAttribute(wxpg.PG_ATTR_SPINCTRL_STEP, 0.1)
+                prop.SetHelpString("Display multiplier (applied on top of the Compare normalisation).\n"
+                                   "Or shift-drag the spectrum's line on the plot.")
+                prop = grid.Append(wxpg.FloatProperty("Y shift", f"yshift {ii}", value=dd['yshift']))
+                grid.SetPropertyEditor(prop, "SpinFloat")
+                prop.SetAttribute(wxpg.PG_ATTR_SPINCTRL_STEP, 0.1)
+                prop.SetHelpString("Vertical display offset, in units of the tallest trace of each plot row\n"
+                                   "(display only). Or drag the spectrum's line up or down on the plot.")
+                prop = grid.Append(wxpg.StringProperty("DI", f"DI {ii}", value=""))
+                grid.SetPropertyReadOnly(prop)
+                # a small min width: a long file name must not widen the grid past the list (no x scrolling),
+                # which would cut off the spin arrows and the headers' x buttons
+                grid.SetMinSize((self.FromDIP(80), grid.GetRowHeight()*grid.GetRoot().GetChildCount() + 2))
+                grid.Bind(wxpg.EVT_PG_CHANGED, self.tp.on_filetree)
+                grid.Bind(wxpg.EVT_PG_SELECTED, self.tp.on_filetree_selected)
+                grid.Bind(wx.EVT_MOUSEWHEEL, self.on_wheel)    # the grid fits its rows; scroll the list instead
+                theme.theme_propgrid(grid, caption_key="accent")
+                # names column as wide as its longest name plus a little air; the values get the rest
+                names = [grid.GetTextExtent(p.GetLabel())[0] for p in grid.Properties]
+                grid.names_width = max(names, default=0) + self.FromDIP(14)
+                grid.Bind(wx.EVT_SIZE, self.on_grid_size)     # set once the grid has a width: 0 would clamp it
+                self.sizer.Add(grid, 0, wx.EXPAND | wx.LEFT, self.FromDIP(6))
+                self.headers.append(header)
+                self.grids.append(grid)
+                self.shown.update({(ii, key): dd[key] for key in ('freq', 'scale', 'yshift')})
+            self.open = self.mf.current if 0 <= self.mf.current < len(self.grids) else None
+            for ii, grid in enumerate(self.grids):
+                grid.Show(ii == self.open)
+            self.SetupScrolling(scroll_x=False, rate_y=10, scrollToTop=False)
+        finally:
+            self.Thaw()          # never leave the list frozen: it would stop repainting for good
+
+    def on_grid_size(self, event):
+        """Keep a spectrum grid's names column at its names' width, whatever the grid's width."""
+        grid = event.GetEventObject()
+        event.Skip()
+        width = min(grid.names_width, max(event.GetSize().width - grid.FromDIP(40), 0))
+        if width > 0 and grid.GetSplitterPosition() != width:
+            wx.CallAfter(lambda: grid and grid.SetSplitterPosition(width))   # after the grid's own resize handling
 
     def expand(self, ii):
         """Open entry ii (None: none) and close the others."""
         self.open = ii
         self.Freeze()
-        for jj, grid in enumerate(self.grids):
-            grid.Show(jj == ii)
-        self.SetupScrolling(scroll_x=False, rate_y=10, scrollToTop=False)
-        self.Thaw()
+        try:
+            for jj, grid in enumerate(self.grids):
+                grid.Show(jj == ii)
+            self.SetupScrolling(scroll_x=False, rate_y=10, scrollToTop=False)
+        finally:
+            self.Thaw()              # never leave the list frozen: it would stop repainting for good
         if ii is not None:
             self.ScrollChildIntoView(self.headers[ii])
 
@@ -1048,18 +1268,21 @@ class SpectrumList(scrolled.ScrolledPanel):
             self.expand(ii)
         self.refresh_headers()
 
-    def refresh_headers(self):
+    def refresh_headers(self, force=False):
+        """Repaint the headers whose look changed (all of them with force, e.g. after a theme change)."""
         for header in self.headers:
-            header.Refresh()
+            if force or header.painted != header.state():
+                header.Refresh()
 
     def set_value(self, ii, key, value):
-        if 0 <= ii < len(self.grids):
+        if 0 <= ii < len(self.grids) and self.shown.get((ii, key)) != value:
+            self.shown[(ii, key)] = value       # setting a property repaints its grid: only on a change
             self.grids[ii].SetPropertyValue(f"{key} {ii}", value)
 
     def apply_theme(self):
         for grid in self.grids:
             theme.theme_propgrid(grid, caption_key="accent")
-        self.refresh_headers()
+        self.refresh_headers(force=True)
 
     def on_wheel(self, event):
         lines = -event.GetWheelRotation()/event.GetWheelDelta()*event.GetLinesPerAction()
@@ -1228,7 +1451,7 @@ class TabulatedPanel(wx.Panel):
         self.lbl_lockin0 = self.btn_lockin0 = None
         for key, label, info in (
                 ('lockin', "Lock-in (modulation) phase θ",
-                 "Magnettech XML and Quad-detect enabled Bruker DSC"),
+                 "Magnettech XML only (needs its sin/cos lock-in traces)"),
                 ('phase', "Absorption / dispersion phase φ",
                  "Hilbert transform of signal (H[s]):\n"
                  "   y = s·cos φ − H[s]·sin φ\n")):
@@ -1421,7 +1644,10 @@ class TabulatedPanel(wx.Panel):
         sizer.Add(row_cur, 0, wx.EXPAND | wx.ALL, 4)
         sizer.Add(self.nb, 0, wx.EXPAND)
         sizer.Add(self.nb_book, 1, wx.EXPAND)
-        self.SetSizer(sizer)
+        # a gap before the [>] collapse bar, so the arrows of the spin boxes at the right edge stay clear of it
+        outer = wx.BoxSizer(wx.HORIZONTAL)
+        outer.Add(sizer, 1, wx.EXPAND | wx.RIGHT, self.FromDIP(6))
+        self.SetSizer(outer)
 
     # ------------------------------------------------------------------
     def update_filelist(self):
@@ -1529,9 +1755,11 @@ class TabulatedPanel(wx.Panel):
                                              for s, t in mm['refs'].items()))
             try:
                 consts = mf.parse_expr(mm['expr'])[2]
-            except (SyntaxError, ValueError):
+            except (SyntaxError, ValueError) as fault:
+                print(f"[pyCWEPR] Math expression '{mm['expr']}' of '{dd['title']}' will not parse "
+                      f"({type(fault).__name__}: {fault}); its constants are not shown")
                 consts = []
-        if (id(dd), tuple(consts)) != self.const_key:
+        if tuple(consts) != self.const_key:     # same names: keep the widgets, values follow below
             self.const_panel.DestroyChildren()
             self.const_widgets = {}
             grid = wx.FlexGridSizer(cols=4, vgap=2, hgap=4)
@@ -1562,7 +1790,7 @@ class TabulatedPanel(wx.Panel):
             self.const_panel.SetSizer(grid)
             theme.apply_theme_to_window(self.const_panel, theme.get_theme())
             self.math_panel.Layout()
-            self.const_key = (id(dd), tuple(consts))
+            self.const_key = tuple(consts)
         for c, (slider, spin, rng) in self.const_widgets.items():
             v, R = mm['params'].get(c, 1.0), mm['ranges'].get(c, 2.0)
             inc = mm.setdefault('steps', {}).get(c, 0.01)      # sessions saved before 'steps' existed
@@ -1586,6 +1814,7 @@ class TabulatedPanel(wx.Panel):
     def on_filetree(self, event):
         key, ii = event.GetPropertyName().split()
         self.parent.Data[int(ii)][key] = event.GetValue()
+        self.filelist.shown[(int(ii), key)] = event.GetValue()     # the grid shows it already
         if key == 'freq':
             self.update_controls()    # the BG ratio labels follow the frequency
         self.parent.matplotlib_panel.update_graph()
@@ -1905,6 +2134,461 @@ class TabulatedPanel(wx.Panel):
 
 
 # --------------------------------------------------------------------------- #
+# Power saturation window
+# --------------------------------------------------------------------------- #
+class PowerSaturationFrame(wx.Frame):
+    """Separate window: a signal measure of every spectrum against the square root of its MW power,
+    with a general saturation-curve fit. The points are read from the very results the main plot
+    draws, so a background, phase, baseline or integration-range change there moves them here too.
+    Display scale, Y shift and the Compare normalisation are display-only and stay out."""
+
+    # labels of the three parameters (amplitude, saturation power, exponent), in that order
+    LABELS = ("A", "P_sat, mW", "ε")
+    # the equation drawn on the Fit card, as matplotlib mathtext
+    EQUATION = r"$S = \frac{A\sqrt{P}}{\left(1 + P/P_{\mathrm{sat}}\right)^{\varepsilon}}$"
+    # parameter -> (lower bound, upper bound) of the fit and of its value box
+    LIMITS = {'A': (-1e12, 1e12), 'Psat': (1e-9, 1e9), 'eps': (0.05, 20.0)}
+
+    def __init__(self, parent, mainWindow):
+        super().__init__(parent, title="Power saturation", size=(1060, 700))
+        self.mf = mainWindow
+        self.procs = []           # process() result per spectrum, handed over by the main plot
+        self.pars = {'A': 1.0, 'Psat': 1.0, 'eps': 1.5}
+        self.fixed = {'A': False, 'Psat': False, 'eps': False}
+        self.steps = {}           # parameter -> arrow step chosen by right-clicking its value box
+        self.guessed = False      # the first non-empty point set gets starting values
+        self.measure = 'max'      # 'at' (at one field) | 'max'
+        self.trace = 'dint'       # 'deriv' | 'abs' | 'dint', the trace the measure reads
+        self.ratio = False        # y axis: signal/sqrt(P) instead of signal
+        self.logscale = {'x': False, 'y': False}
+        self.ax = None
+
+        splitter = wx.SplitterWindow(self, style=wx.SP_3D | wx.SP_LIVE_UPDATE)
+        splitter.SetMinimumPaneSize(140)
+        left = scrolled.ScrolledPanel(splitter, style=wx.BORDER_NONE)
+        right = wx.Panel(splitter)
+        cards = wx.BoxSizer(wx.VERTICAL)
+
+        # ---------------- Signal card: which trace, and what is read off it
+        card = theme.Card(left, "Signal")
+        self.seg_trace = SegmentedPill(card, ["Deriv.", "Absorp.", "Double int."])
+        self.seg_trace.SetSelection(2)
+        self.seg_trace.SetToolTip("The processed trace the measure reads: the derivative,\n"
+                                  "the absorption (1st integral) or the double integral.\n"
+                                  "Max of the double integral is the DI of a curve that rises to a plateau.")
+        self.seg_measure = SegmentedPill(card, ["At field", "Max"])
+        self.seg_measure.SetSelection(1)
+        self.seg_measure.SetToolTip("At field: the trace's value at the field below\n"
+                                    "Max: the largest value of the trace")
+        for label, seg in (("Trace:", self.seg_trace), ("Measure:", self.seg_measure)):
+            seg.Bind(wx.EVT_RADIOBOX, self.on_signal)
+            row = wx.BoxSizer(wx.HORIZONTAL)
+            row.Add(wx.StaticText(card, label=label, size=(60, -1)), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+            row.Add(seg, 1, wx.EXPAND)
+            card.body.Add(row, 0, wx.EXPAND | wx.ALL, 3)
+        row = wx.BoxSizer(wx.HORIZONTAL)
+        self.lbl_field = wx.StaticText(card, label="Field, mT:", size=(60, -1))
+        row.Add(self.lbl_field, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        self.spin_field = wx.SpinCtrlDouble(card, min=-1e6, max=1e6, inc=0.1, initial=0)
+        self.spin_field.SetDigits(3)
+        self.spin_field.SetToolTip("The field 'At field' reads the trace at; spectra that do not reach it stay out.\n"
+                                   "Right-click to set the arrow step.")
+        self.spin_field.Bind(wx.EVT_SPINCTRLDOUBLE, self.on_signal)
+        theme.bind_spin_enter(self.spin_field, self.on_signal)
+        for evt in (wx.EVT_CONTEXT_MENU, wx.EVT_RIGHT_DOWN):
+            spin_steps = (0.001, 0.01, 0.1, 1, 10, 100)
+            self.spin_field.Bind(evt, lambda e: self.mf.tabulated_panel.on_step_menu(
+                self.spin_field, spin_steps, 3))
+        row.Add(self.spin_field, 1, wx.EXPAND)
+        self.lbl_field.Enable(False)        # 'Max' is the measure to start with, and it reads no field
+        self.spin_field.Enable(False)
+        card.body.Add(row, 0, wx.EXPAND | wx.ALL, 3)
+        cards.Add(card, 0, wx.EXPAND | wx.ALL, 5)
+
+        # ---------------- Plot card
+        card = theme.Card(left, "Plot")
+        self.seg_yaxis = SegmentedPill(card, ["S", "S / √P"])
+        self.seg_yaxis.SetToolTip("S vs √P rises and then bends over;\n"
+                                  "S/√P vs √P is flat until saturation sets in and then falls.")
+        self.seg_yaxis.Bind(wx.EVT_RADIOBOX, self.on_signal)
+        row = wx.BoxSizer(wx.HORIZONTAL)
+        row.Add(wx.StaticText(card, label="Y axis:", size=(60, -1)), 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 4)
+        row.Add(self.seg_yaxis, 1, wx.EXPAND)
+        card.body.Add(row, 0, wx.EXPAND | wx.ALL, 3)
+        self.chk_grid = PillCheckBox(card, "Grid")
+        self.chk_grid.SetValue(True)
+        self.chk_grid.SetToolTip("Axes grid, on both scales.")
+        self.chk_grid.Bind(wx.EVT_CHECKBOX, lambda e: self.update_graph())
+        card.body.Add(self.chk_grid, 0, wx.ALL, 3)
+        cards.Add(card, 0, wx.EXPAND | wx.ALL, 5)
+
+        # ---------------- Fit card: the equation, one row per parameter, then the two fit buttons
+        card = theme.Card(left, "Saturation fit")
+        self.bmp_equation = wx.StaticBitmap(card, bitmap=self.equation_bitmap())
+        self.bmp_equation.SetToolTip("P_sat is the scale power of the saturation, ε the saturation exponent:\n"
+                                     "1.5 for a homogeneously broadened line, 0.5 for a fully inhomogeneous one.\n"
+                                     "The half-saturation power follows as P½ = P_sat·(2^(1/ε) − 1).")
+        card.body.Add(self.bmp_equation, 0, wx.ALIGN_CENTER_HORIZONTAL | wx.ALL, 6)
+        grid = wx.FlexGridSizer(cols=3, vgap=2, hgap=6)
+        grid.AddGrowableCol(1)
+        for label in ("", "value", ""):
+            grid.Add(wx.StaticText(card, label=label), 0, wx.ALIGN_CENTER_VERTICAL)
+        self.param_widgets = {}
+        for key, label in zip(('A', 'Psat', 'eps'), self.LABELS):
+            grid.Add(wx.StaticText(card, label=label, size=(58, -1)), 0, wx.ALIGN_CENTER_VERTICAL)
+            spin = wx.SpinCtrlDouble(card, min=self.LIMITS[key][0], max=self.LIMITS[key][1],
+                                     inc=0.1, initial=self.pars[key], size=(110, -1))
+            spin.SetDigits(4)
+            spin.SetToolTip("Type a value, or step it with the arrows, to fit by hand;\n"
+                            "the curve follows at once. The arrow step is about 1% of the value\n"
+                            "until you set one by right-clicking.")
+            spin.Bind(wx.EVT_SPINCTRLDOUBLE, lambda e, k=key: self.on_param(k, 'value'))
+            theme.bind_spin_enter(spin, lambda k=key: self.on_param(k, 'value'))
+            for evt in (wx.EVT_CONTEXT_MENU, wx.EVT_RIGHT_DOWN):
+                spin.Bind(evt, lambda e, s=spin, k=key: self.on_step(k, s))
+            fix = PillCheckBox(card, "fix")
+            fix.SetToolTip("Hold this parameter at its value; the automatic fit leaves it alone.")
+            fix.Bind(wx.EVT_CHECKBOX, lambda e, k=key: self.on_param(k, 'fix'))
+            grid.Add(spin, 0, wx.EXPAND | wx.ALIGN_CENTER_VERTICAL)
+            grid.Add(fix, 0, wx.ALIGN_CENTER_VERTICAL)
+            self.param_widgets[key] = (spin, fix)
+        card.body.Add(grid, 0, wx.EXPAND | wx.ALL, 3)
+        row = wx.BoxSizer(wx.HORIZONTAL)
+        self.btn_fit = PillButton(card, "Fit", color_key="pill_load", draw_badge=theme.draw_play_badge)
+        self.btn_fit.SetToolTip("Least-squares fit of the free parameters to the shown points.\n"
+                                "It works on S/√P, whichever y axis is drawn, so the unsaturated\n"
+                                "points carry the amplitude A.")
+        self.btn_fit.Bind(wx.EVT_BUTTON, self.on_fit)
+        row.Add(self.btn_fit, 1, wx.EXPAND | wx.ALL, 2)
+        self.btn_guess = PillButton(card, "Guess", color_key="pill_calm")
+        self.btn_guess.SetToolTip("Starting values read off the points: A from the least saturated one,\n"
+                                  "the saturation power where S/√P has dropped by half, ε = 1.5.")
+        self.btn_guess.Bind(wx.EVT_BUTTON, lambda e: (self.guess(), self.push_params(), self.update_graph()))
+        row.Add(self.btn_guess, 1, wx.EXPAND | wx.ALL, 2)
+        card.body.Add(row, 0, wx.EXPAND)
+        self.lbl_stat = wx.StaticText(card, label="")
+        card.body.Add(self.lbl_stat, 0, wx.EXPAND | wx.ALL, 3)
+        cards.Add(card, 0, wx.EXPAND | wx.ALL, 5)
+
+        self.btn_save = PillButton(left, "Save CSV", color_key="pill_calm", draw_badge=theme.draw_textlines_badge)
+        self.btn_save.SetToolTip("Save the points and the fitted curve as a comma-separated file\n"
+                                 "that Excel, Origin, pandas or pyCWEPR can read.")
+        self.btn_save.Bind(wx.EVT_BUTTON, self.on_save)
+        cards.Add(self.btn_save, 0, wx.EXPAND | wx.ALL, 6)
+        left.SetSizer(cards)
+        left.SetupScrolling(scroll_x=True, rate_y=10)    # a narrow pane scrolls instead of clipping a card
+        left.Scroll(0, 0)       # ticking the list moves the focus, which would otherwise scroll the first card off
+
+        self.figure = Figure(figsize=(2, 2), dpi=100, layout='constrained')
+        self.canvas = FigureCanvasWxAgg(right, -1, self.figure)
+        self.canvas.mpl_connect('button_release_event', self.on_axis_menu)
+        self.toolbar = theme.ThemedNavigationToolbar(self.canvas)
+        self.toolbar.Realize()
+        box = wx.BoxSizer(wx.VERTICAL)
+        box.Add(self.canvas, 1, wx.EXPAND)
+        box.Add(self.toolbar, 0, wx.LEFT | wx.EXPAND)
+        right.SetSizer(box)
+        self.toolbar.update()
+
+        self.statusbar = theme.StatusStrip(self, widths=[-1, 360])
+        self.statusbar.SetStatusText("Ready", 0)
+        self.canvas.mpl_connect('motion_notify_event', self.on_mouse_move)
+        self.canvas.mpl_connect('figure_leave_event', lambda e: self.statusbar.SetStatusText("", 1))
+
+        splitter.SplitVertically(left, right, sashPosition=400)
+        splitter.SetSashGravity(0)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(splitter, 1, wx.EXPAND)
+        sizer.Add(self.statusbar, 0, wx.EXPAND)
+        self.SetSizer(sizer)
+        self.redraw_debouncer = theme.CanvasRedrawDebouncer(self.canvas)
+        self.Bind(wx.EVT_SIZE, self.redraw_debouncer.on_size)
+        self.Bind(wx.EVT_CLOSE, lambda e: (setattr(self.mf, 'power_window', None), self.Destroy()))
+        self.apply_theme()
+
+    # -----------------------------------------------------------------------
+    def apply_theme(self):
+        theme.apply_theme_to_window(self, theme.get_theme())
+        self.bmp_equation.SetBitmap(self.equation_bitmap())     # it is drawn in the theme's text colour
+        theme.style_figure(self.figure, self.figure.axes)
+        self.canvas.draw_idle()
+        self.Refresh()
+
+    def equation_bitmap(self):
+        """The model's equation as a picture: matplotlib mathtext in the theme's text colour on the
+        card's own colour, drawn at this window's DPI so it stays sharp and follows a theme switch.
+        Painted opaque, because a static bitmap composites its alpha against white on MSW."""
+        t = theme.theme_colors()
+        scale = self.GetDPIScaleFactor()
+        figure = Figure(figsize=(3, 0.6), dpi=round(96*scale), facecolor=t["card_bg"])
+        figure.text(0.5, 0.5, self.EQUATION, color=t["text"], fontsize=15,
+                    ha='center', va='center')
+        buf = io.BytesIO()
+        figure.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.08, facecolor=t["card_bg"])
+        buf.seek(0)
+        bitmap = wx.Bitmap(wx.Image(buf, wx.BITMAP_TYPE_PNG))
+        bitmap.SetScaleFactor(scale)
+        return bitmap
+
+    def model(self, P, pars):
+        """Signal of the saturation curve at power P [mW]: A·√P/(1 + P/P_sat)^ε, the Portis/Castner
+        form. ε is the saturation exponent, 1.5 for a homogeneously broadened line and 0.5 for a
+        fully inhomogeneous one. The half-saturation power follows as P½ = P_sat·(2^(1/ε) − 1)."""
+        A, P0, eps = pars['A'], max(pars['Psat'], 1e-12), max(pars['eps'], 1e-3)
+        return A*np.sqrt(P)/(1 + P/P0)**eps
+
+    def half_power(self):
+        """The power at which the signal is half of the unsaturated A·√P, from the fitted parameters."""
+        return self.pars['Psat']*(2**(1/max(self.pars['eps'], 1e-3)) - 1)
+
+    def signal_name(self):
+        """What the signal is, for the y axis label and the saved file."""
+        trace = {'deriv': "derivative", 'abs': "absorption", 'dint': "double integral"}[self.trace]
+        if self.measure == 'at':
+            return f"{trace} at {self.spin_field.GetValue():g} mT"
+        return f"max of the {trace}"
+
+    def points(self):
+        """(spectrum indices, power [mW], signal, warnings) of the spectra the main window shows.
+        Hiding a spectrum there takes its point out of the plot and the fit."""
+        mf = self.mf
+        idx, P, S, warn, nopower = [], [], [], [], 0
+        B0 = self.spin_field.GetValue()
+        for ii, (dd, p) in enumerate(zip(mf.Data, self.procs)):
+            if not dd['show']:
+                continue
+            if dd['power'] <= 0:
+                nopower += 1
+                continue
+            x, y = ((p['x'], p['y']) if self.trace == 'deriv' else
+                    (p['x'], p['abs'] - p['bl2']) if self.trace == 'abs' else (p['x'], p['dint']))
+            if self.trace != 'deriv':
+                # the integrals cover the whole sweep; the measure reads them inside the integration range
+                inside = (x >= p['lo']) & (x <= p['hi'])
+                x, y = x[inside], y[inside]
+            if self.measure == 'max':
+                value = float(np.max(y))
+            elif x[0] <= B0 <= x[-1]:
+                value = float(np.interp(B0, x, y))
+            else:
+                warn.append(f"'{dd['title']}' does not reach {B0:g} mT")
+                continue
+            idx.append(ii)
+            P.append(float(dd['power']))
+            S.append(float(value))
+        if nopower:
+            warn.append(f"{nopower} shown spectra state no MW power (0) and stay out")
+        return idx, np.array(P), np.array(S), warn
+
+    def guess(self):
+        """Starting values: A from the least saturated point, and the power where S/√P has halved
+        as P½, converted to P_sat with ε = 1.5 (homogeneous)."""
+        P, S = self.points()[1:3]
+        if P.size == 0:
+            return
+        order = np.argsort(P)
+        ratio = (S/np.sqrt(P))[order]
+        below = np.abs(ratio) <= 0.5*abs(ratio[0])
+        half = float(P[order][below][0] if below.any() else P.max())
+        self.pars = {'A': float(ratio[0]), 'eps': 1.5, 'Psat': half/(2**(1/1.5) - 1)}
+
+    def push_params(self):
+        """Parameter values into their boxes, with decimals and an arrow step that suit the magnitude."""
+        for key, (spin, fix) in self.param_widgets.items():
+            v = self.pars[key]
+            step = self.steps.get(key) or (10.0**(np.floor(np.log10(abs(v))) - 2) if v else 0.01)
+            # never so few decimals that a small value could not be typed into the same box
+            spin.SetDigits(max(int(np.clip(4 - np.floor(np.log10(abs(v))) if v else 4, 2, 12)),
+                               int(np.ceil(-np.log10(step)))))
+            spin.SetIncrement(float(step))
+            spin.SetValue(v)
+            fix.SetValue(self.fixed[key])
+
+    def refresh(self, procs):
+        """Freshly processed spectra from the main window: new points, and a redraw."""
+        mf = self.mf
+        self.procs = procs
+        if self.spin_field.GetValue() == 0 and mf.Data:
+            x = mf.Data[max(mf.current, 0)]['ax']['x']
+            self.spin_field.SetValue(0.5*(float(x[0]) + float(x[-1])))
+        if not self.guessed and self.points()[1].size:
+            self.guess()
+            self.push_params()
+            self.guessed = True
+        self.update_graph()
+
+    def update_graph(self):
+        P, S, warn = self.points()[1:]
+        self.figure.clear()
+        ax = self.figure.add_subplot(1, 1, 1)
+        self.ax = ax
+        if P.size:
+            root = np.sqrt(P)
+            ax.plot(root, S/root if self.ratio else S, 'o', ms=7, ls='none',
+                    color=theme.theme_colors()["accent"], label="points")
+            # the model over the measured range, a little beyond it on both sides
+            fine = np.logspace(np.log10(P.min()) - 0.4, np.log10(P.max()) + 0.4, 400)
+            curve = self.model(fine, self.pars)
+            ax.plot(np.sqrt(fine), curve/np.sqrt(fine) if self.ratio else curve, lw=1.3,
+                    color=theme.theme_colors()["ax_fg"], label="saturation fit")
+            # in the space the fit works in, S/sqrt(P), whichever y axis is drawn
+            ratio = S/root
+            resid = ratio - self.model(P, self.pars)/root
+            span = float(np.sum((ratio - ratio.mean())**2))
+            r2 = 1 - float(np.sum(resid**2))/span if span > 0 else np.nan
+            self.lbl_stat.SetLabel(f"{P.size} points    RMSD = {np.sqrt(np.mean(resid**2)):.4g}  (on S/√P)\n"
+                                   f"R² = {r2:.5f}\n"
+                                   f"P½ = {self.half_power():.6g} mW   (= P_sat·(2^(1/ε) − 1))")
+        else:
+            self.lbl_stat.SetLabel("No points: show a spectrum that states its MW power")
+        ax.set_xlabel(r"$\sqrt{P}$,  $\sqrt{\mathrm{mW}}$")
+        ax.set_ylabel((r"signal / $\sqrt{P}$" if self.ratio else "signal") + f"  ({self.signal_name()})")
+        ax.set_xscale('log' if self.logscale['x'] else 'linear')
+        ax.set_yscale('log' if self.logscale['y'] else 'linear')
+        ax.grid(False)          # matplotlib turns the grid back on if line properties come with False
+        if self.chk_grid.GetValue():
+            ax.grid(True, which='both', lw=0.5, alpha=0.4)
+        if P.size:
+            ax.legend(fontsize='small', frameon=False, loc='best')
+        else:
+            ax.text(0.5, 0.5, "No shown spectrum states an MW power", ha='center', va='center',
+                    transform=ax.transAxes)
+        theme.style_figure(self.figure, [ax])
+        self.toolbar.update()
+        self.canvas.draw_idle()
+        self.statusbar.SetStatusText("; ".join(warn) if warn else "Ready", 0)
+        self.Layout()
+
+    # -----------------------------------------------------------------------
+    def on_mouse_move(self, event):
+        """Cursor readout: the x axis is √P, so the power itself is shown beside it."""
+        if event.inaxes is None or event.xdata is None:
+            self.statusbar.SetStatusText("", 1)
+            return
+        power = event.xdata**2 if event.xdata > 0 else 0.0
+        self.statusbar.SetStatusText(f"√P = {event.xdata:.4g}   P = {power:.4g} mW   "
+                                     f"y = {event.ydata:.6g}", 1)
+
+    def on_step(self, key, spin):
+        """Right-click on a parameter's value box: its arrow step, which then survives a fit."""
+        self.mf.tabulated_panel.on_step_menu(spin, digits=2)
+        self.steps[key] = spin.GetIncrement()
+
+    def on_signal(self, event=None):
+        self.measure = ('at', 'max')[self.seg_measure.GetSelection()]
+        self.trace = ('deriv', 'abs', 'dint')[self.seg_trace.GetSelection()]
+        self.ratio = self.seg_yaxis.GetSelection() == 1
+        self.lbl_field.Enable(self.measure == 'at')      # the field is read only by 'At field'
+        self.spin_field.Enable(self.measure == 'at')
+        self.update_graph()
+
+    def on_param(self, key, source):
+        """A parameter's value box ('value') or its fix checkbox ('fix') changed."""
+        spin, fix = self.param_widgets[key]
+        if source == 'fix':
+            self.fixed[key] = fix.GetValue()
+            return
+        self.pars[key] = spin.GetValue()
+        self.update_graph()
+
+    def on_fit(self, event):
+        """Least-squares fit of the free parameters to the ticked points, on the signal itself."""
+        P, S = self.points()[1:3]
+        free = [k for k in ('A', 'Psat', 'eps') if not self.fixed[k]]
+        if not free:
+            self.lbl_stat.SetLabel("Every parameter is fixed: nothing to fit")
+            return
+        if P.size < len(free):
+            self.lbl_stat.SetLabel(f"{len(free)} free parameters need at least {len(free)} points")
+            return
+        # fitted on S/sqrt(P), not on S: the flat unsaturated points then carry the amplitude
+        fit = lambda p, *vals: self.model(p, dict(self.pars, **dict(zip(free, vals))))/np.sqrt(p)
+        try:
+            best = curve_fit(fit, P, S/np.sqrt(P), p0=[self.pars[k] for k in free], maxfev=20000,
+                             bounds=([self.LIMITS[k][0] for k in free], [self.LIMITS[k][1] for k in free]))[0]
+        except (RuntimeError, ValueError) as fault:
+            print(f"[pyCWEPR] The power saturation fit did not converge: {type(fault).__name__}: {fault}")
+            self.lbl_stat.SetLabel(f"Fit failed: {fault}")
+            return
+        self.pars.update(zip(free, (float(v) for v in best)))
+        self.push_params()
+        self.update_graph()
+
+    def on_axis_menu(self, event):
+        """Right click on an axis (its ticks or its label): logarithmic or linear scale for that axis."""
+        if event.button != 3 or event.inaxes is not None or str(self.toolbar.mode) or self.ax is None:
+            return
+        renderer = self.canvas.get_renderer()
+        for which, axis in (('x', self.ax.xaxis), ('y', self.ax.yaxis)):
+            bb = axis.get_tightbbox(renderer)
+            if bb is None or not bb.contains(event.x, event.y):
+                continue
+            menu = wx.Menu()
+            ids = {}
+            for name, log in (("Linear", False), ("Logarithmic", True)):
+                item = menu.AppendCheckItem(wx.ID_ANY, f"{which.upper()} axis: {name}")
+                item.Check(self.logscale[which] == log)
+                ids[item.GetId()] = log
+            choice = self.canvas.GetPopupMenuSelectionFromUser(menu)
+            menu.Destroy()
+            if choice in ids and ids[choice] != self.logscale[which]:
+                self.logscale[which] = ids[choice]
+                self.update_graph()
+            return
+
+    def on_save(self, event):
+        """Points and the model curve as a comma-separated file, the settings as '# key: value' lines."""
+        idx, P, S, _ = self.points()
+        if P.size == 0:
+            wx.MessageBox("There are no points to save.", "Save CSV", wx.OK | wx.ICON_INFORMATION)
+            return
+        with wx.FileDialog(self, "Save power saturation", defaultDir=self.mf.file_browser.path,
+                           defaultFile="power_saturation_pyCWEPR.csv",
+                           wildcard="CSV (*.csv)|*.csv|All files (*.*)|*.*",
+                           style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT) as dlg:
+            if dlg.ShowModal() == wx.ID_CANCEL:
+                return
+            pathname = dlg.GetPath()
+        fine = np.logspace(np.log10(P.min()) - 0.4, np.log10(P.max()) + 0.4, 400)
+        curve = self.model(fine, self.pars)
+        fit = self.model(P, self.pars)
+        # the fit, and so its statistics, work on S/sqrt(P)
+        resid = (S - fit)/np.sqrt(P)
+        ratio = S/np.sqrt(P)
+        span = float(np.sum((ratio - ratio.mean())**2))
+        meta = [f"pyCWEPR {VERSION} power saturation", f"signal: {self.signal_name()}",
+                "model: S = A*sqrt(P)/(1 + P/P_sat)^epsilon"]
+        names = {'A': "A", 'Psat': "P_sat [mW]", 'eps': "epsilon"}    # ASCII in the file
+        meta += [f"{names[key]}: {self.pars[key]:.10g}" + ("  (fixed)" if self.fixed[key] else "")
+                 for key in ('A', 'Psat', 'eps')]
+        meta += [f"P_half [mW]: {self.half_power():.10g}   (= P_sat*(2^(1/epsilon) - 1))",
+                 "fitted on: signal/sqrt(P)",
+                 f"RMSD: {np.sqrt(np.mean(resid**2)):.10g}",
+                 f"R2: {1 - float(np.sum(resid**2))/span if span > 0 else float('nan'):.10g}",
+                 f"points: {P.size}"]
+        cols = ["title", "P [mW]", "sqrt(P) [sqrt(mW)]", "signal", "signal/sqrt(P)", "model at this P",
+                "curve P [mW]", "curve sqrt(P)", "curve signal", "curve signal/sqrt(P)"]
+        try:
+            with open(pathname, 'w', encoding='utf-8', newline='') as f:
+                f.write("".join(f"# {line}\n" for line in meta))
+                f.write(",".join(cols) + "\n")
+                for kk in range(max(P.size, fine.size)):
+                    # two blocks side by side: the measured points, then the dense model curve
+                    cells = [""]*6
+                    if kk < P.size:
+                        cells = ['"' + self.mf.Data[idx[kk]]['title'].replace('"', "'") + '"',
+                                 f"{P[kk]:.10g}", f"{np.sqrt(P[kk]):.10g}", f"{S[kk]:.10g}",
+                                 f"{S[kk]/np.sqrt(P[kk]):.10g}", f"{fit[kk]:.10g}"]
+                    cells += [f"{fine[kk]:.10g}", f"{np.sqrt(fine[kk]):.10g}", f"{curve[kk]:.10g}",
+                              f"{curve[kk]/np.sqrt(fine[kk]):.10g}"] if kk < fine.size else [""]*4
+                    f.write(",".join(cells) + "\n")
+            self.mf.statusbar.SetStatusText(f"Power saturation saved to {pathname}", 0)
+            self.mf.file_browser.refresh_file_list(select_name=os.path.basename(pathname))
+        except OSError as fault:
+            wx.MessageBox(f"Could not write '{pathname}':\n{fault}", "Save failed", wx.OK | wx.ICON_ERROR)
+
+
+# --------------------------------------------------------------------------- #
 # Main Frame
 # --------------------------------------------------------------------------- #
 class MainFrame(wx.Frame):
@@ -1913,7 +2597,8 @@ class MainFrame(wx.Frame):
         self.Data = []
         self.BGData = []
         self.current = -1        # index in self.Data edited by the Background/Phase/Integrate tabs
-        self.proc_cache = {}     # id(dataset) -> process() result, filled only during one update_graph pass
+        self.proc_cache = {}     # id(dataset) -> (dataset, process_key, process() result)
+        self.power_window = None    # PowerSaturationFrame while it is open; fed by update_graph
         self.SetTitle(f"pyCWEPR {VERSION}")
         self.SetSize((1200, 720))
         self.theme_name = "light"
@@ -1923,8 +2608,14 @@ class MainFrame(wx.Frame):
         toolbar_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.tb_change_folder = theme.IconButton(self.top_toolbar, theme.draw_folder_icon, tooltip="Change folder…")
         self.tb_up = theme.IconButton(self.top_toolbar, theme.draw_up_icon, tooltip="Up")
+        self.tb_load_all = theme.IconButton(self.top_toolbar, theme.draw_loadall_icon,
+                                            tooltip="Load all\nLoad every file the browser lists (the filter decides which)")
         self.tb_save_session = theme.IconButton(self.top_toolbar, theme.draw_save_icon, tooltip="Save Session")
+        self.tb_power = theme.IconButton(self.top_toolbar, theme.draw_saturation_icon,
+                                         tooltip="Power saturation…\nSignal against √(MW power), with a saturation fit")
         self.tb_grid = theme.IconToggleButton(self.top_toolbar, theme.draw_grid_icon, tooltip="Axes grid")
+        self.tb_legend = theme.IconToggleButton(self.top_toolbar, theme.draw_legend_icon, value=True,
+                                                tooltip="Legend of the spectra\n(turn off when many spectra are loaded)")
         self.btn_theme_icon = theme.IconButton(self.top_toolbar, theme.draw_theme_icon, tooltip="Toggle dark mode (Ctrl+D)")
         # plot-row toggles, each icon the row's line shape: derivative, absorption peak, double-integral step
         self.tb_rows = {
@@ -1938,8 +2629,8 @@ class MainFrame(wx.Frame):
         self.tb_xaxis = theme.IconToggleButton(
             self.top_toolbar, lambda gc, w, h, color, on: theme.draw_text_icon("g" if on else "B")(gc, w, h, color),
             tooltip="X axis: field (B) or g\n(g uses each spectrum's own MW frequency)")
-        for w in (self.tb_change_folder, self.tb_up, None, self.tb_save_session, None,
-                  *self.tb_rows.values(), 'stretch', None, self.tb_xaxis, self.tb_grid, self.btn_theme_icon):
+        for w in (self.tb_change_folder, self.tb_up, self.tb_load_all, None, self.tb_save_session, None,
+                  *self.tb_rows.values(), None, self.tb_power, 'stretch', None, self.tb_xaxis, self.tb_grid, self.tb_legend, self.btn_theme_icon):
             if w is None:
                 toolbar_sizer.Add(wx.StaticLine(self.top_toolbar, style=wx.LI_VERTICAL), 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 6)
             elif isinstance(w, str):
@@ -1948,11 +2639,13 @@ class MainFrame(wx.Frame):
                 toolbar_sizer.Add(w, 0, wx.ALIGN_CENTER_VERTICAL | wx.ALL, 2)
         self.top_toolbar.SetSizer(toolbar_sizer)
         self.tb_grid.Bind(wx.EVT_TOGGLEBUTTON, self.on_toggle_grid)
+        self.tb_legend.Bind(wx.EVT_TOGGLEBUTTON, self.on_toggle_legend)
         for btn in self.tb_rows.values():
             btn.Bind(wx.EVT_TOGGLEBUTTON, self.on_toggle_rows)
         self.tb_xaxis.Bind(wx.EVT_TOGGLEBUTTON, lambda e: (
             setattr(self.matplotlib_panel, 'xaxis', 'g' if self.tb_xaxis.GetValue() else 'field'),
             self.matplotlib_panel.update_graph()))
+        self.tb_power.Bind(wx.EVT_BUTTON, self.on_power_window)
         self.btn_theme_icon.Bind(wx.EVT_BUTTON, self.on_toggle_theme)
         theme_id = wx.NewIdRef()
         self.Bind(wx.EVT_MENU, self.on_toggle_theme, id=theme_id)
@@ -2013,6 +2706,15 @@ class MainFrame(wx.Frame):
         self.theme_name = "dark" if self.theme_name == "light" else "light"
         self.apply_theme()
 
+    def on_power_window(self, event):
+        """Open the power saturation window, or raise it if it is already there."""
+        if self.power_window is None:
+            self.power_window = PowerSaturationFrame(self, self)
+            self.power_window.Show()
+        else:
+            self.power_window.Raise()
+        self.matplotlib_panel.update_graph()      # fills the new window with the current points
+
     def on_toggle_left(self, event):
         if self.splitter_main.IsSplit():
             self.left_sash = self.splitter_main.GetSashPosition()
@@ -2042,6 +2744,10 @@ class MainFrame(wx.Frame):
             ax.grid(mp.showGrid)
         mp.canvas.draw_idle()
 
+    def on_toggle_legend(self, event):
+        self.matplotlib_panel.showLegend = self.tb_legend.GetValue()
+        self.matplotlib_panel.update_graph()     # zoom is kept; no legend at all is built while off
+
     def on_toggle_rows(self, event):
         """Derivative / Absorption / Double-integral row toggles; at least one row stays on."""
         if not any(btn.GetValue() for btn in self.tb_rows.values()):
@@ -2057,6 +2763,8 @@ class MainFrame(wx.Frame):
         theme.theme_propgrid(self.tabulated_panel.bgtree, caption_key="pill_load")
         theme.style_figure(self.matplotlib_panel.figure, self.matplotlib_panel.figure.axes)
         self.matplotlib_panel.canvas.draw_idle()
+        if self.power_window is not None:
+            self.power_window.apply_theme()
         self.Refresh()
 
     def set_current(self, ii):
@@ -2071,22 +2779,20 @@ class MainFrame(wx.Frame):
         self.tabulated_panel.update_filelist()
         self.matplotlib_panel.layout = None
         self.matplotlib_panel.update_graph()
-        fb = self.file_browser
-        selected, idx = [], fb.list.GetFirstSelected()
-        while idx != -1:
-            selected.append(fb.items[fb.list.GetItemData(idx)][0])
-            idx = fb.list.GetNextSelected(idx)
-        fb.refresh_file_list(select_name=selected)
+        self.file_browser.update_markers()
 
     # -----------------------------------------------------------------------
     # Data handling
     # -----------------------------------------------------------------------
-    def loadData(self, path, BG=False):
+    def loadData(self, path, BG=False, report=True, refresh=True):
+        """Load one file. Returns None, or the exception that stopped it -- shown in a message box only
+        with `report`, so several files can collect their failures into one list.
+        refresh=False: leave the tabs / plot / browser refresh to the caller (update_everything)."""
         ext = os.path.splitext(path)[1].lower()
         try:
             if ext == '.xml':
-                self.loadXML(path, BG)
-                return
+                self.loadXML(path, BG, refresh)
+                return None
             if ext == '.csv':
                 ax, data, dsc = csvread(path)
                 if ax is None:      # not a Magnettech result: plain columns (pyCWEPR export, other programs)
@@ -2097,11 +2803,14 @@ class MainFrame(wx.Frame):
                 ax, data, dsc = Mybr.brukerread(path, return_ax=True, return_dsc=True)
             else:
                 raise ValueError(f"unsupported file type '{ext}'")
-            self.addDataset(self.newDataset(ax, data, dsc, path), BG)
+            self.addDataset(self.newDataset(ax, data, dsc, path), BG, refresh)
+            return None
         except Exception as e:
             traceback.print_exc()
-            wx.MessageBox(f"Loading '{os.path.basename(path)}' failed:\n\n{type(e).__name__}: {e}",
-                          "Cannot load", wx.OK | wx.ICON_ERROR)
+            if report:
+                wx.MessageBox(f"Loading '{os.path.basename(path)}' failed:\n\n{type(e).__name__}: {e}",
+                              "Cannot load", wx.OK | wx.ICON_ERROR)
+            return e
 
     def readASCII(self, path):
         """(ax, data, dsc) from plain delimited text: a pyCWEPR export or any numeric CSV / TXT.
@@ -2137,9 +2846,16 @@ class MainFrame(wx.Frame):
         good = np.isfinite(table[:, 0]) & np.isfinite(table[:, col])
         try:
             freq = float(dsc.get('MW frequency [GHz]', 0))
-        except ValueError:
+        except ValueError as fault:
+            print(f"[pyCWEPR] 'MW frequency [GHz]' in '{path}' is not a number ({fault}); "
+                  f"the g axis stays off for this spectrum")
             freq = 0.0
-        ax = {'x': table[good, 0], 'xlabel': names[0], 'ylabel': names[col], 'freq1': freq,
+        try:
+            power = float(dsc.get('MW power [mW]', 0))
+        except ValueError as fault:
+            print(f"[pyCWEPR] 'MW power [mW]' in '{path}' is not a number ({fault}); it stays 0")
+            power = 0.0
+        ax = {'x': table[good, 0], 'xlabel': names[0], 'ylabel': names[col], 'freq1': freq, 'mwpower': power,
               'title': dsc.get('title') or os.path.splitext(os.path.basename(path))[0]}
         return ax, table[good, col], dsc
 
@@ -2167,7 +2883,8 @@ class MainFrame(wx.Frame):
                 'data': y, 'dsc': dsc if isinstance(dsc, dict) else {},
                 'fname': os.path.basename(path), 'fullpath': path,
                 'title': str(ax.get('title') or os.path.basename(path)),
-                'freq': freq, 'show': True, 'scale': 1.0,
+                'freq': freq, 'power': float(ax.get('mwpower', 0) or 0),    # MW power [mW], 0 = the file states none
+                'show': True, 'scale': 1.0,
                 'yshift': 0.0,                    # vertical display offset, in tallest-trace units of each plot row
                 'color': '',                      # '' = automatic: C<autocolor>
                 'autocolor': -1,                  # default colour index, fixed when added (-1 = not yet)
@@ -2183,7 +2900,7 @@ class MainFrame(wx.Frame):
                 'bl3order': 0, 'bl3regions': copy.deepcopy(edges[:1]),    # double-integral baseline: left edge only
                 'intrange': [lo, hi]}
 
-    def addDataset(self, dd, BG=False):
+    def addDataset(self, dd, BG=False, refresh=True):
         target = self.BGData if BG else self.Data
         # titles identify backgrounds, so keep them unique
         base, n = dd['title'], 2
@@ -2194,7 +2911,8 @@ class MainFrame(wx.Frame):
         if not BG:
             self.assign_autocolor(dd)
             self.current = len(self.Data) - 1
-        self.update_everything()
+        if refresh:
+            self.update_everything()
 
     def assign_autocolor(self, dd):
         """Give dd the lowest default colour index no other spectrum holds; it stays with the spectrum,
@@ -2253,11 +2971,44 @@ class MainFrame(wx.Frame):
             raise ValueError("the expression uses no spectrum (s1, s2, ...)")
         return compile(tree, '<math>', 'eval'), specs, consts
 
+    def process_key(self, dd):
+        """Everything process(dd) depends on, for the result cache; None (never cached) for math spectra,
+        whose sources and constants act live. Arrays count by identity: they are replaced, never edited."""
+        if dd['math'] is not None:
+            return None
+        bgs = []
+        for b in dd['bglist']:
+            ratio, bd = self.bgratio(dd, b)
+            bgs.append((b['bgdata'], b['scale'], ratio, b['shift'],
+                        None if bd is None else (id(bd['ax']['x']), id(bd['data']))))
+        return (id(dd['ax']['x']), id(dd['data']), id(dd['quad']), dd['lockin'], dd['lockin0'], dd['phase'],
+                tuple(bgs), tuple(map(tuple, dd['bl1regions'])), dd['bl1order'],
+                tuple(map(tuple, dd['bl2regions'])), dd['bl2order'],
+                tuple(map(tuple, dd['bl3regions'])), dd['bl3order'], tuple(dd['intrange']), dd['title'])
+
     def process(self, dd):
+        """Cached _process(dd): a redraw only recomputes the spectra whose settings changed."""
+        key = self.process_key(dd)
+        hit = self.proc_cache.get(id(dd))
+        if key is not None and hit is not None and hit[0] is dd and hit[1] == key:
+            return hit[2]
+        p = self._process(dd)
+        if key is not None:
+            self.proc_cache[id(dd)] = (dd, key, p)
+        return p
+
+    def prune_proc_cache(self):
+        """Drop cached results of spectra no longer loaded."""
+        alive = {id(dd) for dd in self.Data}
+        for k in [k for k in self.proc_cache if k not in alive]:
+            del self.proc_cache[k]
+
+    def _process(self, dd):
         """[math] -> lock-in phase -> background -> derivative baseline -> phase -> 1st integral -> absorption baseline
-        -> 2nd integral -> double-integral baseline. x, raw, bg, y0 (raw-bg), bl1, y (final derivative) are on the
-        full field axis; xi, abs, bl2, dint0, bl3, dint (= dint0 - bl3) on the integration range only.
-        DI = dint[-1] (data units x mT^2)."""
+        -> 2nd integral -> double-integral baseline. Every trace is on the full field axis x, so each baseline is
+        fitted to its own regions wherever they are, independent of the integration range [lo, hi]. The integrals
+        start at lo (abs(lo) = dint0(lo) = 0, extending to both sides), and DI = dint(hi) with dint = dint0 - bl3
+        (data units x mT^2) -- the double integral over [lo, hi], corrected by the DI baseline."""
         x = dd['ax']['x']
         warn = []
         mm = dd['math']
@@ -2276,7 +3027,7 @@ class MainFrame(wx.Frame):
                     if src['math'] is not None:
                         raise ValueError(f"{s} is itself a math spectrum")
                     ratio = dd['freq']/src['freq'] if mm['align'] == 'g' and dd['freq'] > 0 and src['freq'] > 0 else 1.0
-                    ps = self.proc_cache.get(id(src)) or self.process(src)
+                    ps = self.process(src)
                     v = CubicSpline(src['ax']['x']*ratio, ps['y' if mm['stage'] == 'processed' else 'raw'],
                                     extrapolate=False)(x)
                     if np.isnan(v).any():
@@ -2305,18 +3056,20 @@ class MainFrame(wx.Frame):
         # zero-padded to 2N so the FFT-based Hilbert transform does not wrap one end into the other
         y = (np.exp(1j*np.deg2rad(dd['phase']))*hilbert(y0 - bl1, N=2*x.size)[:x.size]).real
         lo, hi = min(dd['intrange']), max(dd['intrange'])
-        m = (x >= lo) & (x <= hi)
-        if m.sum() < 3:
+        if np.count_nonzero((x >= lo) & (x <= hi)) < 3:
             warn.append(f"integration range of '{dd['title']}' holds no data -- using all")
-            m[:] = True
-        xi = x[m]
-        absn = cumulative_trapezoid(y[m], xi, initial=0)
-        bl2 = self.polybaseline(xi, absn, dd['bl2regions'], dd['bl2order'])
-        dint0 = cumulative_trapezoid(absn - bl2, xi, initial=0)
-        bl3 = self.polybaseline(xi, dint0, dd['bl3regions'], dd['bl3order'])
+            lo, hi = float(x[0]), float(x[-1])
+        lo, hi = max(lo, float(x[0])), min(hi, float(x[-1]))
+        absn = cumulative_trapezoid(y, x, initial=0)
+        absn -= np.interp(lo, x, absn)
+        bl2 = self.polybaseline(x, absn, dd['bl2regions'], dd['bl2order'])
+        dint0 = cumulative_trapezoid(absn - bl2, x, initial=0)
+        dint0 -= np.interp(lo, x, dint0)
+        bl3 = self.polybaseline(x, dint0, dd['bl3regions'], dd['bl3order'])
         dint = dint0 - bl3
-        return {'x': x, 'raw': raw, 'bg': bg, 'y0': y0, 'bl1': bl1, 'y': y, 'xi': xi, 'abs': absn, 'bl2': bl2,
-                'dint0': dint0, 'bl3': bl3, 'dint': dint, 'DI': float(dint[-1]), 'warn': warn}
+        return {'x': x, 'raw': raw, 'bg': bg, 'y0': y0, 'bl1': bl1, 'y': y, 'abs': absn, 'bl2': bl2,
+                'dint0': dint0, 'bl3': bl3, 'dint': dint, 'lo': lo, 'hi': hi,
+                'DI': float(np.interp(hi, x, dint)), 'warn': warn}
 
     # -----------------------------------------------------------------------
     # Session XML (same encoding as pyHYSCORE / pyEPR)
@@ -2334,7 +3087,7 @@ class MainFrame(wx.Frame):
                      'view': {'norm': mp.norm, 'xaxis': mp.xaxis, 'offset': float(mp.offset),
                               'showRawBG': mp.showRawBG, 'showBaselines': mp.showBaselines,
                               'showDeriv': mp.showDeriv, 'showAbs': mp.showAbs, 'showDI': mp.showDI,
-                              'showGrid': mp.showGrid,
+                              'showGrid': mp.showGrid, 'showLegend': mp.showLegend,
                               'xfix': mp.xfix, 'yfix': mp.yfix, 'current': self.current}}
 
         def create_element(parent, key, value):
@@ -2374,17 +3127,15 @@ class MainFrame(wx.Frame):
 
     def exportASCII(self):
         """Chosen traces of the current spectrum as comma-separated text: '# key: value' metadata lines,
-        one row of column names, then B [mT] and the traces. Absorption and double integral exist only
-        inside the integration range; their cells are empty outside it."""
+        one row of column names, then B [mT] and the traces. Absorption and double integral start at the
+        lower integration limit (0 there); DI is the corrected double integral at the upper one."""
         if self.current < 0:
             wx.MessageBox("Load a spectrum first.", "Export", wx.OK | wx.ICON_INFORMATION)
             return
         dd = self.Data[self.current]
         p = self.process(dd)
-        inside = np.isin(p['x'], p['xi'])
-        full = lambda v: np.where(inside, np.interp(p['x'], p['xi'], v), np.nan)    # range-only -> full axis
         traces = [("raw", p['raw']), ("background", p['bg']), ("derivative", p['y']),
-                  ("absorption", full(p['abs'] - p['bl2'])), ("double integral", full(p['dint']))]
+                  ("absorption", p['abs'] - p['bl2']), ("double integral", p['dint'])]
         with wx.MultiChoiceDialog(self, "Traces to save (field axis B [mT] is always the first column):",
                                   "Export ASCII", [name for name, _ in traces]) as dlg:
             dlg.SetSelections([2, 3, 4])
@@ -2399,7 +3150,7 @@ class MainFrame(wx.Frame):
                 return
             pathname = dlg.GetPath()
         meta = [f"pyCWEPR {VERSION} export of: {dd['title']}", f"title: {dd['title']}", f"source: {dd['fullpath']}",
-                f"MW frequency [GHz]: {dd['freq']:.9g}"]
+                f"MW frequency [GHz]: {dd['freq']:.9g}", f"MW power [mW]: {dd['power']:.9g}"]
         if dd['quad'] is not None:
             meta.append(f"lock-in phase [deg]: {dd['lockin']:g} (file {dd['lockin0']:g})")
         meta += [f"background {jj + 1}: {b['bgdata']} x {b['scale']:g}, ratio {self.bgratio(dd, b)[0]:.6f}, "
@@ -2424,13 +3175,15 @@ class MainFrame(wx.Frame):
         except OSError as e:
             wx.MessageBox(f"Could not write '{pathname}':\n{e}", "Export failed", wx.OK | wx.ICON_ERROR)
 
-    def loadXML(self, filename, BG=False):
+    def loadXML(self, filename, BG=False, refresh=True):
         """A Magnettech data XML adds its measurement(s); a pyCWEPR session replaces the workspace;
         any other session XML (pyEPR / pyHYSCORE) only contributes its 1D spectra.
         Spectra are appended as data or as backgrounds."""
         if next(ET.iterparse(filename, events=('start',)))[1].tag == 'ESRXmlFile':
             for ax, data, dsc in xmlread(filename):
-                self.addDataset(self.newDataset(ax, data, dsc, filename), BG)
+                self.addDataset(self.newDataset(ax, data, dsc, filename), BG, refresh=False)
+            if refresh:
+                self.update_everything()
             return
         result = self.load_mixed_dict_xml(filename)
         if result.get('program') == 'pyCWEPR' and not BG:
@@ -2461,6 +3214,8 @@ class MainFrame(wx.Frame):
             mp.xfix = {k: tuple(v) for k, v in (view.get('xfix') or {}).items()}
             mp.yfix = {k: tuple(v) for k, v in (view.get('yfix') or {}).items()}
             self.tb_grid.SetValue(mp.showGrid)
+            mp.showLegend = bool(view.get('showLegend', True))
+            self.tb_legend.SetValue(mp.showLegend)
             tp.seg_norm.SetSelection(('none', 'max', 'DI').index(mp.norm))
             self.tb_xaxis.SetValue(mp.xaxis == 'g')
             tp.spin_offset.SetValue(mp.offset)
@@ -2475,8 +3230,10 @@ class MainFrame(wx.Frame):
                     and np.squeeze(dd['data']).ndim == 1):
                 new = self.newDataset(dd['ax'], dd['data'], dd.get('dsc'), dd.get('fullpath') or filename)
                 new['title'] = str(dd.get('title') or new['title'])
-                self.addDataset(new, BG)
+                self.addDataset(new, BG, refresh=False)
                 n += 1
+        if n and refresh:
+            self.update_everything()
         if n == 0:
             wx.MessageBox(f"'{os.path.basename(filename)}' contains no 1D spectra.", "Nothing loaded",
                           wx.OK | wx.ICON_INFORMATION)
